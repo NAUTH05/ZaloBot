@@ -1,0 +1,193 @@
+const https = require("https");
+const { getApiDateTimeInfo, getVietnamDateInfo, toLhuQueryDate } = require("./timezone");
+
+const API_URL = "https://tapi.lhu.edu.vn/calen/auth/XemLich_LichSinhVien";
+const PAGE_SIZE = 100;
+const MAX_PAGES = 50;
+
+class LhuApiError extends Error {
+    constructor(message, userMessage = message, statusCode = null) {
+        super(message);
+        this.name = "LhuApiError";
+        this.userMessage = userMessage;
+        this.statusCode = statusCode;
+    }
+}
+
+function normalizeStudentId(value) {
+    const studentId = String(value || "").trim();
+    return /^\d{9}$/.test(studentId) ? studentId : null;
+}
+
+function postJson(urlString, body) {
+    return new Promise((resolve, reject) => {
+        const url = new URL(urlString);
+        const payload = JSON.stringify(body);
+        const request = https.request({
+            protocol: url.protocol,
+            hostname: url.hostname,
+            port: url.port || 443,
+            path: url.pathname + url.search,
+            method: "POST",
+            timeout: 15000,
+            headers: {
+                "Authorization": "Bearer ",
+                "Content-Type": "application/json; charset=utf-8",
+                "Content-Length": Buffer.byteLength(payload),
+                "Origin": "https://calen.lhu.edu.vn",
+                "Referer": "https://calen.lhu.edu.vn/xem-lich-sinh-vien",
+                "User-Agent": "ZaloBOT-LHU/1.0"
+            }
+        }, (response) => {
+            let raw = "";
+            response.setEncoding("utf8");
+            response.on("data", (chunk) => {
+                raw += chunk;
+                if (raw.length > 10 * 1024 * 1024) {
+                    request.destroy(new Error("Phản hồi API LHU quá lớn"));
+                }
+            });
+            response.on("end", () => {
+                let parsed;
+                try {
+                    parsed = raw ? JSON.parse(raw) : {};
+                } catch (_) {
+                    reject(new LhuApiError("API LHU trả dữ liệu không hợp lệ", undefined, response.statusCode));
+                    return;
+                }
+
+                if (response.statusCode < 200 || response.statusCode >= 300) {
+                    const apiMessage = parsed.Message || parsed.message;
+                    reject(new LhuApiError(
+                        apiMessage || `API LHU trả mã ${response.statusCode}`,
+                        apiMessage || "Không thể truy vấn lịch từ LHU.",
+                        response.statusCode
+                    ));
+                    return;
+                }
+                resolve(parsed);
+            });
+        });
+
+        request.on("timeout", () => request.destroy(new Error("API LHU phản hồi quá chậm")));
+        request.on("error", (error) => {
+            reject(error instanceof LhuApiError
+                ? error
+                : new LhuApiError(error.message, "Không kết nối được tới hệ thống lịch LHU."));
+        });
+        request.write(payload);
+        request.end();
+    });
+}
+
+async function fetchStudentSchedule(studentIdInput, date = new Date()) {
+    const studentId = normalizeStudentId(studentIdInput);
+    if (!studentId) {
+        throw new LhuApiError("MSSV không hợp lệ", "MSSV phải gồm đúng 9 chữ số.");
+    }
+
+    let studentName = "";
+    let semesterStart = null;
+    let semesterEnd = null;
+    let totalRecords = 0;
+    const lessons = [];
+
+    for (let pageIndex = 1; pageIndex <= MAX_PAGES; pageIndex += 1) {
+        const response = await postJson(API_URL, {
+            StudentID: studentId,
+            Ngay: toLhuQueryDate(date),
+            PageIndex: pageIndex,
+            PageSize: PAGE_SIZE
+        });
+        const data = response?.data;
+
+        if (!Array.isArray(data) || data.length < 3) {
+            throw new LhuApiError(
+                "Cấu trúc phản hồi API LHU đã thay đổi",
+                "Hệ thống lịch LHU đang trả dữ liệu không đúng định dạng."
+            );
+        }
+
+        if (pageIndex === 1) {
+            studentName = data[0]?.[0]?.HoTen || "";
+            const metadata = data[1]?.[0] || {};
+            totalRecords = Number(metadata.TotalRecord) || 0;
+            semesterStart = metadata.TuanBD || null;
+            semesterEnd = metadata.TuanKT || null;
+        }
+
+        const pageLessons = Array.isArray(data[2]) ? data[2] : [];
+        lessons.push(...pageLessons);
+        if (lessons.length >= totalRecords || pageLessons.length < PAGE_SIZE) break;
+
+        if (pageIndex === MAX_PAGES) {
+            throw new LhuApiError("Vượt quá số trang cho phép khi tải lịch LHU");
+        }
+    }
+
+    return { studentId, studentName, semesterStart, semesterEnd, totalRecords, lessons };
+}
+
+function lessonsForDate(lessons, date = new Date()) {
+    const targetDate = getVietnamDateInfo(date).dateKey;
+    return lessons
+        .filter((lesson) => getApiDateTimeInfo(lesson.ThoiGianBD)?.dateKey === targetDate)
+        .sort((left, right) => {
+            const leftTime = getApiDateTimeInfo(left.ThoiGianBD)?.hour + getApiDateTimeInfo(left.ThoiGianBD)?.minute;
+            const rightTime = getApiDateTimeInfo(right.ThoiGianBD)?.hour + getApiDateTimeInfo(right.ThoiGianBD)?.minute;
+            return String(leftTime).localeCompare(String(rightTime));
+        });
+}
+
+function lessonStatus(lesson) {
+    const status = Number(lesson.TinhTrang || 0);
+    if (status === 6) return "NGHỈ LỄ";
+    if (![0, 4, 5, 10].includes(status)) return "BÁO NGHỈ";
+    if (Number(lesson.CalenType) === 2) return "LỊCH THI";
+    return "";
+}
+
+function formatLesson(lesson, index) {
+    const start = getApiDateTimeInfo(lesson.ThoiGianBD);
+    const end = getApiDateTimeInfo(lesson.ThoiGianKT);
+    const time = start && end ? `${start.hour}:${start.minute} - ${end.hour}:${end.minute}` : "Chưa rõ giờ";
+    const status = lessonStatus(lesson);
+    const type = Number(lesson.Type) === 0 ? "Lý thuyết" : "Thực hành";
+    const location = [lesson.TenPhong, lesson.TenCoSo].filter(Boolean).join(" - ");
+
+    const lines = [
+        `${index + 1}. ${status ? `[${status}] ` : ""}${time} | ${lesson.TenMonHoc || "Chưa rõ môn"}`
+    ];
+    if (location) lines.push(`   🏫 ${location}`);
+    if (lesson.GiaoVien) lines.push(`   👨‍🏫 ${lesson.GiaoVien}`);
+    if (lesson.TenNhom) lines.push(`   👥 ${lesson.TenNhom}`);
+    if (Number(lesson.CalenType) !== 2) lines.push(`   📝 ${type}`);
+    if (lesson.OnlineLink && [0, 4, 5, 10].includes(Number(lesson.TinhTrang || 0))) {
+        lines.push(`   🔗 ${lesson.OnlineLink}`);
+    }
+    return lines.join("\n");
+}
+
+function formatDailySchedule(scheduleData, date = new Date()) {
+    const dateInfo = getVietnamDateInfo(date);
+    const lessons = lessonsForDate(scheduleData.lessons || [], date);
+    const student = scheduleData.studentName
+        ? `${scheduleData.studentName} (${scheduleData.studentId})`
+        : scheduleData.studentId;
+    const header = `📚 LỊCH HỌC HÔM NAY\n👤 ${student}\n📅 ${dateInfo.weekday}, ${dateInfo.formattedDate}`;
+
+    if (lessons.length === 0) {
+        return `${header}\n\n🌿 Hôm nay không có lịch học.`;
+    }
+    return `${header}\n\n${lessons.map(formatLesson).join("\n\n")}`;
+}
+
+module.exports = {
+    API_URL,
+    LhuApiError,
+    fetchStudentSchedule,
+    formatDailySchedule,
+    formatLesson,
+    lessonsForDate,
+    normalizeStudentId
+};

@@ -1,0 +1,16 @@
+{
+  "name": "zalo-bot-lich-hoc-lhu",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Zalo bot tra cứu và thông báo lịch học LHU",
+  "main": "main.js",
+  "scripts": {
+    "start": "node main.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.1",
+    "node-schedule": "^2.1.1",
+    "node-zalo-bot": "^0.1.6"
+  }
+}

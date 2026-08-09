@@ -1,0 +1,6 @@
+node_modules/
+.env
+credentials.json
+subscriptions.json
+subscriptions.json.tmp
+*.log
