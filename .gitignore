@@ -3,4 +3,6 @@ node_modules/
 credentials.json
 subscriptions.json
 subscriptions.json.tmp
+scheduleSnapshots.json
+scheduleSnapshots.json.tmp
 *.log

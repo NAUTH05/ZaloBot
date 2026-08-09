@@ -24,30 +24,58 @@ function getSubscription(chatId) {
     return getAllSubscriptions()[String(chatId)] || null;
 }
 
-function saveSubscription(chatId, { studentId, studentName }) {
+// /find chỉ lưu MSSV. Người dùng phải gọi /dangky để bật thông báo.
+function saveStudent(chatId, { studentId, studentName }) {
     const subscriptions = getAllSubscriptions();
-    subscriptions[String(chatId)] = {
+    const key = String(chatId);
+    const existing = subscriptions[key];
+    subscriptions[key] = {
         studentId,
         studentName: studentName || "",
+        notificationsEnabled: existing?.studentId === studentId && existing.notificationsEnabled === true,
         updatedAt: new Date().toISOString()
     };
     writeSubscriptions(subscriptions);
-    return subscriptions[String(chatId)];
+    return subscriptions[key];
 }
 
-function removeSubscription(chatId) {
+function enableNotifications(chatId, { studentId, studentName }) {
     const subscriptions = getAllSubscriptions();
     const key = String(chatId);
-    if (!subscriptions[key]) return false;
-    delete subscriptions[key];
+    subscriptions[key] = {
+        ...(subscriptions[key] || {}),
+        studentId,
+        studentName: studentName || "",
+        notificationsEnabled: true,
+        updatedAt: new Date().toISOString()
+    };
+    writeSubscriptions(subscriptions);
+    return subscriptions[key];
+}
+
+function disableNotifications(chatId) {
+    const subscriptions = getAllSubscriptions();
+    const key = String(chatId);
+    if (!subscriptions[key]?.notificationsEnabled) return false;
+    subscriptions[key].notificationsEnabled = false;
+    subscriptions[key].updatedAt = new Date().toISOString();
     writeSubscriptions(subscriptions);
     return true;
 }
 
+function getEnabledSubscriptions() {
+    return Object.fromEntries(
+        Object.entries(getAllSubscriptions())
+            .filter(([, subscription]) => subscription.notificationsEnabled === true)
+    );
+}
+
 module.exports = {
     FILE_PATH,
+    disableNotifications,
+    enableNotifications,
     getAllSubscriptions,
+    getEnabledSubscriptions,
     getSubscription,
-    removeSubscription,
-    saveSubscription
+    saveStudent
 };
