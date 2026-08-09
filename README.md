@@ -18,6 +18,10 @@ DISCORD_WEBHOOK=webhook_tuy_chon
 
 `CHAT_ID` cũ không còn được sử dụng. Mỗi cuộc trò chuyện dùng `/find [MSSV]` để lưu MSSV, sau đó dùng `/dangky` để chủ động bật thông báo.
 
+Trong nhóm chat, dữ liệu được tách theo cặp `chat.id + from.id`, vì vậy mỗi thành viên có MSSV riêng. `/lich [MSSV]` và `/lichtuan [MSSV]` luôn dùng MSSV truyền trực tiếp, không thay đổi MSSV đã lưu của người gọi.
+
+Các bản ghi `subscriptions.json` theo schema cũ chỉ có `chat.id` sẽ không được dùng sau khi cập nhật vì không thể xác định chủ sở hữu trong nhóm. Mỗi người cần chạy lại `/find [MSSV]`, sau đó `/dangky` nếu muốn nhận thông báo.
+
 ## Lệnh bot
 
 - `/find [MSSV]`: kiểm tra và lưu MSSV, không tự bật thông báo.
@@ -25,6 +29,8 @@ DISCORD_WEBHOOK=webhook_tuy_chon
 - `/dangky`: đăng ký bằng MSSV đã lưu qua `/find`.
 - `/lich [MSSV]`: xem lịch học hôm nay.
 - `/lich`: xem lịch của MSSV đã lưu.
+- `/lichtuan [MSSV]`: xem lịch từ Thứ Hai đến Chủ nhật của tuần hiện tại.
+- `/lichtuan`: xem lịch tuần của MSSV đã lưu.
 - `/huythongbao`: tắt lịch 06:00 và cảnh báo thay đổi, vẫn giữ MSSV.
 - `/time`: kiểm tra giờ Việt Nam mà bot đang dùng.
 - `/help`: xem hướng dẫn.

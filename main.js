@@ -8,7 +8,9 @@ const ZaloBot = require("node-zalo-bot");
 const {
     fetchStudentSchedule,
     formatDailySchedule,
-    normalizeStudentId
+    formatWeeklySchedule,
+    normalizeStudentId,
+    resolveStudentIdForCommand
 } = require("./lhuSchedule");
 const {
     disableNotifications,
@@ -17,6 +19,7 @@ const {
     getSubscription,
     saveStudent
 } = require("./subscriptions");
+const { getMessageContext } = require("./userContext");
 const {
     evaluateScheduleChange,
     formatScheduleChangeMessage,
@@ -121,6 +124,7 @@ bot.onText(/^\/start\s*$/i, (msg) => {
 });
 
 bot.onText(/^\/find(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
+    const context = getMessageContext(msg);
     const studentId = normalizeStudentId(getCommandArgument(match));
     if (!studentId) {
         await sendMessage(msg.chat.id, "Cú pháp: /find [MSSV]\nVí dụ: /find 123456789");
@@ -129,7 +133,7 @@ bot.onText(/^\/find(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
 
     try {
         const data = await fetchStudentSchedule(studentId);
-        const subscription = saveStudent(msg.chat.id, {
+        const subscription = saveStudent(context, {
             studentId,
             studentName: data.studentName
         });
@@ -138,8 +142,8 @@ bot.onText(/^\/find(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
             msg.chat.id,
             `✅ Đã tìm thấy ${data.studentName || "sinh viên"} (${studentId}).\n` +
             (subscription.notificationsEnabled
-                ? `MSSV đã được lưu và thông báo hiện vẫn đang bật.\n`
-                : `Bot đã lưu MSSV nhưng chưa bật thông báo.\n`) +
+                ? `MSSV đã được lưu riêng cho ${context.userDisplayName || "tài khoản Zalo này"} và thông báo vẫn đang bật.\n`
+                : `Bot đã lưu MSSV riêng cho ${context.userDisplayName || "tài khoản Zalo này"}, nhưng chưa bật thông báo.\n`) +
             `Dùng /lich để xem lịch hoặc /dangky để nhận lịch lúc 06:00 và cảnh báo khi lịch thay đổi.`
         );
     } catch (error) {
@@ -148,9 +152,10 @@ bot.onText(/^\/find(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
 }));
 
 bot.onText(/^\/dangky(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
+    const context = getMessageContext(msg);
     const argument = getCommandArgument(match);
-    const saved = getSubscription(msg.chat.id);
-    const studentId = argument ? normalizeStudentId(argument) : saved?.studentId;
+    const saved = getSubscription(context);
+    const studentId = resolveStudentIdForCommand(argument, saved?.studentId);
 
     if (!studentId) {
         await sendMessage(
@@ -166,7 +171,7 @@ bot.onText(/^\/dangky(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
         const data = await fetchStudentSchedule(studentId);
         const wasAlreadyWatched = Object.values(getEnabledSubscriptions())
             .some((subscription) => subscription.studentId === studentId);
-        enableNotifications(msg.chat.id, {
+        enableNotifications(context, {
             studentId,
             studentName: data.studentName
         });
@@ -183,9 +188,10 @@ bot.onText(/^\/dangky(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
 }));
 
 bot.onText(/^\/lich(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
+    const context = getMessageContext(msg);
     const argument = getCommandArgument(match);
-    const saved = getSubscription(msg.chat.id);
-    const studentId = argument ? normalizeStudentId(argument) : saved?.studentId;
+    const saved = getSubscription(context);
+    const studentId = resolveStudentIdForCommand(argument, saved?.studentId);
 
     if (!studentId) {
         await sendMessage(
@@ -205,8 +211,33 @@ bot.onText(/^\/lich(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
     }
 }));
 
+bot.onText(/^\/lichtuan(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
+    const context = getMessageContext(msg);
+    const argument = getCommandArgument(match);
+    const saved = getSubscription(context);
+    const studentId = resolveStudentIdForCommand(argument, saved?.studentId);
+
+    if (!studentId) {
+        await sendMessage(
+            msg.chat.id,
+            argument
+                ? "MSSV không hợp lệ. MSSV phải gồm đúng 9 chữ số."
+                : "Bạn chưa lưu MSSV. Hãy dùng /find [MSSV] hoặc /lichtuan [MSSV]."
+        );
+        return;
+    }
+
+    try {
+        const data = await fetchStudentSchedule(studentId);
+        await sendMessage(msg.chat.id, formatWeeklySchedule(data));
+    } catch (error) {
+        await sendMessage(msg.chat.id, `❌ ${friendlyError(error)}`);
+    }
+}));
+
 bot.onText(/^\/huythongbao\s*$/i, asyncCommand(async (msg) => {
-    if (disableNotifications(msg.chat.id)) {
+    const context = getMessageContext(msg);
+    if (disableNotifications(context)) {
         await sendMessage(msg.chat.id, "🔕 Đã tắt lịch 06:00 và cảnh báo thay đổi. MSSV đã lưu vẫn có thể dùng với /lich.");
     } else {
         await sendMessage(msg.chat.id, "Cuộc trò chuyện này chưa đăng ký thông báo lịch học.");
@@ -220,6 +251,8 @@ bot.onText(/^\/help\s*$/i, (msg) => {
 /dangky - Đăng ký bằng MSSV đã lưu qua /find
 /lich [MSSV] - Xem lịch học hôm nay của MSSV
 /lich - Xem lịch của MSSV đã lưu bằng /find
+/lichtuan [MSSV] - Xem lịch từ Thứ Hai đến Chủ nhật
+/lichtuan - Xem lịch tuần của MSSV đã lưu
 /huythongbao - Tắt lịch 06:00 và cảnh báo thay đổi
 /time - Xem giờ máy chủ và giờ Việt Nam
 /help - Xem hướng dẫn`;
@@ -236,8 +269,12 @@ bot.onText(/^\/time\s*$/i, (msg) => {
 schedule.scheduleJob({ rule: "0 6 * * *", tz: TIME_ZONE }, async () => {
     const subscriptions = getEnabledSubscriptions();
     const scheduleCache = new Map();
+    const sentTargets = new Set();
 
-    for (const [chatId, subscription] of Object.entries(subscriptions)) {
+    for (const subscription of Object.values(subscriptions)) {
+        const targetKey = `${subscription.chatId}::${subscription.studentId}`;
+        if (sentTargets.has(targetKey)) continue;
+        sentTargets.add(targetKey);
         try {
             let dataPromise = scheduleCache.get(subscription.studentId);
             if (!dataPromise) {
@@ -245,11 +282,11 @@ schedule.scheduleJob({ rule: "0 6 * * *", tz: TIME_ZONE }, async () => {
                 scheduleCache.set(subscription.studentId, dataPromise);
             }
             const data = await dataPromise;
-            await sendMessage(chatId, formatDailySchedule(data));
+            await sendMessage(subscription.chatId, formatDailySchedule(data));
         } catch (error) {
             logDiscord(
                 "ERROR",
-                `Không thể gửi lịch cho chat ${chatId}, MSSV ${subscription.studentId}: ${error.message}`
+                `Không thể gửi lịch cho chat ${subscription.chatId}, MSSV ${subscription.studentId}: ${error.message}`
             );
         }
     }
@@ -265,24 +302,24 @@ async function checkScheduleChanges() {
         const subscriptions = getEnabledSubscriptions();
         const subscriptionsByStudent = new Map();
 
-        for (const [chatId, subscription] of Object.entries(subscriptions)) {
-            const list = subscriptionsByStudent.get(subscription.studentId) || [];
-            list.push({ chatId, subscription });
-            subscriptionsByStudent.set(subscription.studentId, list);
+        for (const subscription of Object.values(subscriptions)) {
+            const targets = subscriptionsByStudent.get(subscription.studentId) || new Map();
+            targets.set(subscription.chatId, subscription);
+            subscriptionsByStudent.set(subscription.studentId, targets);
         }
 
-        for (const [studentId, targets] of subscriptionsByStudent.entries()) {
+        for (const [studentId, targetMap] of subscriptionsByStudent.entries()) {
             try {
                 const data = await fetchStudentSchedule(studentId);
                 const result = evaluateScheduleChange(data);
                 if (!result.confirmed) continue;
 
                 const message = formatScheduleChangeMessage(data, result.changes);
-                for (const { chatId } of targets) {
+                for (const subscription of targetMap.values()) {
                     try {
-                        await sendMessage(chatId, message);
+                        await sendMessage(subscription.chatId, message);
                     } catch (error) {
-                        logDiscord("ERROR", `Không thể gửi cảnh báo thay đổi cho chat ${chatId}: ${error.message}`);
+                        logDiscord("ERROR", `Không thể gửi cảnh báo thay đổi cho chat ${subscription.chatId}: ${error.message}`);
                     }
                 }
             } catch (error) {
@@ -299,9 +336,10 @@ schedule.scheduleJob({ rule: "5,20,35,50 * * * *", tz: TIME_ZONE }, checkSchedul
 
 bot.on("message", (msg) => {
     const text = msg.text || "[không có nội dung]";
-    const from = msg.from?.display_name || msg.chat?.id || "unknown";
+    const context = getMessageContext(msg);
+    const from = msg.from?.display_name || context.userId || "unknown";
     console.log("Tin nhắn mới:", from, "→", text);
-    logDiscord("INFO", `Tin nhắn từ ${from}: ${text}`);
+    logDiscord("INFO", `Tin nhắn từ ${from} (${context.userId}) trong chat ${context.chatId}: ${text}`);
 });
 
 bot.on("polling_error", (error) => {

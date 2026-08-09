@@ -36,6 +36,46 @@ function getVietnamDateInfo(date = new Date()) {
     };
 }
 
+function dateKeyFromCalendarDate(date) {
+    return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
+}
+
+function formatDateKey(dateKey) {
+    const [year, month, day] = dateKey.split("-");
+    return `${day}/${month}/${year}`;
+}
+
+function getVietnamWeekInfo(date = new Date()) {
+    const current = getVietnamDateInfo(date);
+    const calendarDate = new Date(`${current.dateKey}T00:00:00.000Z`);
+    const daysFromMonday = (calendarDate.getUTCDay() + 6) % 7;
+    calendarDate.setUTCDate(calendarDate.getUTCDate() - daysFromMonday);
+
+    const weekdayLabels = [
+        "Thứ Hai",
+        "Thứ Ba",
+        "Thứ Tư",
+        "Thứ Năm",
+        "Thứ Sáu",
+        "Thứ Bảy",
+        "Chủ nhật"
+    ];
+    const days = weekdayLabels.map((weekday, index) => {
+        const day = new Date(calendarDate);
+        day.setUTCDate(calendarDate.getUTCDate() + index);
+        const dateKey = dateKeyFromCalendarDate(day);
+        return { weekday, dateKey, formattedDate: formatDateKey(dateKey) };
+    });
+
+    return {
+        startDateKey: days[0].dateKey,
+        endDateKey: days[6].dateKey,
+        formattedStartDate: days[0].formattedDate,
+        formattedEndDate: days[6].formattedDate,
+        days
+    };
+}
+
 function hasExplicitTimeZone(value) {
     return /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value);
 }
@@ -77,5 +117,6 @@ module.exports = {
     TIME_ZONE,
     getApiDateTimeInfo,
     getVietnamDateInfo,
+    getVietnamWeekInfo,
     toLhuQueryDate
 };

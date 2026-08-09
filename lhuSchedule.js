@@ -1,5 +1,10 @@
 const https = require("https");
-const { getApiDateTimeInfo, getVietnamDateInfo, toLhuQueryDate } = require("./timezone");
+const {
+    getApiDateTimeInfo,
+    getVietnamDateInfo,
+    getVietnamWeekInfo,
+    toLhuQueryDate
+} = require("./timezone");
 
 const API_URL = "https://tapi.lhu.edu.vn/calen/auth/XemLich_LichSinhVien";
 const PAGE_SIZE = 100;
@@ -17,6 +22,11 @@ class LhuApiError extends Error {
 function normalizeStudentId(value) {
     const studentId = String(value || "").trim();
     return /^\d{9}$/.test(studentId) ? studentId : null;
+}
+
+function resolveStudentIdForCommand(argument, savedStudentId) {
+    const explicit = String(argument || "").trim();
+    return explicit ? normalizeStudentId(explicit) : normalizeStudentId(savedStudentId);
 }
 
 function postJson(urlString, body) {
@@ -139,6 +149,22 @@ function lessonsForDate(lessons, date = new Date()) {
         });
 }
 
+function lessonsForWeek(lessons, date = new Date()) {
+    const week = getVietnamWeekInfo(date);
+    return lessons
+        .filter((lesson) => {
+            const dateKey = getApiDateTimeInfo(lesson.ThoiGianBD)?.dateKey;
+            return dateKey && dateKey >= week.startDateKey && dateKey <= week.endDateKey;
+        })
+        .sort((left, right) => {
+            const leftInfo = getApiDateTimeInfo(left.ThoiGianBD);
+            const rightInfo = getApiDateTimeInfo(right.ThoiGianBD);
+            const leftValue = `${leftInfo?.dateKey || ""}${leftInfo?.hour || ""}${leftInfo?.minute || ""}`;
+            const rightValue = `${rightInfo?.dateKey || ""}${rightInfo?.hour || ""}${rightInfo?.minute || ""}`;
+            return leftValue.localeCompare(rightValue);
+        });
+}
+
 function lessonStatus(lesson) {
     const status = Number(lesson.TinhTrang || 0);
     if (status === 6) return "NGHỈ LỄ";
@@ -182,12 +208,38 @@ function formatDailySchedule(scheduleData, date = new Date()) {
     return `${header}\n\n${lessons.map(formatLesson).join("\n\n")}`;
 }
 
+function formatWeeklySchedule(scheduleData, date = new Date()) {
+    const week = getVietnamWeekInfo(date);
+    const lessons = lessonsForWeek(scheduleData.lessons || [], date);
+    const student = scheduleData.studentName
+        ? `${scheduleData.studentName} (${scheduleData.studentId})`
+        : scheduleData.studentId;
+    const header = `📚 LỊCH HỌC TUẦN NÀY\n👤 ${student}\n🗓 ${week.formattedStartDate} - ${week.formattedEndDate}`;
+
+    if (lessons.length === 0) {
+        return `${header}\n\n🌿 Tuần này không có lịch học.`;
+    }
+
+    const sections = week.days.map((day) => {
+        const dayLessons = lessons.filter(
+            (lesson) => getApiDateTimeInfo(lesson.ThoiGianBD)?.dateKey === day.dateKey
+        );
+        if (dayLessons.length === 0) return null;
+        return `📅 ${day.weekday.toUpperCase()}, ${day.formattedDate}\n${dayLessons.map(formatLesson).join("\n\n")}`;
+    }).filter(Boolean);
+
+    return `${header}\n\n${sections.join("\n\n────────────────\n\n")}`;
+}
+
 module.exports = {
     API_URL,
     LhuApiError,
     fetchStudentSchedule,
     formatDailySchedule,
     formatLesson,
+    formatWeeklySchedule,
     lessonsForDate,
-    normalizeStudentId
+    lessonsForWeek,
+    normalizeStudentId,
+    resolveStudentIdForCommand
 };
