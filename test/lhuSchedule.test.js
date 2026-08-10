@@ -15,6 +15,7 @@ const {
     toLhuQueryDate
 } = require("../timezone");
 const { escapeMarkdown } = require("../richText");
+const EMOJI_PATTERN = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/u;
 
 test("chuẩn hóa ngày Việt Nam tại ranh giới UTC", () => {
     const date = new Date("2026-08-08T17:00:00.000Z");
@@ -80,8 +81,9 @@ test("định dạng tin nhắn lịch học", () => {
         }]
     };
     const message = formatDailySchedule(data, new Date("2026-08-09T05:00:00Z"));
-    assert.match(message, /^# \{green\}📚 LỊCH HỌC HÔM NAY\{\/green\}/);
-    assert.match(message, /\{orange\}🗓️ 1 BUỔI HỌC\{\/orange\}/);
+    assert.match(message, /^# \{green\}\[LỊCH\] HÔM NAY\{\/green\}/);
+    assert.match(message, /\{orange\}\[1 BUỔI HỌC\]\{\/orange\}/);
+    assert.doesNotMatch(message, EMOJI_PATTERN);
     assert.match(message, /Lập trình Web/);
     assert.match(message, /07:00 - 09:15/);
     assert.match(message, /Nguyễn Văn A/);
@@ -111,13 +113,14 @@ test("định dạng và nhóm lịch học cả tuần", () => {
         ]
     };
     const message = formatWeeklySchedule(data, new Date("2026-08-09T05:00:00Z"));
-    assert.match(message, /^# \{green\}📚 LỊCH HỌC TUẦN NÀY\{\/green\}/);
+    assert.match(message, /^# \{green\}\[LỊCH\] TUẦN NÀY\{\/green\}/);
     assert.match(message, /03\/08\/2026 – 09\/08\/2026/);
     assert.match(message, /\{orange\}Tổng cộng 2 buổi học\{\/orange\}/);
     assert.match(message, /THỨ HAI/);
     assert.match(message, /CHỦ NHẬT/);
     assert.match(message, /Lập trình Web/);
     assert.match(message, /Cơ sở dữ liệu/);
+    assert.doesNotMatch(message, EMOJI_PATTERN);
 });
 
 test("escape dữ liệu động để không làm vỡ Markdown của Zalo", () => {
@@ -147,9 +150,11 @@ test("lịch trống vẫn là một tin rich text", () => {
     const weekly = formatWeeklySchedule(data, new Date("2026-08-09T05:00:00Z"));
 
     assert.match(daily, /^# \{green\}/);
-    assert.match(daily, /\{green\}🌿 Hôm nay không có lịch học\.\{\/green\}/);
+    assert.match(daily, /\{green\}\[i\] Hôm nay không có lịch học\.\{\/green\}/);
     assert.match(weekly, /^# \{green\}/);
-    assert.match(weekly, /\{green\}🌿 Tuần này không có lịch học\.\{\/green\}/);
+    assert.match(weekly, /\{green\}\[i\] Tuần này không có lịch học\.\{\/green\}/);
+    assert.doesNotMatch(daily, EMOJI_PATTERN);
+    assert.doesNotMatch(weekly, EMOJI_PATTERN);
 });
 
 test("kiểm tra định dạng MSSV", () => {

@@ -72,7 +72,7 @@ function logDiscord(level, message) {
 async function sendMessage(chatId, text, options = {}) {
     // Chia tin dài theo dòng để tránh vượt giới hạn tin nhắn của Zalo.
     const {
-        continuationHeader = "# {green}↪️ NỘI DUNG TIẾP THEO{/green}",
+        continuationHeader = "# {green}[...] NỘI DUNG TIẾP THEO{/green}",
         parse_mode = "markdown",
         ...otherOptions
     } = options;
@@ -116,11 +116,11 @@ function friendlyError(error) {
 }
 
 function formatErrorMessage(error) {
-    return `# {red}❌ KHÔNG THỂ THỰC HIỆN{/red}\n\n${escapeMarkdown(friendlyError(error))}`;
+    return `# {red}[X] KHÔNG THỂ THỰC HIỆN{/red}\n\n${escapeMarkdown(friendlyError(error))}`;
 }
 
 function formatWarningMessage(title, message) {
-    return `# {orange}⚠️ ${escapeMarkdown(title)}{/orange}\n\n${message}`;
+    return `# {orange}[!] ${escapeMarkdown(title)}{/orange}\n\n${message}`;
 }
 
 function asyncCommand(handler) {
@@ -136,10 +136,10 @@ bot.onText(/^\/start\s*$/i, (msg) => {
     const displayName = escapeMarkdown(msg.from?.display_name || "bạn");
     sendMessage(
         msg.chat.id,
-        "# {green}👋 ZALOBOT LỊCH HỌC LHU{/green}\n\n" +
+        "# {green}[BOT] LỊCH HỌC LHU{/green}\n\n" +
         `Xin chào **${displayName}**!\n\n` +
-        "> 🔎 Dùng **/find [MSSV]** để lưu mã sinh viên.\n" +
-        "> 🔔 Sau đó dùng **/dangky** để bật thông báo lịch học.\n\n" +
+        "> **Tra cứu:** Dùng **/find [MSSV]** để lưu mã sinh viên.\n" +
+        "> **Thông báo:** Sau đó dùng **/dangky** để bật thông báo lịch học.\n\n" +
         "{orange}Gõ /help để xem toàn bộ lệnh.{/orange}"
     ).catch(() => {});
 });
@@ -164,13 +164,13 @@ bot.onText(/^\/find(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
 
         await sendMessage(
             msg.chat.id,
-            "# {green}✅ ĐÃ LƯU MSSV{/green}\n\n" +
-            `👤 **${escapeMarkdown(data.studentName || "Sinh viên")}**\n` +
-            `> 🆔 **MSSV:** ${escapeMarkdown(studentId)}\n` +
-            `> 📱 **Tài khoản:** ${escapeMarkdown(context.userDisplayName || "Tài khoản Zalo này")}\n\n` +
+            "# {green}[OK] ĐÃ LƯU MSSV{/green}\n\n" +
+            `**Sinh viên:** ${escapeMarkdown(data.studentName || "Sinh viên")}\n` +
+            `> **MSSV:** ${escapeMarkdown(studentId)}\n` +
+            `> **Tài khoản:** ${escapeMarkdown(context.userDisplayName || "Tài khoản Zalo này")}\n\n` +
             (subscription.notificationsEnabled
-                ? "{green}🔔 Thông báo lịch đang được bật.{/green}\n\n"
-                : "{orange}🔕 Thông báo lịch chưa được bật.{/orange}\n\n") +
+                ? "{green}[BẬT] Thông báo lịch đang hoạt động.{/green}\n\n"
+                : "{orange}[TẮT] Thông báo lịch chưa được bật.{/orange}\n\n") +
             "> Dùng **/lich** để xem lịch hoặc **/dangky** để nhận lịch lúc 06:00."
         );
     } catch (error) {
@@ -208,11 +208,11 @@ bot.onText(/^\/dangky(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
         initializeScheduleSnapshot(data, new Date(), !wasAlreadyWatched);
         await sendMessage(
             msg.chat.id,
-            "# {green}🔔 ĐĂNG KÝ THÀNH CÔNG{/green}\n\n" +
-            `👤 **${escapeMarkdown(data.studentName || "Sinh viên")}**\n` +
-            `> 🆔 **MSSV:** ${escapeMarkdown(studentId)}\n` +
-            "> 🕐 **01:00:** Chụp lịch lần thứ nhất.\n" +
-            "> 🕕 **06:00:** Xác nhận thay đổi và gửi lịch hôm nay.\n\n" +
+            "# {green}[OK] ĐĂNG KÝ THÀNH CÔNG{/green}\n\n" +
+            `**Sinh viên:** ${escapeMarkdown(data.studentName || "Sinh viên")}\n` +
+            `> **MSSV:** ${escapeMarkdown(studentId)}\n` +
+            "> **01:00:** Chụp lịch lần thứ nhất.\n" +
+            "> **06:00:** Xác nhận thay đổi và gửi lịch hôm nay.\n\n" +
             "{orange}Chỉ thay đổi xuất hiện giống nhau ở cả hai lần mới được thông báo.{/orange}"
         );
     } catch (error) {
@@ -242,7 +242,7 @@ bot.onText(/^\/lich(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
     try {
         const data = await fetchStudentSchedule(studentId);
         await sendMessage(msg.chat.id, formatDailySchedule(data), {
-            continuationHeader: "# {green}📚 LỊCH HÔM NAY · TIẾP{/green}"
+            continuationHeader: "# {green}[LỊCH] HÔM NAY · TIẾP{/green}"
         });
     } catch (error) {
         await sendMessage(msg.chat.id, formatErrorMessage(error));
@@ -271,7 +271,7 @@ bot.onText(/^\/lichtuan(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
     try {
         const data = await fetchStudentSchedule(studentId);
         await sendMessage(msg.chat.id, formatWeeklySchedule(data), {
-            continuationHeader: "# {green}📚 LỊCH TUẦN · TIẾP{/green}"
+            continuationHeader: "# {green}[LỊCH] TUẦN · TIẾP{/green}"
         });
     } catch (error) {
         await sendMessage(msg.chat.id, formatErrorMessage(error));
@@ -283,7 +283,7 @@ bot.onText(/^\/huythongbao\s*$/i, asyncCommand(async (msg) => {
     if (disableNotifications(context)) {
         await sendMessage(
             msg.chat.id,
-            "# {orange}🔕 ĐÃ TẮT THÔNG BÁO{/orange}\n\n" +
+            "# {orange}[TẮT] ĐÃ TẮT THÔNG BÁO{/orange}\n\n" +
             "> Bot sẽ không kiểm tra lịch lúc 01:00 hoặc gửi lịch lúc 06:00.\n\n" +
             "{green}MSSV đã lưu vẫn có thể dùng với /lich và /lichtuan.{/green}"
         );
@@ -299,21 +299,21 @@ bot.onText(/^\/huythongbao\s*$/i, asyncCommand(async (msg) => {
 }));
 
 bot.onText(/^\/help\s*$/i, (msg) => {
-    const helpMessage = `# {green}🤖 HƯỚNG DẪN ZALOBOT{/green}
+    const helpMessage = `# {green}[BOT] HƯỚNG DẪN ZALOBOT{/green}
 
-## {orange}🔎 TRA CỨU LỊCH{/orange}
+## {orange}[TRA CỨU] LỊCH HỌC{/orange}
 - **/find [MSSV]** — Kiểm tra và lưu MSSV
 - **/lich [MSSV]** — Xem lịch hôm nay
 - **/lichtuan [MSSV]** — Xem lịch cả tuần
 
 > Có thể bỏ `[MSSV]` với **/lich** và **/lichtuan** sau khi đã dùng **/find**.
 
-## {orange}🔔 THÔNG BÁO{/orange}
+## {orange}[THÔNG BÁO] TỰ ĐỘNG{/orange}
 - **/dangky [MSSV]** — Bật kiểm tra 01:00 và thông báo 06:00
 - **/dangky** — Đăng ký bằng MSSV đã lưu
 - **/huythongbao** — Tắt toàn bộ thông báo tự động
 
-## {orange}⚙️ HỆ THỐNG{/orange}
+## {orange}[HỆ THỐNG] THÔNG TIN{/orange}
 - **/time** — Xem giờ máy chủ và giờ Việt Nam
 - **/help** — Xem hướng dẫn này`;
     sendMessage(msg.chat.id, helpMessage).catch(() => {});
@@ -321,11 +321,11 @@ bot.onText(/^\/help\s*$/i, (msg) => {
 
 bot.onText(/^\/time\s*$/i, (msg) => {
     const vietnam = getVietnamDateInfo();
-    const message = `# {green}🕐 THỜI GIAN HỆ THỐNG{/green}
+    const message = `# {green}[GIỜ] THỜI GIAN HỆ THỐNG{/green}
 
-> 🖥️ **Server ISO:** ${escapeMarkdown(new Date().toISOString())}
-> 🇻🇳 **Giờ Việt Nam:** ${escapeMarkdown(vietnam.formattedDateTime)}
-> 🌏 **Múi giờ bot:** ${escapeMarkdown(TIME_ZONE)}
+> **Server ISO:** ${escapeMarkdown(new Date().toISOString())}
+> **Giờ Việt Nam:** ${escapeMarkdown(vietnam.formattedDateTime)}
+> **Múi giờ bot:** ${escapeMarkdown(TIME_ZONE)}
 
 {green}Bot luôn lập lịch theo giờ Thành phố Hồ Chí Minh.{/green}`;
     sendMessage(msg.chat.id, message).catch(() => {});
@@ -377,7 +377,7 @@ async function confirmAndNotifyAtSix() {
                     for (const subscription of targetMap.values()) {
                         try {
                             await sendMessage(subscription.chatId, changeMessage, {
-                                continuationHeader: "# {red}⚠️ LỊCH HỌC THAY ĐỔI · TIẾP{/red}"
+                                continuationHeader: "# {red}[!] LỊCH HỌC THAY ĐỔI · TIẾP{/red}"
                             });
                         } catch (error) {
                             logDiscord("ERROR", `Không thể gửi cảnh báo thay đổi cho chat ${subscription.chatId}: ${error.message}`);
@@ -389,7 +389,7 @@ async function confirmAndNotifyAtSix() {
                 for (const subscription of targetMap.values()) {
                     try {
                         await sendMessage(subscription.chatId, dailyMessage, {
-                            continuationHeader: "# {green}📚 LỊCH HÔM NAY · TIẾP{/green}"
+                            continuationHeader: "# {green}[LỊCH] HÔM NAY · TIẾP{/green}"
                         });
                     } catch (error) {
                         logDiscord("ERROR", `Không thể gửi lịch 06:00 cho chat ${subscription.chatId}: ${error.message}`);

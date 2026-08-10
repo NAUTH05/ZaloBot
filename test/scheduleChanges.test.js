@@ -1,5 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const EMOJI_PATTERN = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/u;
 const {
     SNAPSHOT_SCHEMA_VERSION,
     buildScheduleSnapshot,
@@ -179,13 +180,14 @@ test("format thông báo dùng rich text, ngày dd/mm/yyyy và chỉ hiện trư
         new Date("2026-08-10T03:35:00.000Z")
     );
 
-    assert.match(message, /^# \{red\}⚠️ LỊCH HỌC CÓ THAY ĐỔI\{\/red\}/);
-    assert.match(message, /\{orange\}✏️ ĐIỀU CHỈNH · 1\{\/orange\}/);
+    assert.match(message, /^# \{red\}\[!\] LỊCH HỌC CÓ THAY ĐỔI\{\/red\}/);
+    assert.match(message, /\{orange\}\[\*\] ĐIỀU CHỈNH · 1\{\/orange\}/);
     assert.match(message, /10\/08\/2026 lúc 10:35/);
     assert.match(message, /~~10\/08\/2026~~ → \*\*11\/08\/2026\*\*/);
     assert.match(message, /Phòng:/);
     assert.doesNotMatch(message, /2026-08-11/);
     assert.doesNotMatch(message, /Giảng viên:/);
+    assert.doesNotMatch(message, EMOJI_PATTERN);
 });
 
 test("tự đặt lại baseline khi nâng schema snapshot để không báo giả", () => {

@@ -274,17 +274,17 @@ function formatLocation(lesson) {
 function formatCompactLesson(lesson, index) {
     return [
         `**${index + 1}. ${escapeMarkdown(lesson.subject || "Chưa rõ môn")}**`,
-        `> 📅 **Ngày:** ${formatDateKey(lesson.dateKey)}`,
-        `> ⏰ **Giờ:** ${escapeMarkdown(lesson.start || "?")} – ${escapeMarkdown(lesson.end || "?")}`,
-        `> 📍 **Phòng:** ${escapeMarkdown(formatLocation(lesson))}`,
-        lesson.teacher ? `> 👨‍🏫 **Giảng viên:** ${escapeMarkdown(lesson.teacher)}` : "",
-        lesson.group ? `> 👥 **Nhóm:** ${escapeMarkdown(lesson.group)}` : "",
-        `> 📌 **Trạng thái:** ${escapeMarkdown(statusLabel(lesson.status))}`
+        `> **Ngày:** ${formatDateKey(lesson.dateKey)}`,
+        `> **Giờ:** ${escapeMarkdown(lesson.start || "?")} – ${escapeMarkdown(lesson.end || "?")}`,
+        `> **Phòng:** ${escapeMarkdown(formatLocation(lesson))}`,
+        lesson.teacher ? `> **Giảng viên:** ${escapeMarkdown(lesson.teacher)}` : "",
+        lesson.group ? `> **Nhóm:** ${escapeMarkdown(lesson.group)}` : "",
+        `> **Trạng thái:** ${escapeMarkdown(statusLabel(lesson.status))}`
     ].filter(Boolean).join("\n");
 }
 
-function changedLine(icon, label, before, after) {
-    return `> ${icon} **${label}:** ~~${escapeMarkdown(before || "Chưa xác định")}~~ → **${escapeMarkdown(after || "Chưa xác định")}**`;
+function changedLine(label, before, after) {
+    return `> **${label}:** ~~${escapeMarkdown(before || "Chưa xác định")}~~ → **${escapeMarkdown(after || "Chưa xác định")}**`;
 }
 
 function formatModifiedLesson(change, index) {
@@ -296,28 +296,26 @@ function formatModifiedLesson(change, index) {
     const details = [`**${index + 1}. ${escapeMarkdown(title || "Buổi học")}**`];
 
     if (before.dateKey !== after.dateKey) {
-        details.push(changedLine("📅", "Ngày", formatDateKey(before.dateKey), formatDateKey(after.dateKey)));
+        details.push(changedLine("Ngày", formatDateKey(before.dateKey), formatDateKey(after.dateKey)));
     }
     if (before.start !== after.start || before.end !== after.end) {
         details.push(changedLine(
-            "⏰",
             "Giờ",
             `${before.start || "?"} – ${before.end || "?"}`,
             `${after.start || "?"} – ${after.end || "?"}`
         ));
     }
     if (before.room !== after.room || before.campus !== after.campus) {
-        details.push(changedLine("📍", "Phòng", formatLocation(before), formatLocation(after)));
+        details.push(changedLine("Phòng", formatLocation(before), formatLocation(after)));
     }
-    if (before.teacher !== after.teacher) details.push(changedLine("👨‍🏫", "Giảng viên", before.teacher, after.teacher));
-    if (before.group !== after.group) details.push(changedLine("👥", "Nhóm", before.group, after.group));
+    if (before.teacher !== after.teacher) details.push(changedLine("Giảng viên", before.teacher, after.teacher));
+    if (before.group !== after.group) details.push(changedLine("Nhóm", before.group, after.group));
     if (before.status !== after.status) {
-        details.push(changedLine("📌", "Trạng thái", statusLabel(before.status), statusLabel(after.status)));
+        details.push(changedLine("Trạng thái", statusLabel(before.status), statusLabel(after.status)));
     }
-    if (before.subject !== after.subject) details.push(changedLine("📘", "Môn", before.subject, after.subject));
+    if (before.subject !== after.subject) details.push(changedLine("Môn", before.subject, after.subject));
     if (before.calendarType !== after.calendarType) {
         details.push(changedLine(
-            "🗂",
             "Loại lịch",
             before.calendarType === 2 ? "Lịch thi" : "Lịch học",
             after.calendarType === 2 ? "Lịch thi" : "Lịch học"
@@ -325,14 +323,13 @@ function formatModifiedLesson(change, index) {
     }
     if (before.lessonType !== after.lessonType) {
         details.push(changedLine(
-            "📝",
             "Hình thức",
             before.lessonType === 0 ? "Lý thuyết" : "Thực hành",
             after.lessonType === 0 ? "Lý thuyết" : "Thực hành"
         ));
     }
     if (before.onlineLink !== after.onlineLink) {
-        details.push(changedLine("🔗", "Link online", before.onlineLink, after.onlineLink));
+        details.push(changedLine("Link online", before.onlineLink, after.onlineLink));
     }
     return details.join("\n");
 }
@@ -341,31 +338,31 @@ function formatScheduleChangeMessage(scheduleData, changes, date = new Date()) {
     const now = getVietnamDateInfo(date);
     const totalChanges = changes.added.length + changes.removed.length + changes.modified.length;
     const sections = [
-        "# {red}⚠️ LỊCH HỌC CÓ THAY ĐỔI{/red}",
-        `👤 **${escapeMarkdown(scheduleData.studentName || "Sinh viên")}**  •  MSSV: **${escapeMarkdown(scheduleData.studentId)}**`,
-        `📅 Xác nhận: **${now.formattedDate} lúc ${now.hour}:${now.minute}**`,
+        "# {red}[!] LỊCH HỌC CÓ THAY ĐỔI{/red}",
+        `**Sinh viên:** ${escapeMarkdown(scheduleData.studentName || "Sinh viên")}  •  **MSSV:** ${escapeMarkdown(scheduleData.studentId)}`,
+        `**Xác nhận:** ${now.formattedDate} lúc ${now.hour}:${now.minute}`,
         `{orange}Tổng cộng ${totalChanges} thay đổi đã được xác nhận{/orange}`
     ];
 
     if (changes.added.length) {
         sections.push(
-            `## {green}➕ THÊM MỚI · ${changes.added.length}{/green}\n` +
+            `## {green}[+] THÊM MỚI · ${changes.added.length}{/green}\n` +
             changes.added.map(formatCompactLesson).join("\n\n────────────\n\n")
         );
     }
     if (changes.removed.length) {
         sections.push(
-            `## {red}➖ ĐÃ XÓA · ${changes.removed.length}{/red}\n` +
+            `## {red}[-] ĐÃ XÓA · ${changes.removed.length}{/red}\n` +
             changes.removed.map(formatCompactLesson).join("\n\n────────────\n\n")
         );
     }
     if (changes.modified.length) {
         sections.push(
-            `## {orange}✏️ ĐIỀU CHỈNH · ${changes.modified.length}{/orange}\n` +
+            `## {orange}[*] ĐIỀU CHỈNH · ${changes.modified.length}{/orange}\n` +
             changes.modified.map(formatModifiedLesson).join("\n\n────────────\n\n")
         );
     }
-    sections.push("> 💡 Dùng **/lich** để xem hôm nay hoặc **/lichtuan** để xem cả tuần.");
+    sections.push("> **[i]** Dùng **/lich** để xem hôm nay hoặc **/lichtuan** để xem cả tuần.");
     return sections.join("\n\n");
 }
 
