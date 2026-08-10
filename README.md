@@ -25,16 +25,18 @@ Các bản ghi `subscriptions.json` theo schema cũ chỉ có `chat.id` sẽ kh�
 ## Lệnh bot
 
 - `/find [MSSV]`: kiểm tra và lưu MSSV, không tự bật thông báo.
-- `/dangky [MSSV]`: đăng ký lịch 06:00 và cảnh báo khi lịch thay đổi.
+- `/dangky [MSSV]`: đăng ký kiểm tra 01:00, xác nhận thay đổi và nhận lịch lúc 06:00.
 - `/dangky`: đăng ký bằng MSSV đã lưu qua `/find`.
 - `/lich [MSSV]`: xem lịch học hôm nay.
 - `/lich`: xem lịch của MSSV đã lưu.
 - `/lichtuan [MSSV]`: xem lịch từ Thứ Hai đến Chủ nhật của tuần hiện tại.
 - `/lichtuan`: xem lịch tuần của MSSV đã lưu.
-- `/huythongbao`: tắt lịch 06:00 và cảnh báo thay đổi, vẫn giữ MSSV.
+- `/huythongbao`: tắt kiểm tra 01:00, lịch 06:00 và cảnh báo thay đổi, vẫn giữ MSSV.
 - `/time`: kiểm tra giờ Việt Nam mà bot đang dùng.
 - `/help`: xem hướng dẫn.
 
 Chạy kiểm thử bằng `npm test`.
 
-Bot kiểm tra thay đổi vào phút `05, 20, 35, 50` mỗi giờ theo `Asia/Ho_Chi_Minh`. Lịch mới phải xuất hiện giống nhau trong hai lần kiểm tra liên tiếp trước khi bot gửi cảnh báo, nhằm tránh báo giả khi API LHU tạm thời trả thiếu dữ liệu. Mốc so sánh được lưu trong `scheduleSnapshots.json` và không được commit lên Git.
+Bot chỉ kiểm tra thay đổi hai lần mỗi ngày theo `Asia/Ho_Chi_Minh`: lúc `01:00` bot chụp lịch lần 1 nhưng không gửi tin; lúc `06:00` bot tải lại lần 2, chỉ cảnh báo nếu kết quả giống bản chụp 01:00 rồi gửi lịch hôm nay. Mốc so sánh được lưu trong `scheduleSnapshots.json` và không được commit lên Git.
+
+Thông báo thay đổi dùng rich text Markdown của Zalo Bot: có tiêu đề, màu theo loại thay đổi và ngày ở định dạng `dd/mm/yyyy`. Bot đối chiếu buổi học bằng `NhomID` thay vì `ID` thứ tự để tránh báo nhầm hàng loạt khi nhà trường chèn hoặc xóa lịch.

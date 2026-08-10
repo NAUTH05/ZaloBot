@@ -1,9 +1,12 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
-    advanceChangeState,
+    SNAPSHOT_SCHEMA_VERSION,
     buildScheduleSnapshot,
-    diffSnapshots
+    captureChangeState,
+    confirmChangeState,
+    diffSnapshots,
+    formatScheduleChangeMessage
 } = require("../scheduleChanges");
 
 function schedule(lessons) {
@@ -17,6 +20,7 @@ function schedule(lessons) {
 function lesson(overrides = {}) {
     return {
         ID: 10,
+        NhomID: 10001,
         ThoiGianBD: "2026-08-10T07:00:00",
         ThoiGianKT: "2026-08-10T09:15:00",
         TenMonHoc: "Lập trình Web",
@@ -36,7 +40,7 @@ test("phát hiện buổi học được thêm, xóa và chỉnh sửa", () => {
     const original = buildScheduleSnapshot(schedule([lesson()]), checkDate);
     const changed = buildScheduleSnapshot(schedule([
         lesson({ TenPhong: "B202" }),
-        lesson({ ID: 11, TenMonHoc: "Cơ sở dữ liệu" })
+        lesson({ ID: 11, NhomID: 20002, TenMonHoc: "Cơ sở dữ liệu" })
     ]), checkDate);
     const diff = diffSnapshots(original, changed);
 
@@ -47,44 +51,153 @@ test("phát hiện buổi học được thêm, xóa và chỉnh sửa", () => {
     assert.equal(diff.modified[0].after.room, "B202");
 });
 
-test("bỏ qua lịch đã qua khi so sánh sang ngày mới", () => {
+test("01:00 chỉ chụp thay đổi và 06:00 mới xác nhận", () => {
+    const original = buildScheduleSnapshot(schedule([lesson()]), checkDate);
+    const changed = buildScheduleSnapshot(schedule([lesson({ TenPhong: "B202" })]), checkDate);
+    const initialized = captureChangeState(null, original, "2026-08-09T00:00:00Z");
+
+    const atOne = captureChangeState(initialized.state, changed, "2026-08-09T01:00:00+07:00");
+    assert.equal(atOne.captured, true);
+    assert.ok(atOne.state.pending);
+
+    const atSix = confirmChangeState(atOne.state, changed, "2026-08-09T06:00:00+07:00");
+    assert.equal(atSix.confirmed, true);
+    assert.equal(atSix.changes.modified.length, 1);
+    assert.equal(atSix.state.pending, null);
+});
+
+test("không báo nếu lịch lúc 06:00 khác bản chụp lúc 01:00", () => {
+    const original = buildScheduleSnapshot(schedule([lesson()]), checkDate);
+    const atOneSchedule = buildScheduleSnapshot(schedule([lesson({ TenPhong: "B202" })]), checkDate);
+    const atSixSchedule = buildScheduleSnapshot(schedule([lesson({ TenPhong: "C303" })]), checkDate);
+    const initialized = captureChangeState(null, original);
+    const atOne = captureChangeState(initialized.state, atOneSchedule);
+    const atSix = confirmChangeState(atOne.state, atSixSchedule);
+
+    assert.equal(atSix.confirmed, false);
+    assert.equal(atSix.state.pending, null);
+    assert.equal(atSix.state.baseline.fingerprint, original.fingerprint);
+});
+
+test("không dùng bản chụp 01:00 của ngày cũ để xác nhận", () => {
+    const original = buildScheduleSnapshot(schedule([lesson()]), checkDate);
+    const changed = buildScheduleSnapshot(schedule([lesson({ TenPhong: "B202" })]), checkDate);
+    const initialized = captureChangeState(null, original);
+    const stalePendingState = {
+        ...initialized.state,
+        pending: {
+            snapshot: changed,
+            capturedDate: "2026-08-08",
+            capturedAt: "2026-08-08T01:00:00+07:00"
+        }
+    };
+    const result = confirmChangeState(stalePendingState, changed);
+
+    assert.equal(result.confirmed, false);
+    assert.equal(result.state.pending, null);
+});
+
+test("thay đổi chỉ xuất hiện sau 01:00 không được báo ở 06:00", () => {
+    const original = buildScheduleSnapshot(schedule([lesson()]), checkDate);
+    const changedAfterOne = buildScheduleSnapshot(schedule([lesson({ TenPhong: "B202" })]), checkDate);
+    const initialized = captureChangeState(null, original);
+    const atOne = captureChangeState(initialized.state, original);
+    const atSix = confirmChangeState(atOne.state, changedAfterOne);
+
+    assert.equal(atOne.captured, false);
+    assert.equal(atSix.confirmed, false);
+    assert.equal(atSix.state.baseline.fingerprint, original.fingerprint);
+});
+
+test("bỏ qua lịch đã qua khi chuyển sang ngày mới", () => {
     const previous = buildScheduleSnapshot(schedule([
         lesson({ ID: 9, ThoiGianBD: "2026-08-09T07:00:00", ThoiGianKT: "2026-08-09T09:00:00" }),
         lesson()
     ]), checkDate);
     const nextDay = new Date("2026-08-09T17:00:00.000Z");
     const current = buildScheduleSnapshot(schedule([lesson()]), nextDay);
+    const initialized = captureChangeState(null, previous);
+    const result = captureChangeState(initialized.state, current);
 
     assert.equal(diffSnapshots(previous, current).removed.length, 0);
-
-    const initialized = advanceChangeState(null, previous);
-    const nextDayResult = advanceChangeState(initialized.state, current);
-    assert.equal(nextDayResult.confirmed, false);
-    assert.equal(nextDayResult.state.pending, null);
+    assert.equal(result.captured, false);
+    assert.equal(result.state.pending, null);
 });
 
-test("chỉ xác nhận thay đổi sau hai lần quan sát liên tiếp", () => {
-    const original = buildScheduleSnapshot(schedule([lesson()]), checkDate);
-    const changed = buildScheduleSnapshot(schedule([lesson({ TenPhong: "B202" })]), checkDate);
+test("không báo thay đổi khi API chỉ đánh lại ID thứ tự", () => {
+    const original = buildScheduleSnapshot(schedule([
+        lesson({ ID: 1 }),
+        lesson({
+            ID: 2,
+            NhomID: 20002,
+            TenMonHoc: "Cơ sở dữ liệu",
+            ThoiGianBD: "2026-08-11T09:30:00",
+            ThoiGianKT: "2026-08-11T11:45:00"
+        })
+    ]), checkDate);
+    const reordered = buildScheduleSnapshot(schedule([
+        lesson({ ID: 99 }),
+        lesson({
+            ID: 100,
+            NhomID: 20002,
+            TenMonHoc: "Cơ sở dữ liệu",
+            ThoiGianBD: "2026-08-11T09:30:00",
+            ThoiGianKT: "2026-08-11T11:45:00"
+        })
+    ]), checkDate);
 
-    const initialized = advanceChangeState(null, original, "2026-08-09T05:00:00Z");
-    const firstObservation = advanceChangeState(initialized.state, changed, "2026-08-09T05:05:00Z");
-    const secondObservation = advanceChangeState(firstObservation.state, changed, "2026-08-09T05:20:00Z");
-
-    assert.equal(initialized.confirmed, false);
-    assert.equal(firstObservation.confirmed, false);
-    assert.equal(secondObservation.confirmed, true);
-    assert.equal(secondObservation.changes.modified.length, 1);
+    const diff = diffSnapshots(original, reordered);
+    assert.deepEqual(diff, { added: [], removed: [], modified: [] });
+    assert.equal(original.fingerprint, reordered.fingerprint);
 });
 
-test("hủy thay đổi chờ xác nhận nếu API trở về lịch cũ", () => {
+test("ghép một buổi đổi ngày giờ thành điều chỉnh theo NhomID", () => {
     const original = buildScheduleSnapshot(schedule([lesson()]), checkDate);
-    const transient = buildScheduleSnapshot(schedule([]), checkDate);
-    const initialized = advanceChangeState(null, original);
-    const pending = advanceChangeState(initialized.state, transient);
-    const recovered = advanceChangeState(pending.state, original);
+    const moved = buildScheduleSnapshot(schedule([lesson({
+        ID: 25,
+        ThoiGianBD: "2026-08-11T13:00:00",
+        ThoiGianKT: "2026-08-11T15:15:00"
+    })]), checkDate);
 
-    assert.ok(pending.state.pending);
-    assert.equal(recovered.confirmed, false);
-    assert.equal(recovered.state.pending, null);
+    const diff = diffSnapshots(original, moved);
+    assert.equal(diff.added.length, 0);
+    assert.equal(diff.removed.length, 0);
+    assert.equal(diff.modified.length, 1);
+    assert.equal(diff.modified[0].after.dateKey, "2026-08-11");
+});
+
+test("format thông báo dùng rich text, ngày dd/mm/yyyy và chỉ hiện trường bị đổi", () => {
+    const original = buildScheduleSnapshot(schedule([lesson()]), checkDate);
+    const changed = buildScheduleSnapshot(schedule([lesson({
+        ThoiGianBD: "2026-08-11T07:00:00",
+        ThoiGianKT: "2026-08-11T09:15:00",
+        TenPhong: "B202"
+    })]), checkDate);
+    const message = formatScheduleChangeMessage(
+        schedule([]),
+        diffSnapshots(original, changed),
+        new Date("2026-08-10T03:35:00.000Z")
+    );
+
+    assert.match(message, /^# \{red\}⚠️ LỊCH HỌC CÓ THAY ĐỔI\{\/red\}/);
+    assert.match(message, /\{orange\}✏️ ĐIỀU CHỈNH · 1\{\/orange\}/);
+    assert.match(message, /10\/08\/2026 lúc 10:35/);
+    assert.match(message, /~~10\/08\/2026~~ → \*\*11\/08\/2026\*\*/);
+    assert.match(message, /Phòng:/);
+    assert.doesNotMatch(message, /2026-08-11/);
+    assert.doesNotMatch(message, /Giảng viên:/);
+});
+
+test("tự đặt lại baseline khi nâng schema snapshot để không báo giả", () => {
+    const current = buildScheduleSnapshot(schedule([lesson()]), checkDate);
+    const oldState = {
+        baseline: { ...current, schemaVersion: SNAPSHOT_SCHEMA_VERSION - 1 },
+        pending: { snapshot: current },
+        updatedAt: "2026-08-09T01:00:00+07:00"
+    };
+
+    const result = captureChangeState(oldState, current);
+    assert.equal(result.captured, false);
+    assert.equal(result.state.baseline.schemaVersion, SNAPSHOT_SCHEMA_VERSION);
+    assert.equal(result.state.pending, null);
 });

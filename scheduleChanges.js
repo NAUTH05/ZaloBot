@@ -4,6 +4,7 @@ const path = require("path");
 const { getApiDateTimeInfo, getVietnamDateInfo } = require("./timezone");
 
 const FILE_PATH = path.join(__dirname, "scheduleSnapshots.json");
+const SNAPSHOT_SCHEMA_VERSION = 2;
 
 function text(value) {
     return value == null ? "" : String(value).trim();
@@ -12,18 +13,20 @@ function text(value) {
 function normalizeLesson(lesson) {
     const start = getApiDateTimeInfo(lesson.ThoiGianBD);
     const end = getApiDateTimeInfo(lesson.ThoiGianKT);
-    const fallbackKey = [
-        start?.dateKey,
-        start ? `${start.hour}:${start.minute}` : "",
-        text(lesson.TenMonHoc),
-        text(lesson.TenNhom)
-    ].join("|");
+    const groupId = text(lesson.NhomID);
+    const identity = groupId || [text(lesson.TenMonHoc), text(lesson.TenNhom)].join("|");
+    const startTime = start ? `${start.hour}:${start.minute}` : "";
+    const endTime = end ? `${end.hour}:${end.minute}` : "";
 
     return {
-        key: text(lesson.ID ?? lesson.CalendarID) || fallbackKey,
+        // ID từ API chỉ là số thứ tự của kết quả và thay đổi khi lịch được sắp xếp lại.
+        // NhomID + ngày/giờ mới là khóa ổn định cho từng buổi học.
+        key: [identity, start?.dateKey || "", startTime, endTime].join("|"),
+        identity,
+        groupId,
         dateKey: start?.dateKey || "",
-        start: start ? `${start.hour}:${start.minute}` : "",
-        end: end ? `${end.hour}:${end.minute}` : "",
+        start: startTime,
+        end: endTime,
         subject: text(lesson.TenMonHoc),
         room: text(lesson.TenPhong),
         campus: text(lesson.TenCoSo),
@@ -53,6 +56,7 @@ function buildScheduleSnapshot(scheduleData, date = new Date()) {
         );
     const lessons = Object.fromEntries(normalized.map((lesson) => [lesson.key, lesson]));
     const snapshot = {
+        schemaVersion: SNAPSHOT_SCHEMA_VERSION,
         studentId: scheduleData.studentId,
         studentName: scheduleData.studentName || "",
         minimumDate,
@@ -72,25 +76,102 @@ function diffSnapshots(previous, current) {
     const removed = [];
     const modified = [];
 
-    for (const [key, lesson] of Object.entries(currentLessons)) {
-        if (!previousLessons[key]) {
-            added.push(lesson);
-        } else if (JSON.stringify(previousLessons[key]) !== JSON.stringify(lesson)) {
-            modified.push({ before: previousLessons[key], after: lesson });
+    const unmatchedPrevious = new Map(Object.entries(previousLessons));
+    const unmatchedCurrent = new Map(Object.entries(currentLessons));
+
+    // Ghép chính xác trước để các buổi không đổi không bị ảnh hưởng khi API đánh lại ID thứ tự.
+    for (const [key, currentLesson] of currentLessons ? Object.entries(currentLessons) : []) {
+        const previousLesson = previousLessons[key];
+        if (!previousLesson) continue;
+        unmatchedPrevious.delete(key);
+        unmatchedCurrent.delete(key);
+        if (JSON.stringify(previousLesson) !== JSON.stringify(currentLesson)) {
+            modified.push({ before: previousLesson, after: currentLesson });
         }
     }
-    for (const [key, lesson] of Object.entries(previousLessons)) {
-        if (!currentLessons[key]) removed.push(lesson);
+
+    // Với buổi đổi ngày/giờ, ghép theo NhomID và khoảng thời gian gần nhất.
+    const toTimestamp = (lesson) => Date.parse(`${lesson.dateKey}T${lesson.start || "00:00"}:00Z`);
+    const maxMoveDistance = 14 * 24 * 60 * 60 * 1000;
+    for (const [previousKey, previousLesson] of [...unmatchedPrevious.entries()]) {
+        let bestMatch = null;
+        let bestDistance = Infinity;
+        for (const [currentKey, currentLesson] of unmatchedCurrent.entries()) {
+            if (!previousLesson.identity || previousLesson.identity !== currentLesson.identity) continue;
+            const distance = Math.abs(toTimestamp(previousLesson) - toTimestamp(currentLesson));
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                bestMatch = [currentKey, currentLesson];
+            }
+        }
+        if (!bestMatch || bestDistance > maxMoveDistance) continue;
+        modified.push({ before: previousLesson, after: bestMatch[1] });
+        unmatchedPrevious.delete(previousKey);
+        unmatchedCurrent.delete(bestMatch[0]);
     }
+
+    removed.push(...unmatchedPrevious.values());
+    added.push(...unmatchedCurrent.values());
+
+    const sortLessons = (left, right) =>
+        `${left.dateKey}|${left.start}|${left.subject}`.localeCompare(`${right.dateKey}|${right.start}|${right.subject}`);
+    added.sort(sortLessons);
+    removed.sort(sortLessons);
+    modified.sort((left, right) => sortLessons(left.after, right.after));
     return { added, removed, modified };
 }
 
-// Chỉ xác nhận thay đổi sau khi thấy cùng một lịch mới ở hai lần kiểm tra liên tiếp.
-// Cách này tránh báo giả khi API LHU tạm thời trả thiếu dữ liệu.
-function advanceChangeState(state, currentSnapshot, observedAt = new Date().toISOString()) {
-    if (!state?.baseline) {
+function hasActualChanges(changes) {
+    return changes.added.length > 0 || changes.removed.length > 0 || changes.modified.length > 0;
+}
+
+function createBaselineState(snapshot, observedAt) {
+    return { baseline: snapshot, pending: null, updatedAt: observedAt };
+}
+
+// Lần 1 lúc 01:00 chỉ lưu ứng viên thay đổi, tuyệt đối không gửi thông báo.
+function captureChangeState(state, currentSnapshot, observedAt = new Date().toISOString()) {
+    if (!state?.baseline || state.baseline.schemaVersion !== currentSnapshot.schemaVersion) {
         return {
-            state: { baseline: currentSnapshot, pending: null, updatedAt: observedAt },
+            state: createBaselineState(currentSnapshot, observedAt),
+            captured: false
+        };
+    }
+
+    if (state.baseline.fingerprint === currentSnapshot.fingerprint) {
+        return {
+            state: { ...state, pending: null, updatedAt: observedAt },
+            captured: false
+        };
+    }
+
+    const currentChanges = diffSnapshots(state.baseline, currentSnapshot);
+    if (!hasActualChanges(currentChanges)) {
+        return {
+            state: createBaselineState(currentSnapshot, observedAt),
+            captured: false
+        };
+    }
+
+    return {
+        state: {
+            ...state,
+            pending: {
+                snapshot: currentSnapshot,
+                capturedDate: currentSnapshot.minimumDate,
+                capturedAt: observedAt
+            },
+            updatedAt: observedAt
+        },
+        captured: true
+    };
+}
+
+// Lần 2 lúc 06:00 chỉ xác nhận ứng viên được chụp lúc 01:00 cùng ngày.
+function confirmChangeState(state, currentSnapshot, observedAt = new Date().toISOString()) {
+    if (!state?.baseline || state.baseline.schemaVersion !== currentSnapshot.schemaVersion) {
+        return {
+            state: createBaselineState(currentSnapshot, observedAt),
             confirmed: false,
             changes: null
         };
@@ -105,31 +186,26 @@ function advanceChangeState(state, currentSnapshot, observedAt = new Date().toIS
     }
 
     const currentChanges = diffSnapshots(state.baseline, currentSnapshot);
-    const hasActualChanges = currentChanges.added.length > 0 ||
-        currentChanges.removed.length > 0 ||
-        currentChanges.modified.length > 0;
-    if (!hasActualChanges) {
+    if (!hasActualChanges(currentChanges)) {
         return {
-            state: { baseline: currentSnapshot, pending: null, updatedAt: observedAt },
+            state: createBaselineState(currentSnapshot, observedAt),
             confirmed: false,
             changes: null
         };
     }
 
-    if (state.pending?.snapshot?.fingerprint === currentSnapshot.fingerprint) {
+    const isSameDayCandidate = state.pending?.capturedDate === currentSnapshot.minimumDate;
+    const isSameSnapshot = state.pending?.snapshot?.fingerprint === currentSnapshot.fingerprint;
+    if (isSameDayCandidate && isSameSnapshot) {
         return {
-            state: { baseline: currentSnapshot, pending: null, updatedAt: observedAt },
+            state: createBaselineState(currentSnapshot, observedAt),
             confirmed: true,
             changes: currentChanges
         };
     }
 
     return {
-        state: {
-            ...state,
-            pending: { snapshot: currentSnapshot, firstSeenAt: observedAt },
-            updatedAt: observedAt
-        },
+        state: { ...state, pending: null, updatedAt: observedAt },
         confirmed: false,
         changes: null
     };
@@ -156,15 +232,24 @@ function initializeScheduleSnapshot(scheduleData, date = new Date(), force = fal
     const states = readStates();
     const studentId = scheduleData.studentId;
     if (force || !states[studentId]?.baseline) {
-        states[studentId] = advanceChangeState(null, buildScheduleSnapshot(scheduleData, date)).state;
+        states[studentId] = createBaselineState(buildScheduleSnapshot(scheduleData, date), new Date().toISOString());
         writeStates(states);
     }
 }
 
-function evaluateScheduleChange(scheduleData, date = new Date()) {
+function captureScheduleChange(scheduleData, date = new Date()) {
     const states = readStates();
     const studentId = scheduleData.studentId;
-    const result = advanceChangeState(states[studentId], buildScheduleSnapshot(scheduleData, date));
+    const result = captureChangeState(states[studentId], buildScheduleSnapshot(scheduleData, date));
+    states[studentId] = result.state;
+    writeStates(states);
+    return result;
+}
+
+function confirmScheduleChange(scheduleData, date = new Date()) {
+    const states = readStates();
+    const studentId = scheduleData.studentId;
+    const result = confirmChangeState(states[studentId], buildScheduleSnapshot(scheduleData, date));
     states[studentId] = result.state;
     writeStates(states);
     return result;
@@ -176,67 +261,126 @@ function statusLabel(status) {
     return "Đang học";
 }
 
-function formatCompactLesson(lesson) {
-    const [year, month, day] = lesson.dateKey.split("-");
-    const date = day ? `${day}/${month}/${year}` : "Chưa rõ ngày";
-    const location = [lesson.room, lesson.campus].filter(Boolean).join(" - ");
+function escapeMarkdown(value) {
+    return text(value).replace(/([\\*_~`#>{}\[\]])/g, "\\$1");
+}
+
+function formatDateKey(dateKey) {
+    const [year, month, day] = text(dateKey).split("-");
+    return day ? `${day}/${month}/${year}` : "Chưa rõ ngày";
+}
+
+function formatLocation(lesson) {
+    return [lesson.room, lesson.campus].filter(Boolean).join(" - ") || "Chưa xác định";
+}
+
+function formatCompactLesson(lesson, index) {
     return [
-        `${date} ${lesson.start || "?"}-${lesson.end || "?"} | ${lesson.subject || "Chưa rõ môn"}`,
-        location ? `Phòng: ${location}` : "",
-        lesson.teacher ? `GV: ${lesson.teacher}` : "",
-        `Trạng thái: ${statusLabel(lesson.status)}`
+        `**${index + 1}. ${escapeMarkdown(lesson.subject || "Chưa rõ môn")}**`,
+        `> 📅 **Ngày:** ${formatDateKey(lesson.dateKey)}`,
+        `> ⏰ **Giờ:** ${escapeMarkdown(lesson.start || "?")} – ${escapeMarkdown(lesson.end || "?")}`,
+        `> 📍 **Phòng:** ${escapeMarkdown(formatLocation(lesson))}`,
+        lesson.teacher ? `> 👨‍🏫 **Giảng viên:** ${escapeMarkdown(lesson.teacher)}` : "",
+        lesson.group ? `> 👥 **Nhóm:** ${escapeMarkdown(lesson.group)}` : "",
+        `> 📌 **Trạng thái:** ${escapeMarkdown(statusLabel(lesson.status))}`
     ].filter(Boolean).join("\n");
 }
 
-function formatModifiedLesson(change) {
+function changedLine(icon, label, before, after) {
+    return `> ${icon} **${label}:** ~~${escapeMarkdown(before || "Chưa xác định")}~~ → **${escapeMarkdown(after || "Chưa xác định")}**`;
+}
+
+function formatModifiedLesson(change, index) {
     const before = change.before;
     const after = change.after;
-    const details = [];
-    if (before.dateKey !== after.dateKey || before.start !== after.start || before.end !== after.end) {
-        details.push(`Thời gian: ${before.dateKey} ${before.start}-${before.end} → ${after.dateKey} ${after.start}-${after.end}`);
+    const title = before.subject === after.subject
+        ? after.subject
+        : "Thay đổi môn học";
+    const details = [`**${index + 1}. ${escapeMarkdown(title || "Buổi học")}**`];
+
+    if (before.dateKey !== after.dateKey) {
+        details.push(changedLine("📅", "Ngày", formatDateKey(before.dateKey), formatDateKey(after.dateKey)));
+    }
+    if (before.start !== after.start || before.end !== after.end) {
+        details.push(changedLine(
+            "⏰",
+            "Giờ",
+            `${before.start || "?"} – ${before.end || "?"}`,
+            `${after.start || "?"} – ${after.end || "?"}`
+        ));
     }
     if (before.room !== after.room || before.campus !== after.campus) {
-        details.push(`Phòng: ${[before.room, before.campus].filter(Boolean).join(" - ") || "?"} → ${[after.room, after.campus].filter(Boolean).join(" - ") || "?"}`);
+        details.push(changedLine("📍", "Phòng", formatLocation(before), formatLocation(after)));
     }
-    if (before.teacher !== after.teacher) details.push(`Giảng viên: ${before.teacher || "?"} → ${after.teacher || "?"}`);
-    if (before.group !== after.group) details.push(`Nhóm: ${before.group || "?"} → ${after.group || "?"}`);
-    if (before.status !== after.status) details.push(`Trạng thái: ${statusLabel(before.status)} → ${statusLabel(after.status)}`);
-    if (before.subject !== after.subject) details.push(`Môn: ${before.subject || "?"} → ${after.subject || "?"}`);
-    if (before.calendarType !== after.calendarType) details.push("Loại lịch học/thi đã thay đổi");
+    if (before.teacher !== after.teacher) details.push(changedLine("👨‍🏫", "Giảng viên", before.teacher, after.teacher));
+    if (before.group !== after.group) details.push(changedLine("👥", "Nhóm", before.group, after.group));
+    if (before.status !== after.status) {
+        details.push(changedLine("📌", "Trạng thái", statusLabel(before.status), statusLabel(after.status)));
+    }
+    if (before.subject !== after.subject) details.push(changedLine("📘", "Môn", before.subject, after.subject));
+    if (before.calendarType !== after.calendarType) {
+        details.push(changedLine(
+            "🗂",
+            "Loại lịch",
+            before.calendarType === 2 ? "Lịch thi" : "Lịch học",
+            after.calendarType === 2 ? "Lịch thi" : "Lịch học"
+        ));
+    }
     if (before.lessonType !== after.lessonType) {
-        details.push(`Hình thức: ${before.lessonType === 0 ? "Lý thuyết" : "Thực hành"} → ${after.lessonType === 0 ? "Lý thuyết" : "Thực hành"}`);
+        details.push(changedLine(
+            "📝",
+            "Hình thức",
+            before.lessonType === 0 ? "Lý thuyết" : "Thực hành",
+            after.lessonType === 0 ? "Lý thuyết" : "Thực hành"
+        ));
     }
-    if (before.onlineLink !== after.onlineLink) details.push("Liên kết học online đã thay đổi");
-    return `${after.subject || before.subject || "Buổi học"}\n${details.join("\n")}`;
+    if (before.onlineLink !== after.onlineLink) {
+        details.push(changedLine("🔗", "Link online", before.onlineLink, after.onlineLink));
+    }
+    return details.join("\n");
 }
 
 function formatScheduleChangeMessage(scheduleData, changes, date = new Date()) {
     const now = getVietnamDateInfo(date);
+    const totalChanges = changes.added.length + changes.removed.length + changes.modified.length;
     const sections = [
-        "⚠️ LỊCH HỌC CÓ THAY ĐỔI",
-        `👤 ${scheduleData.studentName || "Sinh viên"} (${scheduleData.studentId})`,
-        `🕒 Xác nhận lúc ${now.formattedDateTime}`
+        "# {red}⚠️ LỊCH HỌC CÓ THAY ĐỔI{/red}",
+        `👤 **${escapeMarkdown(scheduleData.studentName || "Sinh viên")}**  •  MSSV: **${escapeMarkdown(scheduleData.studentId)}**`,
+        `📅 Xác nhận: **${now.formattedDate} lúc ${now.hour}:${now.minute}**`,
+        `{orange}Tổng cộng ${totalChanges} thay đổi đã được xác nhận{/orange}`
     ];
 
     if (changes.added.length) {
-        sections.push(`➕ THÊM MỚI (${changes.added.length})\n${changes.added.map(formatCompactLesson).join("\n\n")}`);
+        sections.push(
+            `## {green}➕ THÊM MỚI · ${changes.added.length}{/green}\n` +
+            changes.added.map(formatCompactLesson).join("\n\n────────────\n\n")
+        );
     }
     if (changes.removed.length) {
-        sections.push(`➖ ĐÃ XÓA (${changes.removed.length})\n${changes.removed.map(formatCompactLesson).join("\n\n")}`);
+        sections.push(
+            `## {red}➖ ĐÃ XÓA · ${changes.removed.length}{/red}\n` +
+            changes.removed.map(formatCompactLesson).join("\n\n────────────\n\n")
+        );
     }
     if (changes.modified.length) {
-        sections.push(`✏️ ĐIỀU CHỈNH (${changes.modified.length})\n${changes.modified.map(formatModifiedLesson).join("\n\n")}`);
+        sections.push(
+            `## {orange}✏️ ĐIỀU CHỈNH · ${changes.modified.length}{/orange}\n` +
+            changes.modified.map(formatModifiedLesson).join("\n\n────────────\n\n")
+        );
     }
-    sections.push("Dùng /lich để kiểm tra lịch hôm nay.");
+    sections.push("> 💡 Dùng **/lich** để xem hôm nay hoặc **/lichtuan** để xem cả tuần.");
     return sections.join("\n\n");
 }
 
 module.exports = {
     FILE_PATH,
-    advanceChangeState,
+    SNAPSHOT_SCHEMA_VERSION,
     buildScheduleSnapshot,
+    captureChangeState,
+    captureScheduleChange,
+    confirmChangeState,
+    confirmScheduleChange,
     diffSnapshots,
-    evaluateScheduleChange,
     formatScheduleChangeMessage,
     initializeScheduleSnapshot,
     normalizeLesson

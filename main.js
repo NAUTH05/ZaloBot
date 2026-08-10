@@ -21,7 +21,8 @@ const {
 } = require("./subscriptions");
 const { getMessageContext } = require("./userContext");
 const {
-    evaluateScheduleChange,
+    captureScheduleChange,
+    confirmScheduleChange,
     formatScheduleChangeMessage,
     initializeScheduleSnapshot
 } = require("./scheduleChanges");
@@ -67,9 +68,10 @@ function logDiscord(level, message) {
     }
 }
 
-async function sendMessage(chatId, text) {
+async function sendMessage(chatId, text, options = {}) {
     // Chia tin dài theo dòng để tránh vượt giới hạn tin nhắn của Zalo.
-    const maxLength = 1800;
+    const { continuationHeader = "", ...messageOptions } = options;
+    const maxLength = messageOptions.parse_mode ? 1600 : 1800;
     const chunks = [];
     let current = "";
 
@@ -92,8 +94,9 @@ async function sendMessage(chatId, text) {
     }
 
     if (current) chunks.push(current);
-    for (const chunk of chunks) {
-        await Promise.resolve(bot.sendMessage(chatId, chunk));
+    for (let index = 0; index < chunks.length; index += 1) {
+        const prefix = index > 0 && continuationHeader ? `${continuationHeader}\n\n` : "";
+        await Promise.resolve(bot.sendMessage(chatId, `${prefix}${chunks[index]}`, messageOptions));
     }
 }
 
@@ -179,8 +182,8 @@ bot.onText(/^\/dangky(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
         await sendMessage(
             msg.chat.id,
             `🔔 Đăng ký thành công cho ${data.studentName || "sinh viên"} (${studentId}).\n` +
-            `Bot sẽ gửi lịch lúc 06:00 mỗi ngày và kiểm tra thay đổi lịch mỗi 15 phút.\n` +
-            `Một thay đổi chỉ được báo sau khi API LHU xác nhận giống nhau ở 2 lần kiểm tra liên tiếp.`
+            `Bot sẽ kiểm tra lịch lần 1 lúc 01:00, xác nhận lần 2 và gửi thông báo lúc 06:00 mỗi ngày.\n` +
+            `Chỉ thay đổi xuất hiện giống nhau ở cả hai lần mới được thông báo.`
         );
     } catch (error) {
         await sendMessage(msg.chat.id, `❌ ${friendlyError(error)}`);
@@ -247,13 +250,13 @@ bot.onText(/^\/huythongbao\s*$/i, asyncCommand(async (msg) => {
 bot.onText(/^\/help\s*$/i, (msg) => {
     const helpMessage = `Các lệnh có sẵn:
 /find [MSSV] - Kiểm tra và lưu MSSV, không tự bật thông báo
-/dangky [MSSV] - Bật lịch 06:00 và cảnh báo khi lịch thay đổi
+/dangky [MSSV] - Kiểm tra 01:00, xác nhận và nhận lịch lúc 06:00
 /dangky - Đăng ký bằng MSSV đã lưu qua /find
 /lich [MSSV] - Xem lịch học hôm nay của MSSV
 /lich - Xem lịch của MSSV đã lưu bằng /find
 /lichtuan [MSSV] - Xem lịch từ Thứ Hai đến Chủ nhật
 /lichtuan - Xem lịch tuần của MSSV đã lưu
-/huythongbao - Tắt lịch 06:00 và cảnh báo thay đổi
+/huythongbao - Tắt kiểm tra 01:00, lịch 06:00 và cảnh báo
 /time - Xem giờ máy chủ và giờ Việt Nam
 /help - Xem hướng dẫn`;
     sendMessage(msg.chat.id, helpMessage).catch(() => {});
@@ -265,74 +268,80 @@ bot.onText(/^\/time\s*$/i, (msg) => {
     sendMessage(msg.chat.id, message).catch(() => {});
 });
 
-// Luôn chạy lúc 06:00 tại TP.HCM, không phụ thuộc múi giờ được cấu hình trên VPS.
-schedule.scheduleJob({ rule: "0 6 * * *", tz: TIME_ZONE }, async () => {
-    const subscriptions = getEnabledSubscriptions();
-    const scheduleCache = new Map();
-    const sentTargets = new Set();
-
-    for (const subscription of Object.values(subscriptions)) {
-        const targetKey = `${subscription.chatId}::${subscription.studentId}`;
-        if (sentTargets.has(targetKey)) continue;
-        sentTargets.add(targetKey);
-        try {
-            let dataPromise = scheduleCache.get(subscription.studentId);
-            if (!dataPromise) {
-                dataPromise = fetchStudentSchedule(subscription.studentId);
-                scheduleCache.set(subscription.studentId, dataPromise);
-            }
-            const data = await dataPromise;
-            await sendMessage(subscription.chatId, formatDailySchedule(data));
-        } catch (error) {
-            logDiscord(
-                "ERROR",
-                `Không thể gửi lịch cho chat ${subscription.chatId}, MSSV ${subscription.studentId}: ${error.message}`
-            );
-        }
+function groupEnabledSubscriptionsByStudent() {
+    const grouped = new Map();
+    for (const subscription of Object.values(getEnabledSubscriptions())) {
+        const targets = grouped.get(subscription.studentId) || new Map();
+        // Một MSSV chỉ gửi một lần vào cùng một chat, dù nhiều thành viên cùng đăng ký.
+        targets.set(subscription.chatId, subscription);
+        grouped.set(subscription.studentId, targets);
     }
-});
+    return grouped;
+}
 
-let changeCheckRunning = false;
+let scheduledCheckRunning = false;
 
-async function checkScheduleChanges() {
-    if (changeCheckRunning) return;
-    changeCheckRunning = true;
-
+// 01:00 giờ Việt Nam: chụp lịch lần 1, không gửi bất kỳ thông báo nào.
+async function captureSchedulesAtOne() {
+    if (scheduledCheckRunning) return;
+    scheduledCheckRunning = true;
     try {
-        const subscriptions = getEnabledSubscriptions();
-        const subscriptionsByStudent = new Map();
-
-        for (const subscription of Object.values(subscriptions)) {
-            const targets = subscriptionsByStudent.get(subscription.studentId) || new Map();
-            targets.set(subscription.chatId, subscription);
-            subscriptionsByStudent.set(subscription.studentId, targets);
-        }
-
-        for (const [studentId, targetMap] of subscriptionsByStudent.entries()) {
+        for (const studentId of groupEnabledSubscriptionsByStudent().keys()) {
             try {
                 const data = await fetchStudentSchedule(studentId);
-                const result = evaluateScheduleChange(data);
-                if (!result.confirmed) continue;
-
-                const message = formatScheduleChangeMessage(data, result.changes);
-                for (const subscription of targetMap.values()) {
-                    try {
-                        await sendMessage(subscription.chatId, message);
-                    } catch (error) {
-                        logDiscord("ERROR", `Không thể gửi cảnh báo thay đổi cho chat ${subscription.chatId}: ${error.message}`);
-                    }
-                }
+                captureScheduleChange(data);
             } catch (error) {
-                logDiscord("ERROR", `Không thể kiểm tra thay đổi lịch MSSV ${studentId}: ${error.message}`);
+                logDiscord("ERROR", `Không thể chụp lịch 01:00 cho MSSV ${studentId}: ${error.message}`);
             }
         }
     } finally {
-        changeCheckRunning = false;
+        scheduledCheckRunning = false;
     }
 }
 
-// Lệch 5 phút so với lịch 06:00 để tránh hai tác vụ gọi API cùng lúc.
-schedule.scheduleJob({ rule: "5,20,35,50 * * * *", tz: TIME_ZONE }, checkScheduleChanges);
+// 06:00 giờ Việt Nam: xác nhận thay đổi lần 2, báo thay đổi rồi gửi lịch hôm nay.
+async function confirmAndNotifyAtSix() {
+    if (scheduledCheckRunning) return;
+    scheduledCheckRunning = true;
+    try {
+        for (const [studentId, targetMap] of groupEnabledSubscriptionsByStudent().entries()) {
+            try {
+                const data = await fetchStudentSchedule(studentId);
+                const result = confirmScheduleChange(data);
+
+                if (result.confirmed) {
+                    const changeMessage = formatScheduleChangeMessage(data, result.changes);
+                    for (const subscription of targetMap.values()) {
+                        try {
+                            await sendMessage(subscription.chatId, changeMessage, {
+                                parse_mode: "markdown",
+                                continuationHeader: "# {red}⚠️ LỊCH HỌC THAY ĐỔI · TIẾP{/red}"
+                            });
+                        } catch (error) {
+                            logDiscord("ERROR", `Không thể gửi cảnh báo thay đổi cho chat ${subscription.chatId}: ${error.message}`);
+                        }
+                    }
+                }
+
+                const dailyMessage = formatDailySchedule(data);
+                for (const subscription of targetMap.values()) {
+                    try {
+                        await sendMessage(subscription.chatId, dailyMessage);
+                    } catch (error) {
+                        logDiscord("ERROR", `Không thể gửi lịch 06:00 cho chat ${subscription.chatId}: ${error.message}`);
+                    }
+                }
+            } catch (error) {
+                logDiscord("ERROR", `Không thể kiểm tra lịch 06:00 cho MSSV ${studentId}: ${error.message}`);
+            }
+        }
+    } finally {
+        scheduledCheckRunning = false;
+    }
+}
+
+schedule.scheduleJob({ rule: "0 1 * * *", tz: TIME_ZONE }, captureSchedulesAtOne);
+schedule.scheduleJob({ rule: "0 6 * * *", tz: TIME_ZONE }, confirmAndNotifyAtSix);
 
 bot.on("message", (msg) => {
     const text = msg.text || "[không có nội dung]";
@@ -353,5 +362,5 @@ bot.on("error", (error) => {
     logDiscord("ERROR", `error: ${error.message}`);
 });
 
-console.log(`Bot đã khởi động. Lịch 06:00 và kiểm tra thay đổi mỗi 15 phút (${TIME_ZONE}).`);
+console.log(`Bot đã khởi động. Kiểm tra lịch lúc 01:00 và 06:00 (${TIME_ZONE}).`);
 logDiscord("INFO", `Bot đã khởi động - timezone ${TIME_ZONE}`);
