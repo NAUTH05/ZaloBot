@@ -5,6 +5,7 @@ const {
     getVietnamWeekInfo,
     toLhuQueryDate
 } = require("./timezone");
+const { escapeMarkdown } = require("./richText");
 
 const API_URL = "https://tapi.lhu.edu.vn/calen/auth/XemLich_LichSinhVien";
 const PAGE_SIZE = 100;
@@ -181,15 +182,17 @@ function formatLesson(lesson, index) {
     const type = Number(lesson.Type) === 0 ? "Lý thuyết" : "Thực hành";
     const location = [lesson.TenPhong, lesson.TenCoSo].filter(Boolean).join(" - ");
 
+    const statusColor = status === "BÁO NGHỈ" ? "red" : status === "LỊCH THI" ? "orange" : "green";
     const lines = [
-        `${index + 1}. ${status ? `[${status}] ` : ""}${time} | ${lesson.TenMonHoc || "Chưa rõ môn"}`
+        `**${index + 1}. ${escapeMarkdown(time)} · ${escapeMarkdown(lesson.TenMonHoc || "Chưa rõ môn")}**`
     ];
-    if (location) lines.push(`   🏫 ${location}`);
-    if (lesson.GiaoVien) lines.push(`   👨‍🏫 ${lesson.GiaoVien}`);
-    if (lesson.TenNhom) lines.push(`   👥 ${lesson.TenNhom}`);
-    if (Number(lesson.CalenType) !== 2) lines.push(`   📝 ${type}`);
+    if (status) lines.push(`> 📌 **Trạng thái:** {${statusColor}}${escapeMarkdown(status)}{/${statusColor}}`);
+    if (location) lines.push(`> 🏫 **Phòng:** ${escapeMarkdown(location)}`);
+    if (lesson.GiaoVien) lines.push(`> 👨‍🏫 **Giảng viên:** ${escapeMarkdown(lesson.GiaoVien)}`);
+    if (lesson.TenNhom) lines.push(`> 👥 **Nhóm:** ${escapeMarkdown(lesson.TenNhom)}`);
+    if (Number(lesson.CalenType) !== 2) lines.push(`> 📝 **Hình thức:** ${escapeMarkdown(type)}`);
     if (lesson.OnlineLink && [0, 4, 5, 10].includes(Number(lesson.TinhTrang || 0))) {
-        lines.push(`   🔗 ${lesson.OnlineLink}`);
+        lines.push(`> 🔗 **Online:** ${escapeMarkdown(lesson.OnlineLink)}`);
     }
     return lines.join("\n");
 }
@@ -197,27 +200,36 @@ function formatLesson(lesson, index) {
 function formatDailySchedule(scheduleData, date = new Date()) {
     const dateInfo = getVietnamDateInfo(date);
     const lessons = lessonsForDate(scheduleData.lessons || [], date);
-    const student = scheduleData.studentName
-        ? `${scheduleData.studentName} (${scheduleData.studentId})`
-        : scheduleData.studentId;
-    const header = `📚 LỊCH HỌC HÔM NAY\n👤 ${student}\n📅 ${dateInfo.weekday}, ${dateInfo.formattedDate}`;
+    const studentName = escapeMarkdown(scheduleData.studentName || "Sinh viên");
+    const studentId = escapeMarkdown(scheduleData.studentId);
+    const header = [
+        "# {green}📚 LỊCH HỌC HÔM NAY{/green}",
+        `👤 **${studentName}**`,
+        `> 🆔 **MSSV:** ${studentId}`,
+        `> 📅 **Ngày:** ${escapeMarkdown(dateInfo.weekday)}, ${dateInfo.formattedDate}`
+    ].join("\n");
 
     if (lessons.length === 0) {
-        return `${header}\n\n🌿 Hôm nay không có lịch học.`;
+        return `${header}\n\n{green}🌿 Hôm nay không có lịch học.{/green}`;
     }
-    return `${header}\n\n${lessons.map(formatLesson).join("\n\n")}`;
+    return `${header}\n\n## {orange}🗓️ ${lessons.length} BUỔI HỌC{/orange}\n${lessons.map(formatLesson).join("\n\n────────────\n\n")}`;
 }
 
 function formatWeeklySchedule(scheduleData, date = new Date()) {
     const week = getVietnamWeekInfo(date);
     const lessons = lessonsForWeek(scheduleData.lessons || [], date);
-    const student = scheduleData.studentName
-        ? `${scheduleData.studentName} (${scheduleData.studentId})`
-        : scheduleData.studentId;
-    const header = `📚 LỊCH HỌC TUẦN NÀY\n👤 ${student}\n🗓 ${week.formattedStartDate} - ${week.formattedEndDate}`;
+    const studentName = escapeMarkdown(scheduleData.studentName || "Sinh viên");
+    const studentId = escapeMarkdown(scheduleData.studentId);
+    const header = [
+        "# {green}📚 LỊCH HỌC TUẦN NÀY{/green}",
+        `👤 **${studentName}**`,
+        `> 🆔 **MSSV:** ${studentId}`,
+        `> 🗓️ **Tuần:** ${week.formattedStartDate} – ${week.formattedEndDate}`,
+        `{orange}Tổng cộng ${lessons.length} buổi học{/orange}`
+    ].join("\n");
 
     if (lessons.length === 0) {
-        return `${header}\n\n🌿 Tuần này không có lịch học.`;
+        return `${header}\n\n{green}🌿 Tuần này không có lịch học.{/green}`;
     }
 
     const sections = week.days.map((day) => {
@@ -225,10 +237,11 @@ function formatWeeklySchedule(scheduleData, date = new Date()) {
             (lesson) => getApiDateTimeInfo(lesson.ThoiGianBD)?.dateKey === day.dateKey
         );
         if (dayLessons.length === 0) return null;
-        return `📅 ${day.weekday.toUpperCase()}, ${day.formattedDate}\n${dayLessons.map(formatLesson).join("\n\n")}`;
+        return `## {orange}📅 ${escapeMarkdown(day.weekday.toUpperCase())} · ${day.formattedDate}{/orange}\n` +
+            dayLessons.map(formatLesson).join("\n\n────────────\n\n");
     }).filter(Boolean);
 
-    return `${header}\n\n${sections.join("\n\n────────────────\n\n")}`;
+    return `${header}\n\n${sections.join("\n\n════════════════\n\n")}`;
 }
 
 module.exports = {

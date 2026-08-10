@@ -27,6 +27,7 @@ const {
     initializeScheduleSnapshot
 } = require("./scheduleChanges");
 const { TIME_ZONE, getVietnamDateInfo } = require("./timezone");
+const { escapeMarkdown } = require("./richText");
 
 if (!process.env.BOT_TOKEN) {
     throw new Error("Thiếu BOT_TOKEN trong file .env");
@@ -70,8 +71,13 @@ function logDiscord(level, message) {
 
 async function sendMessage(chatId, text, options = {}) {
     // Chia tin dài theo dòng để tránh vượt giới hạn tin nhắn của Zalo.
-    const { continuationHeader = "", ...messageOptions } = options;
-    const maxLength = messageOptions.parse_mode ? 1600 : 1800;
+    const {
+        continuationHeader = "# {green}↪️ NỘI DUNG TIẾP THEO{/green}",
+        parse_mode = "markdown",
+        ...otherOptions
+    } = options;
+    const messageOptions = { ...otherOptions, parse_mode };
+    const maxLength = 1600;
     const chunks = [];
     let current = "";
 
@@ -109,6 +115,14 @@ function friendlyError(error) {
     return "Không thể lấy lịch từ LHU lúc này. Bạn vui lòng thử lại sau.";
 }
 
+function formatErrorMessage(error) {
+    return `# {red}❌ KHÔNG THỂ THỰC HIỆN{/red}\n\n${escapeMarkdown(friendlyError(error))}`;
+}
+
+function formatWarningMessage(title, message) {
+    return `# {orange}⚠️ ${escapeMarkdown(title)}{/orange}\n\n${message}`;
+}
+
 function asyncCommand(handler) {
     return (msg, match) => {
         Promise.resolve(handler(msg, match)).catch((error) => {
@@ -119,10 +133,14 @@ function asyncCommand(handler) {
 }
 
 bot.onText(/^\/start\s*$/i, (msg) => {
+    const displayName = escapeMarkdown(msg.from?.display_name || "bạn");
     sendMessage(
         msg.chat.id,
-        `Chào ${msg.from?.display_name || "bạn"}!\n` +
-        `Dùng /find [MSSV] để lưu MSSV, sau đó dùng /dangky để bật thông báo lịch học.`
+        "# {green}👋 ZALOBOT LỊCH HỌC LHU{/green}\n\n" +
+        `Xin chào **${displayName}**!\n\n` +
+        "> 🔎 Dùng **/find [MSSV]** để lưu mã sinh viên.\n" +
+        "> 🔔 Sau đó dùng **/dangky** để bật thông báo lịch học.\n\n" +
+        "{orange}Gõ /help để xem toàn bộ lệnh.{/orange}"
     ).catch(() => {});
 });
 
@@ -130,7 +148,10 @@ bot.onText(/^\/find(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
     const context = getMessageContext(msg);
     const studentId = normalizeStudentId(getCommandArgument(match));
     if (!studentId) {
-        await sendMessage(msg.chat.id, "Cú pháp: /find [MSSV]\nVí dụ: /find 123456789");
+        await sendMessage(msg.chat.id, formatWarningMessage(
+            "SAI CÚ PHÁP",
+            "> **Cú pháp:** /find [MSSV]\n> **Ví dụ:** /find 123456789"
+        ));
         return;
     }
 
@@ -143,14 +164,17 @@ bot.onText(/^\/find(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
 
         await sendMessage(
             msg.chat.id,
-            `✅ Đã tìm thấy ${data.studentName || "sinh viên"} (${studentId}).\n` +
+            "# {green}✅ ĐÃ LƯU MSSV{/green}\n\n" +
+            `👤 **${escapeMarkdown(data.studentName || "Sinh viên")}**\n` +
+            `> 🆔 **MSSV:** ${escapeMarkdown(studentId)}\n` +
+            `> 📱 **Tài khoản:** ${escapeMarkdown(context.userDisplayName || "Tài khoản Zalo này")}\n\n` +
             (subscription.notificationsEnabled
-                ? `MSSV đã được lưu riêng cho ${context.userDisplayName || "tài khoản Zalo này"} và thông báo vẫn đang bật.\n`
-                : `Bot đã lưu MSSV riêng cho ${context.userDisplayName || "tài khoản Zalo này"}, nhưng chưa bật thông báo.\n`) +
-            `Dùng /lich để xem lịch hoặc /dangky để nhận lịch lúc 06:00 và cảnh báo khi lịch thay đổi.`
+                ? "{green}🔔 Thông báo lịch đang được bật.{/green}\n\n"
+                : "{orange}🔕 Thông báo lịch chưa được bật.{/orange}\n\n") +
+            "> Dùng **/lich** để xem lịch hoặc **/dangky** để nhận lịch lúc 06:00."
         );
     } catch (error) {
-        await sendMessage(msg.chat.id, `❌ ${friendlyError(error)}`);
+        await sendMessage(msg.chat.id, formatErrorMessage(error));
     }
 }));
 
@@ -163,9 +187,12 @@ bot.onText(/^\/dangky(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
     if (!studentId) {
         await sendMessage(
             msg.chat.id,
-            argument
-                ? "MSSV không hợp lệ. MSSV phải gồm đúng 9 chữ số."
-                : "Bạn chưa lưu MSSV. Hãy dùng /find [MSSV] hoặc /dangky [MSSV]."
+            formatWarningMessage(
+                argument ? "MSSV KHÔNG HỢP LỆ" : "CHƯA LƯU MSSV",
+                argument
+                    ? "> MSSV phải gồm đúng **9 chữ số**."
+                    : "> Hãy dùng **/find [MSSV]** hoặc **/dangky [MSSV]**."
+            )
         );
         return;
     }
@@ -181,12 +208,15 @@ bot.onText(/^\/dangky(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
         initializeScheduleSnapshot(data, new Date(), !wasAlreadyWatched);
         await sendMessage(
             msg.chat.id,
-            `🔔 Đăng ký thành công cho ${data.studentName || "sinh viên"} (${studentId}).\n` +
-            `Bot sẽ kiểm tra lịch lần 1 lúc 01:00, xác nhận lần 2 và gửi thông báo lúc 06:00 mỗi ngày.\n` +
-            `Chỉ thay đổi xuất hiện giống nhau ở cả hai lần mới được thông báo.`
+            "# {green}🔔 ĐĂNG KÝ THÀNH CÔNG{/green}\n\n" +
+            `👤 **${escapeMarkdown(data.studentName || "Sinh viên")}**\n` +
+            `> 🆔 **MSSV:** ${escapeMarkdown(studentId)}\n` +
+            "> 🕐 **01:00:** Chụp lịch lần thứ nhất.\n" +
+            "> 🕕 **06:00:** Xác nhận thay đổi và gửi lịch hôm nay.\n\n" +
+            "{orange}Chỉ thay đổi xuất hiện giống nhau ở cả hai lần mới được thông báo.{/orange}"
         );
     } catch (error) {
-        await sendMessage(msg.chat.id, `❌ ${friendlyError(error)}`);
+        await sendMessage(msg.chat.id, formatErrorMessage(error));
     }
 }));
 
@@ -199,18 +229,23 @@ bot.onText(/^\/lich(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
     if (!studentId) {
         await sendMessage(
             msg.chat.id,
-            argument
-                ? "MSSV không hợp lệ. MSSV phải gồm đúng 9 chữ số."
-                : "Bạn chưa lưu MSSV. Hãy dùng /find [MSSV] hoặc /lich [MSSV]."
+            formatWarningMessage(
+                argument ? "MSSV KHÔNG HỢP LỆ" : "CHƯA LƯU MSSV",
+                argument
+                    ? "> MSSV phải gồm đúng **9 chữ số**."
+                    : "> Hãy dùng **/find [MSSV]** hoặc **/lich [MSSV]**."
+            )
         );
         return;
     }
 
     try {
         const data = await fetchStudentSchedule(studentId);
-        await sendMessage(msg.chat.id, formatDailySchedule(data));
+        await sendMessage(msg.chat.id, formatDailySchedule(data), {
+            continuationHeader: "# {green}📚 LỊCH HÔM NAY · TIẾP{/green}"
+        });
     } catch (error) {
-        await sendMessage(msg.chat.id, `❌ ${friendlyError(error)}`);
+        await sendMessage(msg.chat.id, formatErrorMessage(error));
     }
 }));
 
@@ -223,48 +258,76 @@ bot.onText(/^\/lichtuan(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
     if (!studentId) {
         await sendMessage(
             msg.chat.id,
-            argument
-                ? "MSSV không hợp lệ. MSSV phải gồm đúng 9 chữ số."
-                : "Bạn chưa lưu MSSV. Hãy dùng /find [MSSV] hoặc /lichtuan [MSSV]."
+            formatWarningMessage(
+                argument ? "MSSV KHÔNG HỢP LỆ" : "CHƯA LƯU MSSV",
+                argument
+                    ? "> MSSV phải gồm đúng **9 chữ số**."
+                    : "> Hãy dùng **/find [MSSV]** hoặc **/lichtuan [MSSV]**."
+            )
         );
         return;
     }
 
     try {
         const data = await fetchStudentSchedule(studentId);
-        await sendMessage(msg.chat.id, formatWeeklySchedule(data));
+        await sendMessage(msg.chat.id, formatWeeklySchedule(data), {
+            continuationHeader: "# {green}📚 LỊCH TUẦN · TIẾP{/green}"
+        });
     } catch (error) {
-        await sendMessage(msg.chat.id, `❌ ${friendlyError(error)}`);
+        await sendMessage(msg.chat.id, formatErrorMessage(error));
     }
 }));
 
 bot.onText(/^\/huythongbao\s*$/i, asyncCommand(async (msg) => {
     const context = getMessageContext(msg);
     if (disableNotifications(context)) {
-        await sendMessage(msg.chat.id, "🔕 Đã tắt lịch 06:00 và cảnh báo thay đổi. MSSV đã lưu vẫn có thể dùng với /lich.");
+        await sendMessage(
+            msg.chat.id,
+            "# {orange}🔕 ĐÃ TẮT THÔNG BÁO{/orange}\n\n" +
+            "> Bot sẽ không kiểm tra lịch lúc 01:00 hoặc gửi lịch lúc 06:00.\n\n" +
+            "{green}MSSV đã lưu vẫn có thể dùng với /lich và /lichtuan.{/green}"
+        );
     } else {
-        await sendMessage(msg.chat.id, "Cuộc trò chuyện này chưa đăng ký thông báo lịch học.");
+        await sendMessage(
+            msg.chat.id,
+            formatWarningMessage(
+                "CHƯA ĐĂNG KÝ THÔNG BÁO",
+                "> Dùng **/dangky** để bật thông báo lịch học."
+            )
+        );
     }
 }));
 
 bot.onText(/^\/help\s*$/i, (msg) => {
-    const helpMessage = `Các lệnh có sẵn:
-/find [MSSV] - Kiểm tra và lưu MSSV, không tự bật thông báo
-/dangky [MSSV] - Kiểm tra 01:00, xác nhận và nhận lịch lúc 06:00
-/dangky - Đăng ký bằng MSSV đã lưu qua /find
-/lich [MSSV] - Xem lịch học hôm nay của MSSV
-/lich - Xem lịch của MSSV đã lưu bằng /find
-/lichtuan [MSSV] - Xem lịch từ Thứ Hai đến Chủ nhật
-/lichtuan - Xem lịch tuần của MSSV đã lưu
-/huythongbao - Tắt kiểm tra 01:00, lịch 06:00 và cảnh báo
-/time - Xem giờ máy chủ và giờ Việt Nam
-/help - Xem hướng dẫn`;
+    const helpMessage = `# {green}🤖 HƯỚNG DẪN ZALOBOT{/green}
+
+## {orange}🔎 TRA CỨU LỊCH{/orange}
+- **/find [MSSV]** — Kiểm tra và lưu MSSV
+- **/lich [MSSV]** — Xem lịch hôm nay
+- **/lichtuan [MSSV]** — Xem lịch cả tuần
+
+> Có thể bỏ `[MSSV]` với **/lich** và **/lichtuan** sau khi đã dùng **/find**.
+
+## {orange}🔔 THÔNG BÁO{/orange}
+- **/dangky [MSSV]** — Bật kiểm tra 01:00 và thông báo 06:00
+- **/dangky** — Đăng ký bằng MSSV đã lưu
+- **/huythongbao** — Tắt toàn bộ thông báo tự động
+
+## {orange}⚙️ HỆ THỐNG{/orange}
+- **/time** — Xem giờ máy chủ và giờ Việt Nam
+- **/help** — Xem hướng dẫn này`;
     sendMessage(msg.chat.id, helpMessage).catch(() => {});
 });
 
 bot.onText(/^\/time\s*$/i, (msg) => {
     const vietnam = getVietnamDateInfo();
-    const message = `Server ISO: ${new Date().toISOString()}\nGiờ Việt Nam: ${vietnam.formattedDateTime}\nMúi giờ bot: ${TIME_ZONE}`;
+    const message = `# {green}🕐 THỜI GIAN HỆ THỐNG{/green}
+
+> 🖥️ **Server ISO:** ${escapeMarkdown(new Date().toISOString())}
+> 🇻🇳 **Giờ Việt Nam:** ${escapeMarkdown(vietnam.formattedDateTime)}
+> 🌏 **Múi giờ bot:** ${escapeMarkdown(TIME_ZONE)}
+
+{green}Bot luôn lập lịch theo giờ Thành phố Hồ Chí Minh.{/green}`;
     sendMessage(msg.chat.id, message).catch(() => {});
 });
 
@@ -314,7 +377,6 @@ async function confirmAndNotifyAtSix() {
                     for (const subscription of targetMap.values()) {
                         try {
                             await sendMessage(subscription.chatId, changeMessage, {
-                                parse_mode: "markdown",
                                 continuationHeader: "# {red}⚠️ LỊCH HỌC THAY ĐỔI · TIẾP{/red}"
                             });
                         } catch (error) {
@@ -326,7 +388,9 @@ async function confirmAndNotifyAtSix() {
                 const dailyMessage = formatDailySchedule(data);
                 for (const subscription of targetMap.values()) {
                     try {
-                        await sendMessage(subscription.chatId, dailyMessage);
+                        await sendMessage(subscription.chatId, dailyMessage, {
+                            continuationHeader: "# {green}📚 LỊCH HÔM NAY · TIẾP{/green}"
+                        });
                     } catch (error) {
                         logDiscord("ERROR", `Không thể gửi lịch 06:00 cho chat ${subscription.chatId}: ${error.message}`);
                     }

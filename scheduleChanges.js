@@ -2,6 +2,7 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const { getApiDateTimeInfo, getVietnamDateInfo } = require("./timezone");
+const { escapeMarkdown } = require("./richText");
 
 const FILE_PATH = path.join(__dirname, "scheduleSnapshots.json");
 const SNAPSHOT_SCHEMA_VERSION = 2;
@@ -259,10 +260,6 @@ function statusLabel(status) {
     if (status === 6) return "Nghỉ lễ";
     if (![0, 4, 5, 10].includes(status)) return "Báo nghỉ";
     return "Đang học";
-}
-
-function escapeMarkdown(value) {
-    return text(value).replace(/([\\*_~`#>{}\[\]])/g, "\\$1");
 }
 
 function formatDateKey(dateKey) {

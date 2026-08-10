@@ -39,4 +39,4 @@ Chạy kiểm thử bằng `npm test`.
 
 Bot chỉ kiểm tra thay đổi hai lần mỗi ngày theo `Asia/Ho_Chi_Minh`: lúc `01:00` bot chụp lịch lần 1 nhưng không gửi tin; lúc `06:00` bot tải lại lần 2, chỉ cảnh báo nếu kết quả giống bản chụp 01:00 rồi gửi lịch hôm nay. Mốc so sánh được lưu trong `scheduleSnapshots.json` và không được commit lên Git.
 
-Thông báo thay đổi dùng rich text Markdown của Zalo Bot: có tiêu đề, màu theo loại thay đổi và ngày ở định dạng `dd/mm/yyyy`. Bot đối chiếu buổi học bằng `NhomID` thay vì `ID` thứ tự để tránh báo nhầm hàng loạt khi nhà trường chèn hoặc xóa lịch.
+Mọi phản hồi của bot đều dùng rich text Markdown của Zalo Bot: có tiêu đề, phân cấp nội dung và màu theo trạng thái. Ngày trong lịch và thông báo thay đổi dùng định dạng `dd/mm/yyyy`. Bot đối chiếu buổi học bằng `NhomID` thay vì `ID` thứ tự để tránh báo nhầm hàng loạt khi nhà trường chèn hoặc xóa lịch.

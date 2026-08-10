@@ -14,6 +14,7 @@ const {
     getVietnamWeekInfo,
     toLhuQueryDate
 } = require("../timezone");
+const { escapeMarkdown } = require("../richText");
 
 test("chuẩn hóa ngày Việt Nam tại ranh giới UTC", () => {
     const date = new Date("2026-08-08T17:00:00.000Z");
@@ -79,6 +80,8 @@ test("định dạng tin nhắn lịch học", () => {
         }]
     };
     const message = formatDailySchedule(data, new Date("2026-08-09T05:00:00Z"));
+    assert.match(message, /^# \{green\}📚 LỊCH HỌC HÔM NAY\{\/green\}/);
+    assert.match(message, /\{orange\}🗓️ 1 BUỔI HỌC\{\/orange\}/);
     assert.match(message, /Lập trình Web/);
     assert.match(message, /07:00 - 09:15/);
     assert.match(message, /Nguyễn Văn A/);
@@ -108,11 +111,45 @@ test("định dạng và nhóm lịch học cả tuần", () => {
         ]
     };
     const message = formatWeeklySchedule(data, new Date("2026-08-09T05:00:00Z"));
-    assert.match(message, /03\/08\/2026 - 09\/08\/2026/);
+    assert.match(message, /^# \{green\}📚 LỊCH HỌC TUẦN NÀY\{\/green\}/);
+    assert.match(message, /03\/08\/2026 – 09\/08\/2026/);
+    assert.match(message, /\{orange\}Tổng cộng 2 buổi học\{\/orange\}/);
     assert.match(message, /THỨ HAI/);
     assert.match(message, /CHỦ NHẬT/);
     assert.match(message, /Lập trình Web/);
     assert.match(message, /Cơ sở dữ liệu/);
+});
+
+test("escape dữ liệu động để không làm vỡ Markdown của Zalo", () => {
+    assert.equal(escapeMarkdown("Nguyễn *A* [K24]"), "Nguyễn \\*A\\* \\[K24\\]");
+
+    const message = formatDailySchedule({
+        studentId: "123456789",
+        studentName: "Nguyễn *A* [K24]",
+        lessons: [{
+            ThoiGianBD: "2026-08-09T07:00:00",
+            ThoiGianKT: "2026-08-09T09:15:00",
+            TenMonHoc: "C# [Nâng cao]",
+            TenPhong: "A_101",
+            Type: 0,
+            TinhTrang: 0
+        }]
+    }, new Date("2026-08-09T05:00:00Z"));
+
+    assert.match(message, /Nguyễn \\\*A\\\* \\\[K24\\\]/);
+    assert.match(message, /C\\# \\\[Nâng cao\\\]/);
+    assert.match(message, /A\\_101/);
+});
+
+test("lịch trống vẫn là một tin rich text", () => {
+    const data = { studentId: "123456789", studentName: "Nguyễn Văn A", lessons: [] };
+    const daily = formatDailySchedule(data, new Date("2026-08-09T05:00:00Z"));
+    const weekly = formatWeeklySchedule(data, new Date("2026-08-09T05:00:00Z"));
+
+    assert.match(daily, /^# \{green\}/);
+    assert.match(daily, /\{green\}🌿 Hôm nay không có lịch học\.\{\/green\}/);
+    assert.match(weekly, /^# \{green\}/);
+    assert.match(weekly, /\{green\}🌿 Tuần này không có lịch học\.\{\/green\}/);
 });
 
 test("kiểm tra định dạng MSSV", () => {
