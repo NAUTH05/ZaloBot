@@ -306,7 +306,7 @@ bot.onText(/^\/help\s*$/i, (msg) => {
 - **/lich [MSSV]** — Xem lịch hôm nay
 - **/lichtuan [MSSV]** — Xem lịch cả tuần
 
-> Có thể bỏ `[MSSV]` với **/lich** và **/lichtuan** sau khi đã dùng **/find**.
+> Có thể bỏ \`[MSSV]\` với **/lich** và **/lichtuan** sau khi đã dùng **/find**.
 
 ## {orange}[THÔNG BÁO] TỰ ĐỘNG{/orange}
 - **/dangky [MSSV]** — Bật kiểm tra 01:00 và thông báo 06:00
