@@ -45,11 +45,13 @@ const {
     wasResultSent
 } = require("./birthdayStore");
 
+const isTestEnv = process.env.NODE_ENV === "test" || require.main !== module;
+
 if (!process.env.BOT_TOKEN) {
     throw new Error("Thiếu BOT_TOKEN trong file .env");
 }
 
-const bot = new ZaloBot(process.env.BOT_TOKEN, { polling: true });
+const bot = new ZaloBot(process.env.BOT_TOKEN, { polling: !isTestEnv });
 
 function logDiscord(level, message) {
     const webhookUrl = process.env.DISCORD_WEBHOOK;
@@ -178,10 +180,7 @@ function isOwner(context) {
 
 async function requireOwner(context) {
     if (isOwner(context)) return true;
-    const configurationHint = process.env.OWNER_USER_ID
-        ? "Chỉ chủ BOT mới được dùng lệnh này."
-        : "Chưa cấu hình OWNER_USER_ID trong file .env.";
-    await sendMessage(context.chatId, formatWarningMessage("KHÔNG CÓ QUYỀN", `> ${configurationHint}`));
+    await sendMessage(context.chatId, formatWarningMessage("KHÔNG CÓ QUYỀN", "> Bạn không có quyền thực hiện lệnh này."));
     return false;
 }
 
@@ -361,10 +360,8 @@ async function handleCommand(msg, parsedCommand) {
                 chatId,
                 "# {green}[OK] ĐĂNG KÝ THÀNH CÔNG{/green}\n\n" +
                 `**Sinh viên:** ${escapeMarkdown(data.studentName || "Sinh viên")}\n` +
-                `> **MSSV:** ${escapeMarkdown(studentId)}\n` +
-                "> **01:00:** Chụp lịch lần thứ nhất.\n" +
-                "> **06:00:** Xác nhận thay đổi và gửi lịch hôm nay.\n\n" +
-                "{orange}Chỉ thay đổi xuất hiện giống nhau ở cả hai lần mới được thông báo.{/orange}"
+                `> **MSSV:** ${escapeMarkdown(studentId)}\n\n` +
+                "{green}Thông báo lịch học sẽ được tự động gửi vào lúc 06:00 hàng ngày.{/green}"
             );
         } catch (error) {
             await sendMessage(chatId, formatErrorMessage(error));
@@ -424,7 +421,7 @@ async function handleCommand(msg, parsedCommand) {
             await sendMessage(
                 chatId,
                 "# {orange}[TẮT] ĐÃ TẮT THÔNG BÁO{/orange}\n\n" +
-                "> Bot sẽ không kiểm tra lịch lúc 01:00 hoặc gửi lịch lúc 06:00.\n\n" +
+                "> Đã tắt tự động gửi thông báo lịch học hàng ngày.\n\n" +
                 "{green}MSSV đã lưu vẫn có thể dùng với /lich và /lichtuan.{/green}"
             );
         } else {
@@ -586,38 +583,40 @@ async function handleCommand(msg, parsedCommand) {
             "{orange}Nếu sửa câu hỏi hoặc câu trả lời, chạy /congbo lần nữa sẽ gửi bản cập nhật; bản không đổi sẽ không bị gửi trùng.{/orange}"
         );
     } else if (command === "myid") {
-        await sendMessage(chatId, `# {green}[ID] THÔNG TIN TÀI KHOẢN{/green}
-
-> **User ID:** ${escapeMarkdown(context.userId)}
-> **Chat ID:** ${escapeMarkdown(context.chatId)}
-
-{orange}Dùng User ID làm OWNER_USER_ID trong .env nếu đây là tài khoản chủ BOT.{/orange}`);
+        await sendMessage(
+            chatId,
+            "# {green}[ID] THÔNG TIN TÀI KHOẢN{/green}\n\n" +
+            `> **User ID:** ${escapeMarkdown(context.userId)}\n` +
+            `> **Chat ID:** ${escapeMarkdown(context.chatId)}`
+        );
     } else if (command === "help") {
+        const ownerSection = isOwner(context)
+            ? "\n\n## {orange}[CHỦ BOT] SINH NHẬT{/orange}\n" +
+              "- **/danhsach [năm]** — Xem các câu hỏi\n" +
+              "- **/them**, **/sua**, **/xoa** — Quản lý câu hỏi\n" +
+              "- **/traloi [ID] [nội dung]** — Ghi hoặc sửa câu trả lời\n" +
+              "- **/congbo [năm]** — Gửi các câu đã trả lời tới mọi chat"
+            : "";
+
         const helpMessage = `# {green}[BOT] HƯỚNG DẪN ZALOBOT{/green}
 
 ## {orange}[TRA CỨU] LỊCH HỌC{/orange}
 - **/find [MSSV]** — Kiểm tra và lưu MSSV
-- **/lich [MSSV]** — Xem lịch hôm nay
-- **/lichtuan [MSSV]** — Xem lịch cả tuần
+- **/lich [MSSV]** — Xem lịch học hôm nay
+- **/lichtuan [MSSV]** — Xem lịch học cả tuần
 
 > Có thể bỏ \`[MSSV]\` với **/lich** và **/lichtuan** sau khi đã dùng **/find**.
 
 ## {orange}[THÔNG BÁO] TỰ ĐỘNG{/orange}
-- **/dangky [MSSV]** — Bật kiểm tra 01:00 và thông báo 06:00
+- **/dangky [MSSV]** — Bật nhận thông báo lịch học 06:00 hàng ngày
 - **/dangky** — Đăng ký bằng MSSV đã lưu
 - **/huythongbao** — Tắt toàn bộ thông báo tự động
 
 ## {orange}[HỆ THỐNG] THÔNG TIN{/orange}
-- **/time** — Xem giờ máy chủ và giờ Việt Nam
+- **/time** — Xem giờ hệ thống
 - **/myid** — Xem User ID và Chat ID
 - **/sinhnhat [câu hỏi]** — Gửi câu hỏi trong ngày 27/08
-- **/help** — Xem hướng dẫn này
-
-## {orange}[CHỦ BOT] SINH NHẬT{/orange}
-- **/danhsach [năm]** — Xem các câu hỏi
-- **/them**, **/sua**, **/xoa** — Quản lý câu hỏi
-- **/traloi [ID] [nội dung]** — Ghi hoặc sửa câu trả lời
-- **/congbo [năm]** — Gửi các câu đã trả lời tới mọi chat`;
+- **/help** — Xem hướng dẫn này${ownerSection}`;
         await sendMessage(chatId, helpMessage);
     } else if (command === "time") {
         const vietnam = getVietnamDateInfo();
@@ -705,12 +704,14 @@ async function confirmAndNotifyAtSix() {
     }
 }
 
-schedule.scheduleJob({ rule: "0 1 * * *", tz: TIME_ZONE }, captureSchedulesAtOne);
-schedule.scheduleJob({ rule: "0 6 * * *", tz: TIME_ZONE }, confirmAndNotifyAtSix);
-// 00:05 ngày 27/08 hằng năm. Kiểm tra lúc khởi động ở dưới sẽ bù nếu bot khởi động muộn.
-schedule.scheduleJob({ rule: "5 0 27 8 *", tz: TIME_ZONE }, asyncCommand(async () => {
-    await sendBirthdayInvitations();
-}));
+if (!isTestEnv) {
+    schedule.scheduleJob({ rule: "0 1 * * *", tz: TIME_ZONE }, captureSchedulesAtOne);
+    schedule.scheduleJob({ rule: "0 6 * * *", tz: TIME_ZONE }, confirmAndNotifyAtSix);
+    // 00:05 ngày 27/08 hằng năm. Kiểm tra lúc khởi động ở dưới sẽ bù nếu bot khởi động muộn.
+    schedule.scheduleJob({ rule: "5 0 27 8 *", tz: TIME_ZONE }, asyncCommand(async () => {
+        await sendBirthdayInvitations();
+    }));
+}
 
 bot.on("message", asyncCommand(async (msg) => {
     const text = msg.text || "[không có nội dung]";
@@ -740,20 +741,23 @@ bot.on("error", (error) => {
     logDiscord("ERROR", `error: ${error.message}`);
 });
 
-console.log(`Bot đã khởi động. Kiểm tra lịch lúc 01:00 và 06:00 (${TIME_ZONE}).`);
-logDiscord("INFO", `Bot đã khởi động - timezone ${TIME_ZONE}`);
+if (!isTestEnv) {
+    console.log(`Bot đã khởi động. Kiểm tra lịch lúc 01:00 và 06:00 (${TIME_ZONE}).`);
+    logDiscord("INFO", `Bot đã khởi động - timezone ${TIME_ZONE}`);
 
-// Không chờ tới năm sau nếu tiến trình được khởi động lại trong chính ngày sinh nhật.
-sendBirthdayInvitations().catch((error) => {
-    console.error("Lỗi gửi thông báo sinh nhật khi khởi động:", error);
-    logDiscord("ERROR", `birthday_startup_error: ${error.message}`);
-});
+    // Không chờ tới năm sau nếu tiến trình được khởi động lại trong chính ngày sinh nhật.
+    sendBirthdayInvitations().catch((error) => {
+        console.error("Lỗi gửi thông báo sinh nhật khi khởi động:", error);
+        logDiscord("ERROR", `birthday_startup_error: ${error.message}`);
+    });
+}
 
 module.exports = {
     formatBirthdayInvitation,
     formatBirthdayResults,
     getBroadcastTargets,
     handleCommand,
+    isOwner,
     parseCommand,
     parseQuestionIdAndText,
     publishBirthdayResults,

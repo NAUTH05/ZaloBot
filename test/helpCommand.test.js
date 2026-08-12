@@ -3,27 +3,42 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-test("lệnh /help tạo tin nhắn hướng dẫn thành công và không bị lỗi ReferenceError", async () => {
+test("lệnh /help phản hồi động tùy theo quyền owner", async (t) => {
     const mainPath = path.join(__dirname, "../main.js");
     const code = fs.readFileSync(mainPath, "utf8");
 
     const helpMatch = code.match(/else if \s*\(command === "help"\)\s*\{([\s\S]*?)\n\s*\} else if/);
     assert.ok(helpMatch, "Tìm thấy khai báo xử lý lệnh help trong handleCommand");
 
+    const originalOwner = process.env.OWNER_USER_ID;
+    process.env.OWNER_USER_ID = "owner123";
+    t.after(() => {
+        if (originalOwner === undefined) {
+            delete process.env.OWNER_USER_ID;
+        } else {
+            process.env.OWNER_USER_ID = originalOwner;
+        }
+    });
+
     const handlerBody = helpMatch[1];
-    let sentMessage = null;
-    const fakeSendMessage = (chatId, messageText) => {
-        sentMessage = messageText;
-        return Promise.resolve();
-    };
+    const { isOwner } = require("../main.js");
 
     const AsyncFunction = Object.getPrototypeOf(async function () { }).constructor;
-    const fn = new AsyncFunction("chatId", "sendMessage", handlerBody);
-    await fn(123456, fakeSendMessage);
+    const fn = new AsyncFunction("chatId", "sendMessage", "context", "isOwner", handlerBody);
 
-    assert.ok(sentMessage, "Tin nhắn /help đã được tạo");
-    assert.match(sentMessage, /HƯỚNG DẪN ZALOBOT/);
-    assert.match(sentMessage, /Có thể bỏ `\[MSSV\]` với \*\*\/lich\*\*/);
+    // Người dùng thường (không phải owner)
+    let normalMessage = null;
+    await fn(123456, (chatId, messageText) => { normalMessage = messageText; return Promise.resolve(); }, { userId: "user456", chatId: "123456" }, isOwner);
+    assert.ok(normalMessage, "Tin nhắn /help cho người dùng thường đã được tạo");
+    assert.match(normalMessage, /HƯỚNG DẪN ZALOBOT/);
+    assert.doesNotMatch(normalMessage, /\[CHỦ BOT\]/);
+
+    // Chủ BOT (owner)
+    let ownerMessage = null;
+    await fn(123456, (chatId, messageText) => { ownerMessage = messageText; return Promise.resolve(); }, { userId: "owner123", chatId: "123456" }, isOwner);
+    assert.ok(ownerMessage, "Tin nhắn /help cho chủ BOT đã được tạo");
+    assert.match(ownerMessage, /HƯỚNG DẪN ZALOBOT/);
+    assert.match(ownerMessage, /\[CHỦ BOT\]/);
 });
 
 test("parseCommand bóc tách lệnh chính xác với mọi định dạng mention Zalo trong nhóm", () => {
