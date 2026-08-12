@@ -7,10 +7,10 @@ test("lệnh /help tạo tin nhắn hướng dẫn thành công và không bị 
     const mainPath = path.join(__dirname, "../main.js");
     const code = fs.readFileSync(mainPath, "utf8");
 
-    const helpHandlerMatch = code.match(/bot\.onText\([^,]+\/help[^,]+,\s*(?:asyncCommand\()?async\s*\((?:msg|\w+)\)\s*=>\s*\{([\s\S]*?)\n\}\)?\);/);
-    assert.ok(helpHandlerMatch, "Tìm thấy khai báo bot.onText cho /help");
+    const helpMatch = code.match(/else if \s*\(command === "help"\)\s*\{([\s\S]*?)\n\s*\} else if/);
+    assert.ok(helpMatch, "Tìm thấy khai báo xử lý lệnh help trong handleCommand");
 
-    const handlerBody = helpHandlerMatch[1];
+    const handlerBody = helpMatch[1];
     let sentMessage = null;
     const fakeSendMessage = (chatId, messageText) => {
         sentMessage = messageText;
@@ -18,10 +18,22 @@ test("lệnh /help tạo tin nhắn hướng dẫn thành công và không bị 
     };
 
     const AsyncFunction = Object.getPrototypeOf(async function () { }).constructor;
-    const fn = new AsyncFunction("msg", "sendMessage", handlerBody);
-    await fn({ chat: { id: 123456 } }, fakeSendMessage);
+    const fn = new AsyncFunction("chatId", "sendMessage", handlerBody);
+    await fn(123456, fakeSendMessage);
 
     assert.ok(sentMessage, "Tin nhắn /help đã được tạo");
     assert.match(sentMessage, /HƯỚNG DẪN ZALOBOT/);
     assert.match(sentMessage, /Có thể bỏ `\[MSSV\]` với \*\*\/lich\*\*/);
+});
+
+test("parseCommand bóc tách lệnh chính xác với mọi định dạng mention Zalo trong nhóm", () => {
+    const { parseCommand } = require("../main.js");
+
+    assert.deepEqual(parseCommand("/help"), { command: "help", argument: "" });
+    assert.deepEqual(parseCommand("/help @Bot MrYukitoBoBo"), { command: "help", argument: "" });
+    assert.deepEqual(parseCommand("/help@Bot MrYukitoBoBo"), { command: "help", argument: "" });
+    assert.deepEqual(parseCommand("@Bot MrYukitoBoBo /help"), { command: "help", argument: "" });
+    assert.deepEqual(parseCommand("@Bot MrYukitoBoBo /help "), { command: "help", argument: "" });
+    assert.deepEqual(parseCommand("@Bot MrYukitoBoBo /find 123456789"), { command: "find", argument: "123456789" });
+    assert.deepEqual(parseCommand("/lich@botname 123456789"), { command: "lich", argument: "123456789" });
 });

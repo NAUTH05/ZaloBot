@@ -132,174 +132,179 @@ function asyncCommand(handler) {
     };
 }
 
-bot.onText(/^\/start(?:@\w+)?\s*$/i, asyncCommand(async (msg) => {
-    const displayName = escapeMarkdown(msg.from?.display_name || "bạn");
-    await sendMessage(
-        msg.chat.id,
-        "# {green}[BOT] LỊCH HỌC LHU{/green}\n\n" +
-        `Xin chào **${displayName}**!\n\n` +
-        "> **Tra cứu:** Dùng **/find [MSSV]** để lưu mã sinh viên.\n" +
-        "> **Thông báo:** Sau đó dùng **/dangky** để bật thông báo lịch học.\n\n" +
-        "{orange}Gõ /help để xem toàn bộ lệnh.{/orange}"
-    );
-}));
+function parseCommand(rawText) {
+    if (!rawText || typeof rawText !== "string") return null;
 
-bot.onText(/^\/find(?:@\w+)?(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
+    // Xóa bot mention dạng /cmd@Bot MrYukitoBoBo hoặc /cmd@botname -> /cmd
+    let clean = rawText
+        .replace(/(\/\w+)@Bot(?:\s+[\w\d_]+)*/gi, "$1")
+        .replace(/(\/\w+)@[\w\d_]+/gi, "$1")
+        .replace(/@Bot(?:\s+[\w\d_]+)*/gi, "")
+        .replace(/@[\w\d_]+/gi, "")
+        .trim();
+
+    if (!clean.startsWith("/")) return null;
+
+    const parts = clean.split(/\s+/);
+    const command = parts[0].slice(1).toLowerCase();
+    const argument = parts.slice(1).join(" ").trim();
+
+    return { command, argument };
+}
+
+async function handleCommand(msg, parsedCommand) {
     const context = getMessageContext(msg);
-    const studentId = normalizeStudentId(getCommandArgument(match));
-    if (!studentId) {
-        await sendMessage(msg.chat.id, formatWarningMessage(
-            "SAI CÚ PHÁP",
-            "> **Cú pháp:** /find [MSSV]\n> **Ví dụ:** /find 123456789"
-        ));
-        return;
-    }
+    const chatId = context.chatId;
+    const { command, argument } = parsedCommand;
 
-    try {
-        const data = await fetchStudentSchedule(studentId);
-        const subscription = saveStudent(context, {
-            studentId,
-            studentName: data.studentName
-        });
-
+    if (command === "start") {
+        const displayName = escapeMarkdown(msg.from?.display_name || "bạn");
         await sendMessage(
-            msg.chat.id,
-            "# {green}[OK] ĐÃ LƯU MSSV{/green}\n\n" +
-            `**Sinh viên:** ${escapeMarkdown(data.studentName || "Sinh viên")}\n` +
-            `> **MSSV:** ${escapeMarkdown(studentId)}\n` +
-            `> **Tài khoản:** ${escapeMarkdown(context.userDisplayName || "Tài khoản Zalo này")}\n\n` +
-            (subscription.notificationsEnabled
-                ? "{green}[BẬT] Thông báo lịch đang hoạt động.{/green}\n\n"
-                : "{orange}[TẮT] Thông báo lịch chưa được bật.{/orange}\n\n") +
-            "> Dùng **/lich** để xem lịch hoặc **/dangky** để nhận lịch lúc 06:00."
+            chatId,
+            "# {green}[BOT] LỊCH HỌC LHU{/green}\n\n" +
+            `Xin chào **${displayName}**!\n\n` +
+            "> **Tra cứu:** Dùng **/find [MSSV]** để lưu mã sinh viên.\n" +
+            "> **Thông báo:** Sau đó dùng **/dangky** để bật thông báo lịch học.\n\n" +
+            "{orange}Gõ /help để xem toàn bộ lệnh.{/orange}"
         );
-    } catch (error) {
-        await sendMessage(msg.chat.id, formatErrorMessage(error));
-    }
-}));
+    } else if (command === "find") {
+        const studentId = normalizeStudentId(argument);
+        if (!studentId) {
+            await sendMessage(chatId, formatWarningMessage(
+                "SAI CÚ PHÁP",
+                "> **Cú pháp:** /find [MSSV]\n> **Ví dụ:** /find 123456789"
+            ));
+            return;
+        }
 
-bot.onText(/^\/dangky(?:@\w+)?(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
-    const context = getMessageContext(msg);
-    const argument = getCommandArgument(match);
-    const saved = getSubscription(context);
-    const studentId = resolveStudentIdForCommand(argument, saved?.studentId);
+        try {
+            const data = await fetchStudentSchedule(studentId);
+            const subscription = saveStudent(context, {
+                studentId,
+                studentName: data.studentName
+            });
 
-    if (!studentId) {
-        await sendMessage(
-            msg.chat.id,
-            formatWarningMessage(
-                argument ? "MSSV KHÔNG HỢP LỆ" : "CHƯA LƯU MSSV",
-                argument
-                    ? "> MSSV phải gồm đúng **9 chữ số**."
-                    : "> Hãy dùng **/find [MSSV]** hoặc **/dangky [MSSV]**."
-            )
-        );
-        return;
-    }
+            await sendMessage(
+                chatId,
+                "# {green}[OK] ĐÃ LƯU MSSV{/green}\n\n" +
+                `**Sinh viên:** ${escapeMarkdown(data.studentName || "Sinh viên")}\n` +
+                `> **MSSV:** ${escapeMarkdown(studentId)}\n` +
+                `> **Tài khoản:** ${escapeMarkdown(context.userDisplayName || "Tài khoản Zalo này")}\n\n` +
+                (subscription.notificationsEnabled
+                    ? "{green}[BẬT] Thông báo lịch đang hoạt động.{/green}\n\n"
+                    : "{orange}[TẮT] Thông báo lịch chưa được bật.{/orange}\n\n") +
+                "> Dùng **/lich** để xem lịch hoặc **/dangky** để nhận lịch lúc 06:00."
+            );
+        } catch (error) {
+            await sendMessage(chatId, formatErrorMessage(error));
+        }
+    } else if (command === "dangky") {
+        const saved = getSubscription(context);
+        const studentId = resolveStudentIdForCommand(argument, saved?.studentId);
 
-    try {
-        const data = await fetchStudentSchedule(studentId);
-        const wasAlreadyWatched = Object.values(getEnabledSubscriptions())
-            .some((subscription) => subscription.studentId === studentId);
-        enableNotifications(context, {
-            studentId,
-            studentName: data.studentName
-        });
-        initializeScheduleSnapshot(data, new Date(), !wasAlreadyWatched);
-        await sendMessage(
-            msg.chat.id,
-            "# {green}[OK] ĐĂNG KÝ THÀNH CÔNG{/green}\n\n" +
-            `**Sinh viên:** ${escapeMarkdown(data.studentName || "Sinh viên")}\n` +
-            `> **MSSV:** ${escapeMarkdown(studentId)}\n` +
-            "> **01:00:** Chụp lịch lần thứ nhất.\n" +
-            "> **06:00:** Xác nhận thay đổi và gửi lịch hôm nay.\n\n" +
-            "{orange}Chỉ thay đổi xuất hiện giống nhau ở cả hai lần mới được thông báo.{/orange}"
-        );
-    } catch (error) {
-        await sendMessage(msg.chat.id, formatErrorMessage(error));
-    }
-}));
+        if (!studentId) {
+            await sendMessage(
+                chatId,
+                formatWarningMessage(
+                    argument ? "MSSV KHÔNG HỢP LỆ" : "CHƯA LƯU MSSV",
+                    argument
+                        ? "> MSSV phải gồm đúng **9 chữ số**."
+                        : "> Hãy dùng **/find [MSSV]** hoặc **/dangky [MSSV]**."
+                )
+            );
+            return;
+        }
 
-bot.onText(/^\/lich(?:@\w+)?(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
-    const context = getMessageContext(msg);
-    const argument = getCommandArgument(match);
-    const saved = getSubscription(context);
-    const studentId = resolveStudentIdForCommand(argument, saved?.studentId);
+        try {
+            const data = await fetchStudentSchedule(studentId);
+            const wasAlreadyWatched = Object.values(getEnabledSubscriptions())
+                .some((subscription) => subscription.studentId === studentId);
+            enableNotifications(context, {
+                studentId,
+                studentName: data.studentName
+            });
+            initializeScheduleSnapshot(data, new Date(), !wasAlreadyWatched);
+            await sendMessage(
+                chatId,
+                "# {green}[OK] ĐĂNG KÝ THÀNH CÔNG{/green}\n\n" +
+                `**Sinh viên:** ${escapeMarkdown(data.studentName || "Sinh viên")}\n` +
+                `> **MSSV:** ${escapeMarkdown(studentId)}\n` +
+                "> **01:00:** Chụp lịch lần thứ nhất.\n" +
+                "> **06:00:** Xác nhận thay đổi và gửi lịch hôm nay.\n\n" +
+                "{orange}Chỉ thay đổi xuất hiện giống nhau ở cả hai lần mới được thông báo.{/orange}"
+            );
+        } catch (error) {
+            await sendMessage(chatId, formatErrorMessage(error));
+        }
+    } else if (command === "lich") {
+        const saved = getSubscription(context);
+        const studentId = resolveStudentIdForCommand(argument, saved?.studentId);
 
-    if (!studentId) {
-        await sendMessage(
-            msg.chat.id,
-            formatWarningMessage(
-                argument ? "MSSV KHÔNG HỢP LỆ" : "CHƯA LƯU MSSV",
-                argument
-                    ? "> MSSV phải gồm đúng **9 chữ số**."
-                    : "> Hãy dùng **/find [MSSV]** hoặc **/lich [MSSV]**."
-            )
-        );
-        return;
-    }
+        if (!studentId) {
+            await sendMessage(
+                chatId,
+                formatWarningMessage(
+                    argument ? "MSSV KHÔNG HỢP LỆ" : "CHƯA LƯU MSSV",
+                    argument
+                        ? "> MSSV phải gồm đúng **9 chữ số**."
+                        : "> Hãy dùng **/find [MSSV]** hoặc **/lich [MSSV]**."
+                )
+            );
+            return;
+        }
 
-    try {
-        const data = await fetchStudentSchedule(studentId);
-        await sendMessage(msg.chat.id, formatDailySchedule(data), {
-            continuationHeader: "# {green}[LỊCH] HÔM NAY · TIẾP{/green}"
-        });
-    } catch (error) {
-        await sendMessage(msg.chat.id, formatErrorMessage(error));
-    }
-}));
+        try {
+            const data = await fetchStudentSchedule(studentId);
+            await sendMessage(chatId, formatDailySchedule(data), {
+                continuationHeader: "# {green}[LỊCH] HÔM NAY · TIẾP{/green}"
+            });
+        } catch (error) {
+            await sendMessage(chatId, formatErrorMessage(error));
+        }
+    } else if (command === "lichtuan") {
+        const saved = getSubscription(context);
+        const studentId = resolveStudentIdForCommand(argument, saved?.studentId);
 
-bot.onText(/^\/lichtuan(?:@\w+)?(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
-    const context = getMessageContext(msg);
-    const argument = getCommandArgument(match);
-    const saved = getSubscription(context);
-    const studentId = resolveStudentIdForCommand(argument, saved?.studentId);
+        if (!studentId) {
+            await sendMessage(
+                chatId,
+                formatWarningMessage(
+                    argument ? "MSSV KHÔNG HỢP LỆ" : "CHƯA LƯU MSSV",
+                    argument
+                        ? "> MSSV phải gồm đúng **9 chữ số**."
+                        : "> Hãy dùng **/find [MSSV]** hoặc **/lichtuan [MSSV]**."
+                )
+            );
+            return;
+        }
 
-    if (!studentId) {
-        await sendMessage(
-            msg.chat.id,
-            formatWarningMessage(
-                argument ? "MSSV KHÔNG HỢP LỆ" : "CHƯA LƯU MSSV",
-                argument
-                    ? "> MSSV phải gồm đúng **9 chữ số**."
-                    : "> Hãy dùng **/find [MSSV]** hoặc **/lichtuan [MSSV]**."
-            )
-        );
-        return;
-    }
-
-    try {
-        const data = await fetchStudentSchedule(studentId);
-        await sendMessage(msg.chat.id, formatWeeklySchedule(data), {
-            continuationHeader: "# {green}[LỊCH] TUẦN · TIẾP{/green}"
-        });
-    } catch (error) {
-        await sendMessage(msg.chat.id, formatErrorMessage(error));
-    }
-}));
-
-bot.onText(/^\/huythongbao(?:@\w+)?\s*$/i, asyncCommand(async (msg) => {
-    const context = getMessageContext(msg);
-    if (disableNotifications(context)) {
-        await sendMessage(
-            msg.chat.id,
-            "# {orange}[TẮT] ĐÃ TẮT THÔNG BÁO{/orange}\n\n" +
-            "> Bot sẽ không kiểm tra lịch lúc 01:00 hoặc gửi lịch lúc 06:00.\n\n" +
-            "{green}MSSV đã lưu vẫn có thể dùng với /lich và /lichtuan.{/green}"
-        );
-    } else {
-        await sendMessage(
-            msg.chat.id,
-            formatWarningMessage(
-                "CHƯA ĐĂNG KÝ THÔNG BÁO",
-                "> Dùng **/dangky** để bật thông báo lịch học."
-            )
-        );
-    }
-}));
-
-bot.onText(/^\/help(?:@\w+)?\s*$/i, asyncCommand(async (msg) => {
-    const helpMessage = `# {green}[BOT] HƯỚNG DẪN ZALOBOT{/green}
+        try {
+            const data = await fetchStudentSchedule(studentId);
+            await sendMessage(chatId, formatWeeklySchedule(data), {
+                continuationHeader: "# {green}[LỊCH] TUẦN · TIẾP{/green}"
+            });
+        } catch (error) {
+            await sendMessage(chatId, formatErrorMessage(error));
+        }
+    } else if (command === "huythongbao") {
+        if (disableNotifications(context)) {
+            await sendMessage(
+                chatId,
+                "# {orange}[TẮT] ĐÃ TẮT THÔNG BÁO{/orange}\n\n" +
+                "> Bot sẽ không kiểm tra lịch lúc 01:00 hoặc gửi lịch lúc 06:00.\n\n" +
+                "{green}MSSV đã lưu vẫn có thể dùng với /lich và /lichtuan.{/green}"
+            );
+        } else {
+            await sendMessage(
+                chatId,
+                formatWarningMessage(
+                    "CHƯA ĐĂNG KÝ THÔNG BÁO",
+                    "> Dùng **/dangky** để bật thông báo lịch học."
+                )
+            );
+        }
+    } else if (command === "help") {
+        const helpMessage = `# {green}[BOT] HƯỚNG DẪN ZALOBOT{/green}
 
 ## {orange}[TRA CỨU] LỊCH HỌC{/orange}
 - **/find [MSSV]** — Kiểm tra và lưu MSSV
@@ -316,19 +321,50 @@ bot.onText(/^\/help(?:@\w+)?\s*$/i, asyncCommand(async (msg) => {
 ## {orange}[HỆ THỐNG] THÔNG TIN{/orange}
 - **/time** — Xem giờ máy chủ và giờ Việt Nam
 - **/help** — Xem hướng dẫn này`;
-    await sendMessage(msg.chat.id, helpMessage);
-}));
-
-bot.onText(/^\/time(?:@\w+)?\s*$/i, asyncCommand(async (msg) => {
-    const vietnam = getVietnamDateInfo();
-    const message = `# {green}[GIỜ] THỜI GIAN HỆ THỐNG{/green}
+        await sendMessage(chatId, helpMessage);
+    } else if (command === "time") {
+        const vietnam = getVietnamDateInfo();
+        const message = `# {green}[GIỜ] THỜI GIAN HỆ THỐNG{/green}
 
 > **Server ISO:** ${escapeMarkdown(new Date().toISOString())}
 > **Giờ Việt Nam:** ${escapeMarkdown(vietnam.formattedDateTime)}
 > **Múi giờ bot:** ${escapeMarkdown(TIME_ZONE)}
 
 {green}Bot luôn lập lịch theo giờ Thành phố Hồ Chí Minh.{/green}`;
-    await sendMessage(msg.chat.id, message);
+        await sendMessage(chatId, message);
+    }
+}
+
+bot.onText(/^\/start(?:@\w+)?\s*$/i, asyncCommand(async (msg) => {
+    await handleCommand(msg, { command: "start", argument: "" });
+}));
+
+bot.onText(/^\/find(?:@\w+)?(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
+    await handleCommand(msg, { command: "find", argument: getCommandArgument(match) });
+}));
+
+bot.onText(/^\/dangky(?:@\w+)?(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
+    await handleCommand(msg, { command: "dangky", argument: getCommandArgument(match) });
+}));
+
+bot.onText(/^\/lich(?:@\w+)?(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
+    await handleCommand(msg, { command: "lich", argument: getCommandArgument(match) });
+}));
+
+bot.onText(/^\/lichtuan(?:@\w+)?(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
+    await handleCommand(msg, { command: "lichtuan", argument: getCommandArgument(match) });
+}));
+
+bot.onText(/^\/huythongbao(?:@\w+)?\s*$/i, asyncCommand(async (msg) => {
+    await handleCommand(msg, { command: "huythongbao", argument: "" });
+}));
+
+bot.onText(/^\/help(?:@\w+)?\s*$/i, asyncCommand(async (msg) => {
+    await handleCommand(msg, { command: "help", argument: "" });
+}));
+
+bot.onText(/^\/time(?:@\w+)?\s*$/i, asyncCommand(async (msg) => {
+    await handleCommand(msg, { command: "time", argument: "" });
 }));
 
 function groupEnabledSubscriptionsByStudent() {
@@ -407,13 +443,18 @@ async function confirmAndNotifyAtSix() {
 schedule.scheduleJob({ rule: "0 1 * * *", tz: TIME_ZONE }, captureSchedulesAtOne);
 schedule.scheduleJob({ rule: "0 6 * * *", tz: TIME_ZONE }, confirmAndNotifyAtSix);
 
-bot.on("message", (msg) => {
+bot.on("message", asyncCommand(async (msg) => {
     const text = msg.text || "[không có nội dung]";
     const context = getMessageContext(msg);
     const from = msg.from?.display_name || context.userId || "unknown";
     console.log("Tin nhắn mới:", from, "→", text);
     logDiscord("INFO", `Tin nhắn từ ${from} (${context.userId}) trong chat ${context.chatId}: ${text}`);
-});
+
+    const parsed = parseCommand(msg.text);
+    if (parsed) {
+        await handleCommand(msg, parsed);
+    }
+}));
 
 bot.on("polling_error", (error) => {
     if (error.code === "EZALO" && error.message?.includes("408")) return;
@@ -428,3 +469,5 @@ bot.on("error", (error) => {
 
 console.log(`Bot đã khởi động. Kiểm tra lịch lúc 01:00 và 06:00 (${TIME_ZONE}).`);
 logDiscord("INFO", `Bot đã khởi động - timezone ${TIME_ZONE}`);
+
+module.exports = { parseCommand, handleCommand };
