@@ -3,7 +3,13 @@ function firstDefined(...values) {
 }
 
 function getMessageContext(msg) {
-    const rawChatId = firstDefined(msg?.chat?.id, msg?.chat_id);
+    const rawChatId = firstDefined(
+        msg?.chat?.id,
+        msg?.chat_id,
+        msg?.group_id,
+        msg?.grid,
+        msg?.thread_id
+    );
     if (rawChatId === undefined) {
         throw new Error("Tin nhắn không có chat.id");
     }
@@ -13,12 +19,14 @@ function getMessageContext(msg) {
         msg?.from?.user_id,
         msg?.sender?.id,
         msg?.sender_id,
-        msg?.user_id
+        msg?.user_id,
+        msg?.uid
     );
     const rawDisplayName = firstDefined(
         msg?.from?.display_name,
         msg?.from?.name,
-        msg?.sender?.display_name
+        msg?.sender?.display_name,
+        msg?.sender?.name
     );
     const chatId = String(rawChatId);
 

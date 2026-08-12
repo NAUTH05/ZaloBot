@@ -132,19 +132,19 @@ function asyncCommand(handler) {
     };
 }
 
-bot.onText(/^\/start\s*$/i, (msg) => {
+bot.onText(/^\/start(?:@\w+)?\s*$/i, asyncCommand(async (msg) => {
     const displayName = escapeMarkdown(msg.from?.display_name || "bạn");
-    sendMessage(
+    await sendMessage(
         msg.chat.id,
         "# {green}[BOT] LỊCH HỌC LHU{/green}\n\n" +
         `Xin chào **${displayName}**!\n\n` +
         "> **Tra cứu:** Dùng **/find [MSSV]** để lưu mã sinh viên.\n" +
         "> **Thông báo:** Sau đó dùng **/dangky** để bật thông báo lịch học.\n\n" +
         "{orange}Gõ /help để xem toàn bộ lệnh.{/orange}"
-    ).catch(() => {});
-});
+    );
+}));
 
-bot.onText(/^\/find(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
+bot.onText(/^\/find(?:@\w+)?(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
     const context = getMessageContext(msg);
     const studentId = normalizeStudentId(getCommandArgument(match));
     if (!studentId) {
@@ -178,7 +178,7 @@ bot.onText(/^\/find(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
     }
 }));
 
-bot.onText(/^\/dangky(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
+bot.onText(/^\/dangky(?:@\w+)?(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
     const context = getMessageContext(msg);
     const argument = getCommandArgument(match);
     const saved = getSubscription(context);
@@ -220,7 +220,7 @@ bot.onText(/^\/dangky(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
     }
 }));
 
-bot.onText(/^\/lich(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
+bot.onText(/^\/lich(?:@\w+)?(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
     const context = getMessageContext(msg);
     const argument = getCommandArgument(match);
     const saved = getSubscription(context);
@@ -249,7 +249,7 @@ bot.onText(/^\/lich(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
     }
 }));
 
-bot.onText(/^\/lichtuan(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
+bot.onText(/^\/lichtuan(?:@\w+)?(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
     const context = getMessageContext(msg);
     const argument = getCommandArgument(match);
     const saved = getSubscription(context);
@@ -278,7 +278,7 @@ bot.onText(/^\/lichtuan(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
     }
 }));
 
-bot.onText(/^\/huythongbao\s*$/i, asyncCommand(async (msg) => {
+bot.onText(/^\/huythongbao(?:@\w+)?\s*$/i, asyncCommand(async (msg) => {
     const context = getMessageContext(msg);
     if (disableNotifications(context)) {
         await sendMessage(
@@ -298,7 +298,7 @@ bot.onText(/^\/huythongbao\s*$/i, asyncCommand(async (msg) => {
     }
 }));
 
-bot.onText(/^\/help\s*$/i, (msg) => {
+bot.onText(/^\/help(?:@\w+)?\s*$/i, asyncCommand(async (msg) => {
     const helpMessage = `# {green}[BOT] HƯỚNG DẪN ZALOBOT{/green}
 
 ## {orange}[TRA CỨU] LỊCH HỌC{/orange}
@@ -316,10 +316,10 @@ bot.onText(/^\/help\s*$/i, (msg) => {
 ## {orange}[HỆ THỐNG] THÔNG TIN{/orange}
 - **/time** — Xem giờ máy chủ và giờ Việt Nam
 - **/help** — Xem hướng dẫn này`;
-    sendMessage(msg.chat.id, helpMessage).catch(() => {});
-});
+    await sendMessage(msg.chat.id, helpMessage);
+}));
 
-bot.onText(/^\/time\s*$/i, (msg) => {
+bot.onText(/^\/time(?:@\w+)?\s*$/i, asyncCommand(async (msg) => {
     const vietnam = getVietnamDateInfo();
     const message = `# {green}[GIỜ] THỜI GIAN HỆ THỐNG{/green}
 
@@ -328,8 +328,8 @@ bot.onText(/^\/time\s*$/i, (msg) => {
 > **Múi giờ bot:** ${escapeMarkdown(TIME_ZONE)}
 
 {green}Bot luôn lập lịch theo giờ Thành phố Hồ Chí Minh.{/green}`;
-    sendMessage(msg.chat.id, message).catch(() => {});
-});
+    await sendMessage(msg.chat.id, message);
+}));
 
 function groupEnabledSubscriptionsByStudent() {
     const grouped = new Map();
