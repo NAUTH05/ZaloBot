@@ -171,11 +171,21 @@ function parseCommand(rawText) {
 }
 
 function isOwner(context) {
-    const ownerIds = String(process.env.OWNER_USER_ID || "")
+    const ownerUserIds = String(process.env.OWNER_USER_ID || "")
         .split(",")
         .map((value) => value.trim())
         .filter(Boolean);
-    return ownerIds.includes(String(context.userId));
+    const ownerChatIds = String(process.env.OWNER_CHAT_ID || "")
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean);
+
+    if (ownerUserIds.length === 0 && ownerChatIds.length === 0) return false;
+
+    const userMatch = ownerUserIds.length === 0 || ownerUserIds.includes(String(context?.userId));
+    const chatMatch = ownerChatIds.length === 0 || ownerChatIds.includes(String(context?.chatId));
+
+    return userMatch && chatMatch;
 }
 
 async function requireOwner(context) {
