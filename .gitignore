@@ -5,4 +5,8 @@ subscriptions.json
 subscriptions.json.tmp
 scheduleSnapshots.json
 scheduleSnapshots.json.tmp
+interactions.json
+interactions.json.tmp
+birthdayData.json
+birthdayData.json.tmp
 *.log

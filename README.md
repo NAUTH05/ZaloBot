@@ -14,7 +14,10 @@ File `.env` cần có:
 ```env
 BOT_TOKEN=token_zalo_bot
 DISCORD_WEBHOOK=webhook_tuy_chon
+OWNER_USER_ID=user_id_cua_chu_bot
 ```
+
+Để lấy `OWNER_USER_ID`, nhắn `/myid` cho bot rồi sao chép giá trị **User ID**. Có thể cấu hình nhiều chủ BOT bằng cách phân tách ID bằng dấu phẩy. Sau khi sửa `.env`, cần khởi động lại bot.
 
 `CHAT_ID` cũ không còn được sử dụng. Mỗi cuộc trò chuyện dùng `/find [MSSV]` để lưu MSSV, sau đó dùng `/dangky` để chủ động bật thông báo.
 
@@ -33,9 +36,30 @@ Các bản ghi `subscriptions.json` theo schema cũ chỉ có `chat.id` sẽ kh�
 - `/lichtuan`: xem lịch tuần của MSSV đã lưu.
 - `/huythongbao`: tắt kiểm tra 01:00, lịch 06:00 và cảnh báo thay đổi, vẫn giữ MSSV.
 - `/time`: kiểm tra giờ Việt Nam mà bot đang dùng.
+- `/myid`: xem User ID và Chat ID của người gửi.
+- `/sinhnhat [câu hỏi]`: gửi câu hỏi trong ngày 27/08.
+- `/danhsach [năm]`: chủ BOT xem danh sách câu hỏi; mặc định là năm hiện tại.
+- `/them [câu hỏi]`: chủ BOT thêm câu hỏi thủ công.
+- `/sua [ID] [câu hỏi mới]`: chủ BOT sửa nội dung câu hỏi.
+- `/xoa [ID]`: chủ BOT xóa câu hỏi không phù hợp.
+- `/traloi [ID] [câu trả lời]`: chủ BOT ghi hoặc cập nhật câu trả lời; phần trả lời có thể xuống dòng.
+- `/congbo [năm]`: gửi toàn bộ câu đã trả lời tới mọi user/nhóm từng tương tác với bot.
 - `/help`: xem hướng dẫn.
 
 Chạy kiểm thử bằng `npm test`.
+
+## Hỏi đáp sinh nhật 27/08
+
+Bot lưu mọi cuộc trò chuyện từng tương tác trong `interactions.json`. Lúc `00:05` ngày 27/08 theo giờ Việt Nam, bot gửi lời mời hỏi đáp đến mỗi user/nhóm một lần. Nếu bot khởi động muộn hoặc một chat mới tương tác trong ngày, bot tự kiểm tra bù. Câu hỏi, câu trả lời và trạng thái gửi được lưu theo từng năm trong `birthdayData.json`; hai file dữ liệu này không được commit lên Git.
+
+Quy trình dành cho chủ BOT:
+
+1. Dùng `/danhsach` để lấy ID các câu hỏi.
+2. Dùng `/traloi 12 Nội dung trả lời...` để trả lời câu `#12`; chạy lại cùng lệnh để sửa đáp án.
+3. Dùng `/sua`, `/xoa` hoặc `/them` nếu cần làm sạch danh sách.
+4. Dùng `/congbo` sau khi hoàn tất. Chỉ các câu đã có đáp án được gửi đi.
+
+Bot ghi nhận dấu gửi theo nội dung. Chạy lại `/congbo` mà không thay đổi dữ liệu sẽ không gửi trùng; nếu câu hỏi hoặc đáp án đã thay đổi, bot sẽ gửi bản cập nhật.
 
 Bot chỉ kiểm tra thay đổi hai lần mỗi ngày theo `Asia/Ho_Chi_Minh`: lúc `01:00` bot chụp lịch lần 1 nhưng không gửi tin; lúc `06:00` bot tải lại lần 2, chỉ cảnh báo nếu kết quả giống bản chụp 01:00 rồi gửi lịch hôm nay. Mốc so sánh được lưu trong `scheduleSnapshots.json` và không được commit lên Git.
 

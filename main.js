@@ -3,6 +3,7 @@ process.env.TZ = "Asia/Ho_Chi_Minh";
 require("dotenv").config();
 
 const https = require("https");
+const crypto = require("crypto");
 const schedule = require("node-schedule");
 const ZaloBot = require("node-zalo-bot");
 const {
@@ -15,6 +16,7 @@ const {
 const {
     disableNotifications,
     enableNotifications,
+    getAllSubscriptions,
     getEnabledSubscriptions,
     getSubscription,
     saveStudent
@@ -28,6 +30,20 @@ const {
 } = require("./scheduleChanges");
 const { TIME_ZONE, getVietnamDateInfo } = require("./timezone");
 const { escapeMarkdown } = require("./richText");
+const { getInteractionTargets, recordInteraction } = require("./interactionRegistry");
+const {
+    addQuestion,
+    answerQuestion,
+    deleteQuestion,
+    getLatestQuestionYear,
+    getQuestions,
+    isBirthdayDate,
+    markInvitationSent,
+    markResultSent,
+    updateQuestion,
+    wasInvitationSent,
+    wasResultSent
+} = require("./birthdayStore");
 
 if (!process.env.BOT_TOKEN) {
     throw new Error("Thiếu BOT_TOKEN trong file .env");
@@ -137,9 +153,9 @@ function parseCommand(rawText) {
 
     // Xóa bot mention dạng /cmd@Bot MrYukitoBoBo hoặc /cmd@botname -> /cmd
     let clean = rawText
-        .replace(/(\/\w+)@Bot(?:\s+[\w\d_]+)*/gi, "$1")
+        .replace(/(\/\w+)@Bot\b(?:\s+[\w\d_]+)*/gi, "$1")
         .replace(/(\/\w+)@[\w\d_]+/gi, "$1")
-        .replace(/@Bot(?:\s+[\w\d_]+)*/gi, "")
+        .replace(/@Bot\b(?:\s+[\w\d_]+)*/gi, "")
         .replace(/@[\w\d_]+/gi, "")
         .trim();
 
@@ -150,6 +166,123 @@ function parseCommand(rawText) {
     const argument = parts.slice(1).join(" ").trim();
 
     return { command, argument };
+}
+
+function isOwner(context) {
+    const ownerIds = String(process.env.OWNER_USER_ID || "")
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean);
+    return ownerIds.includes(String(context.userId));
+}
+
+async function requireOwner(context) {
+    if (isOwner(context)) return true;
+    const configurationHint = process.env.OWNER_USER_ID
+        ? "Chỉ chủ BOT mới được dùng lệnh này."
+        : "Chưa cấu hình OWNER_USER_ID trong file .env.";
+    await sendMessage(context.chatId, formatWarningMessage("KHÔNG CÓ QUYỀN", `> ${configurationHint}`));
+    return false;
+}
+
+function parseQuestionIdAndText(argument) {
+    const match = String(argument || "").match(/^#?(\d+)(?:\s*\|\s*|\s+)([\s\S]+)$/);
+    return match ? { id: Number(match[1]), text: match[2].trim() } : null;
+}
+
+function resolveQuestionYear(argument, date = new Date()) {
+    const value = String(argument || "").trim();
+    if (/^\d{4}$/.test(value)) return Number(value);
+    return Number(getVietnamDateInfo(date).year);
+}
+
+function getBroadcastTargets() {
+    const targets = new Map();
+    for (const target of getInteractionTargets()) {
+        targets.set(String(target.chatId), target);
+    }
+    // Giữ tương thích với dữ liệu có trước khi sổ tương tác được bổ sung.
+    for (const [subscriptionKey, subscription] of Object.entries(getAllSubscriptions())) {
+        // Schema cũ dùng trực tiếp chatId làm khóa; schema mới có trường chatId rõ ràng.
+        const legacyChatId = !subscriptionKey.includes("::") ? subscriptionKey : null;
+        const rawChatId = subscription?.chatId ?? legacyChatId;
+        if (rawChatId == null) continue;
+        const chatId = String(rawChatId);
+        if (!targets.has(chatId)) targets.set(chatId, { chatId, chatType: "unknown" });
+    }
+    return [...targets.values()];
+}
+
+function formatBirthdayInvitation(year) {
+    return `# {green}[SINH NHẬT ${year}] HỎI TÔI BẤT KỲ ĐIỀU GÌ{/green}
+
+Hôm nay, **27/08**, là sinh nhật của tôi!
+
+> Hãy dùng **/sinhnhat [câu hỏi]** để gửi cho tôi bất kỳ câu hỏi nào bạn muốn.
+> **Ví dụ:** /sinhnhat Điều bạn tự hào nhất trong năm qua là gì?
+
+{orange}Cổng nhận câu hỏi mở đến hết ngày 27/08 theo giờ Việt Nam.{/orange}`;
+}
+
+function formatBirthdayResults(year, questions) {
+    const sections = questions.map((question) =>
+        `## {orange}[#${question.id}] ${escapeMarkdown(question.text)}{/orange}\n${escapeMarkdown(question.answer)}`
+    );
+    return `# {green}[SINH NHẬT ${year}] CÔNG BỐ HỎI & ĐÁP{/green}
+
+Cảm ơn mọi người đã gửi câu hỏi cho sinh nhật 27/08 của tôi!
+
+${sections.join("\n\n")}`;
+}
+
+async function sendBirthdayInvitations(targets = getBroadcastTargets(), date = new Date()) {
+    const dateInfo = getVietnamDateInfo(date);
+    if (!isBirthdayDate(dateInfo)) return { sent: 0, skipped: targets.length, failed: 0 };
+
+    const year = Number(dateInfo.year);
+    const message = formatBirthdayInvitation(year);
+    const result = { sent: 0, skipped: 0, failed: 0 };
+    for (const target of targets) {
+        if (wasInvitationSent(year, target.chatId)) {
+            result.skipped += 1;
+            continue;
+        }
+        try {
+            await sendMessage(target.chatId, message);
+            markInvitationSent(year, target.chatId, date);
+            result.sent += 1;
+        } catch (error) {
+            result.failed += 1;
+            logDiscord("ERROR", `Không thể gửi lời mời sinh nhật cho chat ${target.chatId}: ${error.message}`);
+        }
+    }
+    return result;
+}
+
+async function publishBirthdayResults(year) {
+    const answeredQuestions = getQuestions(year).filter((question) => question.answer);
+    if (!answeredQuestions.length) return { noAnswers: true, sent: 0, skipped: 0, failed: 0 };
+
+    const message = formatBirthdayResults(year, answeredQuestions);
+    const digest = crypto.createHash("sha256").update(message).digest("hex");
+    const result = { noAnswers: false, sent: 0, skipped: 0, failed: 0 };
+    for (const target of getBroadcastTargets()) {
+        if (wasResultSent(year, target.chatId, digest)) {
+            result.skipped += 1;
+            continue;
+        }
+        try {
+            await sendMessage(target.chatId, message, {
+                continuationHeader: `# {green}[SINH NHẬT ${year}] HỎI & ĐÁP · TIẾP{/green}`
+            });
+            markResultSent(year, target.chatId, digest);
+            result.sent += 1;
+        } catch (error) {
+            result.failed += 1;
+            logDiscord("ERROR", `Không thể công bố sinh nhật cho chat ${target.chatId}: ${error.message}`);
+        }
+    }
+    return result;
 }
 
 async function handleCommand(msg, parsedCommand) {
@@ -303,6 +436,162 @@ async function handleCommand(msg, parsedCommand) {
                 )
             );
         }
+    } else if (command === "sinhnhat") {
+        const dateInfo = getVietnamDateInfo();
+        if (!isBirthdayDate(dateInfo)) {
+            await sendMessage(chatId, formatWarningMessage(
+                "CHƯA ĐẾN NGÀY SINH NHẬT",
+                "> Lệnh **/sinhnhat [câu hỏi]** chỉ nhận câu hỏi trong ngày **27/08** theo giờ Việt Nam."
+            ));
+            return;
+        }
+        if (!argument) {
+            await sendMessage(chatId, formatWarningMessage(
+                "THIẾU CÂU HỎI",
+                "> **Cú pháp:** /sinhnhat [câu hỏi]\n> **Ví dụ:** /sinhnhat Điều bạn mong chờ nhất ở tuổi mới là gì?"
+            ));
+            return;
+        }
+        try {
+            const question = addQuestion({
+                year: Number(dateInfo.year),
+                text: argument,
+                author: {
+                    userId: context.userId,
+                    displayName: context.userDisplayName,
+                    chatId: context.chatId
+                }
+            });
+            await sendMessage(chatId,
+                `# {green}[OK] ĐÃ GHI NHẬN CÂU HỎI #${question.id}{/green}\n\n` +
+                `> ${escapeMarkdown(question.text)}\n\n` +
+                "Cảm ơn bạn! Câu trả lời sẽ được gửi khi chủ BOT dùng **/congbo**."
+            );
+        } catch (error) {
+            await sendMessage(chatId, formatWarningMessage("KHÔNG THỂ GHI NHẬN", `> ${escapeMarkdown(error.message)}`));
+        }
+    } else if (command === "danhsach") {
+        if (!await requireOwner(context)) return;
+        if (argument && !/^\d{4}$/.test(String(argument).trim())) {
+            await sendMessage(chatId, formatWarningMessage("SAI CÚ PHÁP", "> **Cú pháp:** /danhsach [năm]"));
+            return;
+        }
+        const year = resolveQuestionYear(argument);
+        const questions = getQuestions(year);
+        if (!questions.length) {
+            await sendMessage(chatId, formatWarningMessage(
+                `DANH SÁCH ${year} ĐANG TRỐNG`,
+                "> Dùng **/them [câu hỏi]** để thêm thủ công."
+            ));
+            return;
+        }
+        const rows = questions.map((question) => {
+            const asker = escapeMarkdown(question.author?.displayName || question.author?.userId || "Không rõ");
+            const status = question.answer ? "{green}[ĐÃ TRẢ LỜI]{/green}" : "{orange}[CHỜ TRẢ LỜI]{/orange}";
+            const answer = question.answer ? `\n> **Trả lời:** ${escapeMarkdown(question.answer)}` : "";
+            return `## [#${question.id}] ${status}\n**Hỏi:** ${escapeMarkdown(question.text)}\n> **Người gửi:** ${asker}${answer}`;
+        });
+        await sendMessage(chatId,
+            `# {green}[DANH SÁCH ${year}] ${questions.length} CÂU HỎI{/green}\n\n` +
+            `${rows.join("\n\n")}\n\n` +
+            "**Thao tác nhanh:**\n- /traloi [ID] [câu trả lời]\n- /sua [ID] [câu hỏi mới]\n- /xoa [ID]\n- /them [câu hỏi]"
+        );
+    } else if (command === "them") {
+        if (!await requireOwner(context)) return;
+        if (!argument) {
+            await sendMessage(chatId, formatWarningMessage("SAI CÚ PHÁP", "> **Cú pháp:** /them [câu hỏi]"));
+            return;
+        }
+        try {
+            const dateInfo = getVietnamDateInfo();
+            const question = addQuestion({
+                year: Number(dateInfo.year),
+                text: argument,
+                author: { userId: context.userId, displayName: "Chủ BOT", chatId }
+            });
+            await sendMessage(chatId, `# {green}[OK] ĐÃ THÊM CÂU HỎI #${question.id}{/green}\n\n> ${escapeMarkdown(question.text)}`);
+        } catch (error) {
+            await sendMessage(chatId, formatWarningMessage("KHÔNG THỂ THÊM", `> ${escapeMarkdown(error.message)}`));
+        }
+    } else if (command === "sua") {
+        if (!await requireOwner(context)) return;
+        const input = parseQuestionIdAndText(argument);
+        if (!input) {
+            await sendMessage(chatId, formatWarningMessage("SAI CÚ PHÁP", "> **Cú pháp:** /sua [ID] [câu hỏi mới]"));
+            return;
+        }
+        try {
+            const question = updateQuestion(input.id, input.text);
+            await sendMessage(chatId, question
+                ? `# {green}[OK] ĐÃ SỬA CÂU HỎI #${question.id}{/green}\n\n> ${escapeMarkdown(question.text)}`
+                : formatWarningMessage("KHÔNG TÌM THẤY", `> Không có câu hỏi **#${input.id}**.`));
+        } catch (error) {
+            await sendMessage(chatId, formatWarningMessage("KHÔNG THỂ SỬA", `> ${escapeMarkdown(error.message)}`));
+        }
+    } else if (command === "xoa") {
+        if (!await requireOwner(context)) return;
+        const id = String(argument || "").trim().match(/^#?(\d+)$/)?.[1];
+        if (!id) {
+            await sendMessage(chatId, formatWarningMessage("SAI CÚ PHÁP", "> **Cú pháp:** /xoa [ID]"));
+            return;
+        }
+        const question = deleteQuestion(Number(id));
+        await sendMessage(chatId, question
+            ? `# {green}[OK] ĐÃ XÓA CÂU HỎI #${question.id}{/green}\n\n> ${escapeMarkdown(question.text)}`
+            : formatWarningMessage("KHÔNG TÌM THẤY", `> Không có câu hỏi **#${id}**.`));
+    } else if (command === "traloi") {
+        if (!await requireOwner(context)) return;
+        const input = parseQuestionIdAndText(argument);
+        if (!input) {
+            await sendMessage(chatId, formatWarningMessage(
+                "SAI CÚ PHÁP",
+                "> **Cú pháp:** /traloi [ID] [câu trả lời]\n> Có thể xuống dòng trong phần câu trả lời. Dùng **/danhsach** để xem ID."
+            ));
+            return;
+        }
+        try {
+            const question = answerQuestion(input.id, input.text);
+            await sendMessage(chatId, question
+                ? `# {green}[OK] ĐÃ TRẢ LỜI CÂU #${question.id}{/green}\n\n**Hỏi:** ${escapeMarkdown(question.text)}\n> **Trả lời:** ${escapeMarkdown(question.answer)}`
+                : formatWarningMessage("KHÔNG TÌM THẤY", `> Không có câu hỏi **#${input.id}**.`));
+        } catch (error) {
+            await sendMessage(chatId, formatWarningMessage("KHÔNG THỂ TRẢ LỜI", `> ${escapeMarkdown(error.message)}`));
+        }
+    } else if (command === "congbo") {
+        if (!await requireOwner(context)) return;
+        const rawYear = String(argument || "").trim();
+        if (rawYear && !/^\d{4}$/.test(rawYear)) {
+            await sendMessage(chatId, formatWarningMessage("SAI CÚ PHÁP", "> **Cú pháp:** /congbo [năm]\n> Có thể bỏ năm để dùng năm hiện tại."));
+            return;
+        }
+        const year = rawYear
+            ? Number(rawYear)
+            : (getLatestQuestionYear() || Number(getVietnamDateInfo().year));
+        const allQuestions = getQuestions(year);
+        const unanswered = allQuestions.filter((question) => !question.answer).length;
+        const result = await publishBirthdayResults(year);
+        if (result.noAnswers) {
+            await sendMessage(chatId, formatWarningMessage(
+                `CHƯA CÓ CÂU TRẢ LỜI NĂM ${year}`,
+                "> Dùng **/traloi [ID] [câu trả lời]** trước khi công bố."
+            ));
+            return;
+        }
+        await sendMessage(chatId,
+            `# {green}[OK] ĐÃ CÔNG BỐ HỎI & ĐÁP ${year}{/green}\n\n` +
+            `> **Gửi thành công:** ${result.sent}\n` +
+            `> **Đã có cùng bản công bố:** ${result.skipped}\n` +
+            `> **Gửi lỗi:** ${result.failed}\n` +
+            `> **Câu chưa trả lời (không công bố):** ${unanswered}\n\n` +
+            "{orange}Nếu sửa câu hỏi hoặc câu trả lời, chạy /congbo lần nữa sẽ gửi bản cập nhật; bản không đổi sẽ không bị gửi trùng.{/orange}"
+        );
+    } else if (command === "myid") {
+        await sendMessage(chatId, `# {green}[ID] THÔNG TIN TÀI KHOẢN{/green}
+
+> **User ID:** ${escapeMarkdown(context.userId)}
+> **Chat ID:** ${escapeMarkdown(context.chatId)}
+
+{orange}Dùng User ID làm OWNER_USER_ID trong .env nếu đây là tài khoản chủ BOT.{/orange}`);
     } else if (command === "help") {
         const helpMessage = `# {green}[BOT] HƯỚNG DẪN ZALOBOT{/green}
 
@@ -320,7 +609,15 @@ async function handleCommand(msg, parsedCommand) {
 
 ## {orange}[HỆ THỐNG] THÔNG TIN{/orange}
 - **/time** — Xem giờ máy chủ và giờ Việt Nam
-- **/help** — Xem hướng dẫn này`;
+- **/myid** — Xem User ID và Chat ID
+- **/sinhnhat [câu hỏi]** — Gửi câu hỏi trong ngày 27/08
+- **/help** — Xem hướng dẫn này
+
+## {orange}[CHỦ BOT] SINH NHẬT{/orange}
+- **/danhsach [năm]** — Xem các câu hỏi
+- **/them**, **/sua**, **/xoa** — Quản lý câu hỏi
+- **/traloi [ID] [nội dung]** — Ghi hoặc sửa câu trả lời
+- **/congbo [năm]** — Gửi các câu đã trả lời tới mọi chat`;
         await sendMessage(chatId, helpMessage);
     } else if (command === "time") {
         const vietnam = getVietnamDateInfo();
@@ -334,38 +631,6 @@ async function handleCommand(msg, parsedCommand) {
         await sendMessage(chatId, message);
     }
 }
-
-bot.onText(/^\/start(?:@\w+)?\s*$/i, asyncCommand(async (msg) => {
-    await handleCommand(msg, { command: "start", argument: "" });
-}));
-
-bot.onText(/^\/find(?:@\w+)?(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
-    await handleCommand(msg, { command: "find", argument: getCommandArgument(match) });
-}));
-
-bot.onText(/^\/dangky(?:@\w+)?(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
-    await handleCommand(msg, { command: "dangky", argument: getCommandArgument(match) });
-}));
-
-bot.onText(/^\/lich(?:@\w+)?(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
-    await handleCommand(msg, { command: "lich", argument: getCommandArgument(match) });
-}));
-
-bot.onText(/^\/lichtuan(?:@\w+)?(?:\s+(.+))?\s*$/i, asyncCommand(async (msg, match) => {
-    await handleCommand(msg, { command: "lichtuan", argument: getCommandArgument(match) });
-}));
-
-bot.onText(/^\/huythongbao(?:@\w+)?\s*$/i, asyncCommand(async (msg) => {
-    await handleCommand(msg, { command: "huythongbao", argument: "" });
-}));
-
-bot.onText(/^\/help(?:@\w+)?\s*$/i, asyncCommand(async (msg) => {
-    await handleCommand(msg, { command: "help", argument: "" });
-}));
-
-bot.onText(/^\/time(?:@\w+)?\s*$/i, asyncCommand(async (msg) => {
-    await handleCommand(msg, { command: "time", argument: "" });
-}));
 
 function groupEnabledSubscriptionsByStudent() {
     const grouped = new Map();
@@ -442,6 +707,10 @@ async function confirmAndNotifyAtSix() {
 
 schedule.scheduleJob({ rule: "0 1 * * *", tz: TIME_ZONE }, captureSchedulesAtOne);
 schedule.scheduleJob({ rule: "0 6 * * *", tz: TIME_ZONE }, confirmAndNotifyAtSix);
+// 00:05 ngày 27/08 hằng năm. Kiểm tra lúc khởi động ở dưới sẽ bù nếu bot khởi động muộn.
+schedule.scheduleJob({ rule: "5 0 27 8 *", tz: TIME_ZONE }, asyncCommand(async () => {
+    await sendBirthdayInvitations();
+}));
 
 bot.on("message", asyncCommand(async (msg) => {
     const text = msg.text || "[không có nội dung]";
@@ -449,6 +718,10 @@ bot.on("message", asyncCommand(async (msg) => {
     const from = msg.from?.display_name || context.userId || "unknown";
     console.log("Tin nhắn mới:", from, "→", text);
     logDiscord("INFO", `Tin nhắn từ ${from} (${context.userId}) trong chat ${context.chatId}: ${text}`);
+    const interaction = recordInteraction(context, msg);
+
+    // Chat lần đầu tương tác trong ngày 27/08 vẫn nhận lời mời dù lịch 00:05 đã chạy.
+    await sendBirthdayInvitations([interaction]);
 
     const parsed = parseCommand(msg.text);
     if (parsed) {
@@ -470,4 +743,19 @@ bot.on("error", (error) => {
 console.log(`Bot đã khởi động. Kiểm tra lịch lúc 01:00 và 06:00 (${TIME_ZONE}).`);
 logDiscord("INFO", `Bot đã khởi động - timezone ${TIME_ZONE}`);
 
-module.exports = { parseCommand, handleCommand };
+// Không chờ tới năm sau nếu tiến trình được khởi động lại trong chính ngày sinh nhật.
+sendBirthdayInvitations().catch((error) => {
+    console.error("Lỗi gửi thông báo sinh nhật khi khởi động:", error);
+    logDiscord("ERROR", `birthday_startup_error: ${error.message}`);
+});
+
+module.exports = {
+    formatBirthdayInvitation,
+    formatBirthdayResults,
+    getBroadcastTargets,
+    handleCommand,
+    parseCommand,
+    parseQuestionIdAndText,
+    publishBirthdayResults,
+    sendBirthdayInvitations
+};
