@@ -294,21 +294,25 @@ async function publishBirthdayResults(year) {
     return result;
 }
 
+async function sendWelcomeMessage(chatId, displayName = "bạn") {
+    const name = escapeMarkdown(displayName || "bạn");
+    await sendMessage(
+        chatId,
+        "# {green}[BOT] LỊCH HỌC LHU{/green}\n\n" +
+        `Xin chào **${name}**!\n\n` +
+        "> **Tra cứu:** Dùng **/find [MSSV]** để lưu mã sinh viên.\n" +
+        "> **Thông báo:** Sau đó dùng **/dangky** để bật thông báo lịch học.\n\n" +
+        "{orange}Gõ /help để xem toàn bộ lệnh.{/orange}"
+    );
+}
+
 async function handleCommand(msg, parsedCommand) {
     const context = getMessageContext(msg);
     const chatId = context.chatId;
     const { command, argument } = parsedCommand;
 
     if (command === "start") {
-        const displayName = escapeMarkdown(msg.from?.display_name || "bạn");
-        await sendMessage(
-            chatId,
-            "# {green}[BOT] LỊCH HỌC LHU{/green}\n\n" +
-            `Xin chào **${displayName}**!\n\n` +
-            "> **Tra cứu:** Dùng **/find [MSSV]** để lưu mã sinh viên.\n" +
-            "> **Thông báo:** Sau đó dùng **/dangky** để bật thông báo lịch học.\n\n" +
-            "{orange}Gõ /help để xem toàn bộ lệnh.{/orange}"
-        );
+        await sendWelcomeMessage(chatId, msg.from?.display_name);
     } else if (command === "find") {
         const studentId = normalizeStudentId(argument);
         if (!studentId) {
@@ -730,11 +734,19 @@ bot.on("message", asyncCommand(async (msg) => {
     console.log("Tin nhắn mới:", from, "→", text);
     logDiscord("INFO", `Tin nhắn từ ${from} (${context.userId}) trong chat ${context.chatId}: ${text}`);
     const interaction = recordInteraction(context, msg);
+    const parsed = parseCommand(msg.text);
+
+    if (interaction.isFirstInteraction && !parsed) {
+        try {
+            await sendWelcomeMessage(context.chatId, msg.from?.display_name);
+        } catch (error) {
+            logDiscord("ERROR", `Không thể gửi lời chào mừng tới chat ${context.chatId}: ${error.message}`);
+        }
+    }
 
     // Chat lần đầu tương tác trong ngày 27/08 vẫn nhận lời mời dù lịch 00:05 đã chạy.
     await sendBirthdayInvitations([interaction]);
 
-    const parsed = parseCommand(msg.text);
     if (parsed) {
         await handleCommand(msg, parsed);
     }
@@ -771,5 +783,6 @@ module.exports = {
     parseCommand,
     parseQuestionIdAndText,
     publishBirthdayResults,
-    sendBirthdayInvitations
+    sendBirthdayInvitations,
+    sendWelcomeMessage
 };

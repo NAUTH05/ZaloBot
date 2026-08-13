@@ -10,18 +10,21 @@ test("mỗi chat được lưu một lần và cập nhật người tương tá
     const filePath = path.join(directory, "interactions.json");
     t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
 
-    recordInteraction(
+    const res1 = recordInteraction(
         { chatId: "group-1", userId: "user-1", userDisplayName: "An" },
         { chat: { id: "group-1", type: "group", title: "Nhóm lớp" } },
         new Date("2026-08-01T00:00:00.000Z"),
         filePath
     );
-    recordInteraction(
+    assert.equal(res1.isFirstInteraction, true);
+
+    const res2 = recordInteraction(
         { chatId: "group-1", userId: "user-2", userDisplayName: "Bình" },
         { chat: { id: "group-1", type: "group", title: "Nhóm lớp" } },
         new Date("2026-08-02T00:00:00.000Z"),
         filePath
     );
+    assert.equal(res2.isFirstInteraction, false);
 
     const targets = getInteractionTargets(filePath);
     assert.equal(targets.length, 1);

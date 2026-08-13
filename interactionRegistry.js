@@ -30,6 +30,7 @@ function recordInteraction(context, msg = {}, date = new Date(), filePath = FILE
     const chatId = String(context.chatId);
     const registry = readRegistry(filePath);
     const existing = registry[chatId] || {};
+    const isFirstInteraction = !existing.firstInteractionAt;
     registry[chatId] = {
         chatId,
         chatType: detectChatType(msg),
@@ -40,7 +41,7 @@ function recordInteraction(context, msg = {}, date = new Date(), filePath = FILE
         lastInteractionAt: date.toISOString()
     };
     writeRegistry(registry, filePath);
-    return registry[chatId];
+    return { ...registry[chatId], isFirstInteraction };
 }
 
 function getInteractionTargets(filePath = FILE_PATH) {
