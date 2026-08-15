@@ -77,7 +77,7 @@ function formatScheduleContextForAi(scheduleData, date = new Date(), numWeeks = 
     };
 }
 
-function callGeminiApi(prompt, apiKey) {
+function callGeminiApi(prompt, apiKey, modelName = process.env.GEMINI_MODEL || "gemini-1.5-flash") {
     return new Promise((resolve, reject) => {
         const payload = JSON.stringify({
             contents: [{
@@ -85,7 +85,7 @@ function callGeminiApi(prompt, apiKey) {
             }]
         });
 
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
         const req = https.request(url, {
             method: "POST",
             headers: {
@@ -136,7 +136,18 @@ async function askScheduleAi(userQuestion, scheduleData, date = new Date()) {
         `4. Tuyệt đối không bịa đặt các buổi học không có trong dữ liệu ở trên.\n\n` +
         `Câu hỏi của sinh viên: "${userQuestion}"`;
 
-    return await callGeminiApi(systemPrompt, apiKey);
+    const primaryModel = process.env.GEMINI_MODEL || "gemini-1.5-flash";
+    try {
+        return await callGeminiApi(systemPrompt, apiKey, primaryModel);
+    } catch (firstError) {
+        // Fallback sang gemini-2.0-flash nếu model chính không khả dụng
+        if (primaryModel !== "gemini-2.0-flash") {
+            try {
+                return await callGeminiApi(systemPrompt, apiKey, "gemini-2.0-flash");
+            } catch (_) {}
+        }
+        throw firstError;
+    }
 }
 
 module.exports = {
