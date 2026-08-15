@@ -2,25 +2,37 @@ const https = require("https");
 const { getApiDateTimeInfo, getVietnamDateInfo, getVietnamWeekInfo } = require("./timezone");
 const { fetchStudentSchedule } = require("./lhuSchedule");
 
-function formatScheduleContextForAi(scheduleData, date = new Date(), numWeeks = 3) {
+function formatScheduleContextForAi(scheduleData, date = new Date(), numWeeks = 4) {
     const studentName = scheduleData.studentName || "Sinh viên";
     const studentId = scheduleData.studentId;
     const current = getVietnamDateInfo(date);
 
-    // Xây dựng danh sách các ngày trong N tuần tới
-    const startDate = new Date(`${current.dateKey}T00:00:00.000Z`);
+    // Lấy ngày Thứ Hai của tuần hiện tại làm mốc
+    const week0 = getVietnamWeekInfo(date);
+    const monday0 = new Date(`${week0.days[0].dateKey}T00:00:00.000Z`);
     const dayMs = 24 * 60 * 60 * 1000;
-    const totalDays = numWeeks * 7;
-    const daysMap = new Map();
 
-    for (let i = 0; i < totalDays; i += 1) {
-        const d = new Date(startDate.getTime() + i * dayMs);
-        const y = d.getUTCFullYear();
-        const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-        const day = String(d.getUTCDate()).padStart(2, "0");
-        const dateKey = `${y}-${m}-${day}`;
-        const weekday = new Intl.DateTimeFormat("vi-VN", { timeZone: "Asia/Ho_Chi_Minh", weekday: "long" }).format(d);
-        daysMap.set(dateKey, { dateKey, weekday, formattedDate: `${day}/${m}/${y}`, lessons: [] });
+    const weeks = [];
+    const daysMap = new Map();
+    const weekLabels = ["TUẦN NÀY", "TUẦN SAU (TUẦN TỚI)", "TUẦN SAU NỮA", "TUẦN THỨ 4"];
+
+    for (let w = 0; w < numWeeks; w += 1) {
+        const weekDays = [];
+        for (let d = 0; d < 7; d += 1) {
+            const dayOffset = w * 7 + d;
+            const dayDate = new Date(monday0.getTime() + dayOffset * dayMs);
+            const y = dayDate.getUTCFullYear();
+            const m = String(dayDate.getUTCMonth() + 1).padStart(2, "0");
+            const day = String(dayDate.getUTCDate()).padStart(2, "0");
+            const dateKey = `${y}-${m}-${day}`;
+            const weekday = new Intl.DateTimeFormat("vi-VN", { timeZone: "Asia/Ho_Chi_Minh", weekday: "long" }).format(dayDate);
+            const dayObj = { dateKey, weekday, formattedDate: `${day}/${m}/${y}`, lessons: [] };
+            weekDays.push(dayObj);
+            daysMap.set(dateKey, dayObj);
+        }
+        const label = weekLabels[w] || `TUẦN THỨ ${w + 1}`;
+        const rangeStr = `${weekDays[0].formattedDate} đến ${weekDays[6].formattedDate}`;
+        weeks.push({ weekIndex: w, label, rangeStr, days: weekDays });
     }
 
     const lessons = scheduleData.lessons || [];
@@ -44,36 +56,40 @@ function formatScheduleContextForAi(scheduleData, date = new Date(), numWeeks = 
         });
     }
 
-    const daySummaries = [];
-    const freeDays = [];
+    const weekSummaries = [];
+    for (const wObj of weeks) {
+        const dayLines = [];
+        for (const dayObj of wObj.days) {
+            const activeLessons = dayObj.lessons.filter((l) => l.status !== "Báo nghỉ");
+            const offLessons = dayObj.lessons.filter((l) => l.status === "Báo nghỉ");
 
-    for (const [dateKey, dayObj] of daysMap.entries()) {
-        const activeLessons = dayObj.lessons.filter((l) => l.status !== "Báo nghỉ");
-        const offLessons = dayObj.lessons.filter((l) => l.status === "Báo nghỉ");
-
-        if (activeLessons.length === 0) {
-            if (offLessons.length > 0) {
-                freeDays.push(`${dayObj.weekday} ${dayObj.formattedDate} (Toàn bộ ca học bị BÁO NGHỈ)`);
-                daySummaries.push(`- ${dayObj.weekday} ${dayObj.formattedDate}: BÁO NGHỈ (Không phải lên lớp)`);
+            if (activeLessons.length === 0) {
+                if (offLessons.length > 0) {
+                    dayLines.push(`  - ${dayObj.weekday} ${dayObj.formattedDate}: BÁO NGHỈ TOÀN BỘ (Lớp nghỉ học)`);
+                } else {
+                    dayLines.push(`  - ${dayObj.weekday} ${dayObj.formattedDate}: KHÔNG CÓ LỊCH HỌC (RẢNH)`);
+                }
             } else {
-                freeDays.push(`${dayObj.weekday} ${dayObj.formattedDate} (Ngày rảnh không có lịch)`);
-                daySummaries.push(`- ${dayObj.weekday} ${dayObj.formattedDate}: KHÔNG CÓ LỊCH HỌC`);
+                const lessonDescs = dayObj.lessons.map(
+                    (l) => `${l.time} · ${l.subject} [${l.status}] (${l.room})`
+                ).join("; ");
+                dayLines.push(`  - ${dayObj.weekday} ${dayObj.formattedDate}: ${activeLessons.length} buổi (${lessonDescs})`);
             }
-        } else {
-            const lessonDescs = dayObj.lessons.map(
-                (l) => `${l.time} · ${l.subject} [${l.status}] (${l.room})`
-            ).join("; ");
-            daySummaries.push(`- ${dayObj.weekday} ${dayObj.formattedDate}: ${activeLessons.length} buổi (${lessonDescs})`);
         }
+        weekSummaries.push(`=== ${wObj.label} (${wObj.rangeStr}) ===\n${dayLines.join("\n")}`);
     }
 
     return {
         studentId,
         studentName,
         currentDate: current.formattedDate,
-        summaryText: `Thông tin lịch học của sinh viên ${studentName} (MSSV: ${studentId}) từ ngày ${current.formattedDate} trong ${numWeeks} tuần tới:\n\n` +
-            `DƯỚI ĐÂY LÀ CHI TIẾT TỪNG NGÀY:\n${daySummaries.join("\n")}\n\n` +
-            `DANH SÁCH CÁC NGÀY RẢNH/BÁO NGHỈ (Không phải lên lớp):\n${freeDays.join("\n")}`
+        weekday: current.weekday,
+        thisWeekRange: weeks[0]?.rangeStr,
+        nextWeekRange: weeks[1]?.rangeStr,
+        nextNextWeekRange: weeks[2]?.rangeStr,
+        summaryText: `Lịch học của sinh viên ${studentName} (MSSV: ${studentId}):\n` +
+            `HÔM NAY LÀ: ${current.weekday}, ${current.formattedDate}\n\n` +
+            `${weekSummaries.join("\n\n")}`
     };
 }
 
@@ -166,15 +182,20 @@ async function askScheduleAi(userQuestion, scheduleData, date = new Date()) {
         throw new Error("BOT chưa được dán GEMINI_API_KEY vào file .env. Vui lòng dán Gemini API Key của bạn vào file .env rồi khởi động lại BOT.");
     }
 
-    const context = formatScheduleContextForAi(scheduleData, date, 3);
-    const systemPrompt = `Bạn là Trợ lý AI thông minh phụ trách giải đáp lịch học cho sinh viên Đại học Lạc Hồng (LHU).\n` +
-        `Dưới đây là thông tin chi tiết lịch học thực tế của sinh viên:\n\n` +
+    const context = formatScheduleContextForAi(scheduleData, date, 4);
+    const systemPrompt = `Bạn là Trợ lý AI thông minh phụ trách giải đáp lịch học cho sinh viên Đại học Lạc Hồng (LHU).\n\n` +
+        `QUY TẮC BẮT BUỘC VỀ PHÂN CHIA THỜI GIAN:\n` +
+        `- Hôm nay là: ${context.weekday}, ${context.currentDate}\n` +
+        `- "TUẦN NÀY" = Khoảng thời gian (${context.thisWeekRange})\n` +
+        `- "TUẦN SAU" / "TUẦN TỚI" = Khoảng thời gian (${context.nextWeekRange})\n` +
+        `- "TUẦN SAU NỮA" = Khoảng thời gian (${context.nextNextWeekRange})\n\n` +
+        `NHIỆM VỤ & QUY TẮC PHẢN HỒI:\n` +
+        `1. Khi sinh viên hỏi về "tuần sau" hoặc "tuần tới", bạn BẮT BUỘC chỉ trả lời dữ liệu nằm trong khoảng (${context.nextWeekRange}). NGHIÊM CẤM nhảy sang khoảng thời gian (${context.nextNextWeekRange}).\n` +
+        `2. Ngày được tính là RẢNH (không phải lên lớp) bao gồm: Ngày KHÔNG CÓ LỊCH HỌC hoặc Ngày toàn bộ ca học bị BÁO NGHỈ.\n` +
+        `3. Liệt kê rõ ràng, thân thiện bằng tiếng Việt, trình bày dạng danh sách có dấu gạch đầu dòng kèm Thứ và Ngày/Tháng/Năm cụ thể.\n` +
+        `4. Tuyệt đối không bịa đặt dữ liệu lịch học ngoài danh sách dưới đây.\n\n` +
+        `DƯỚI ĐÂY LÀ CHI TIẾT LỊCH HỌC THEO TỪNG TUẦN:\n\n` +
         `${context.summaryText}\n\n` +
-        `NHIỆM VỤ CỦA BẠN:\n` +
-        `1. Trả lời câu hỏi của sinh viên dựa trên dữ liệu lịch học ở trên.\n` +
-        `2. Nếu sinh viên hỏi về ngày rảnh hoặc thời gian trống, hãy liệt kê chi tiết các ngày rảnh (ngày không có lịch học hoặc các ngày ca học bị BÁO NGHỈ).\n` +
-        `3. Trả lời ngắn gọn, thân thiện, rõ ràng bằng tiếng Việt, có trình bày bullet point dễ đọc.\n` +
-        `4. Tuyệt đối không bịa đặt các buổi học không có trong dữ liệu ở trên.\n\n` +
         `Câu hỏi của sinh viên: "${userQuestion}"`;
 
     const candidateModels = Array.from(new Set([
