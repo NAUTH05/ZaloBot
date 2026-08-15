@@ -136,18 +136,23 @@ async function askScheduleAi(userQuestion, scheduleData, date = new Date()) {
         `4. Tuyệt đối không bịa đặt các buổi học không có trong dữ liệu ở trên.\n\n` +
         `Câu hỏi của sinh viên: "${userQuestion}"`;
 
-    const primaryModel = process.env.GEMINI_MODEL || "gemini-1.5-flash";
-    try {
-        return await callGeminiApi(systemPrompt, apiKey, primaryModel);
-    } catch (firstError) {
-        // Fallback sang gemini-2.0-flash nếu model chính không khả dụng
-        if (primaryModel !== "gemini-2.0-flash") {
-            try {
-                return await callGeminiApi(systemPrompt, apiKey, "gemini-2.0-flash");
-            } catch (_) {}
+    const candidateModels = Array.from(new Set([
+        process.env.GEMINI_MODEL,
+        "gemini-2.0-flash",
+        "gemini-1.5-flash-latest",
+        "gemini-1.5-flash",
+        "gemini-pro"
+    ].filter(Boolean)));
+
+    let lastError = null;
+    for (const modelName of candidateModels) {
+        try {
+            return await callGeminiApi(systemPrompt, apiKey, modelName);
+        } catch (err) {
+            lastError = err;
         }
-        throw firstError;
     }
+    throw lastError || new Error("Không thể kết nối tới các Gemini API models.");
 }
 
 module.exports = {
