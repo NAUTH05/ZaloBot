@@ -168,3 +168,27 @@ test("MSSV truyền trực tiếp cho /lich luôn ưu tiên hơn MSSV đã lưu"
     assert.equal(resolveStudentIdForCommand("", "123000536"), "123000536");
     assert.equal(resolveStudentIdForCommand("khong-hop-le", "123000536"), null);
 });
+
+test("định dạng lịch thi và danh sách phòng trống", () => {
+    const { formatExamSchedule, findEmptyRooms } = require("../lhuSchedule");
+    const examData = {
+        studentId: "123456789",
+        studentName: "Nguyễn Văn A",
+        examLessons: [{
+            ThoiGianBD: "2026-08-20T07:30:00",
+            ThoiGianKT: "2026-08-20T09:30:00",
+            TenMonHoc: "Cơ sở dữ liệu",
+            TenPhong: "A101",
+            TenCoSo: "Cơ sở I",
+            CalenType: 2
+        }]
+    };
+
+    const examMsg = formatExamSchedule(examData);
+    assert.match(examMsg, /\[LỊCH THI\] DANH SÁCH MÔN THI/);
+    assert.match(examMsg, /Cơ sở dữ liệu/);
+
+    const emptyRoomsMsg = findEmptyRooms("Cơ sở I", { lessons: [] }, new Date("2026-08-17T00:00:00Z"));
+    assert.match(emptyRoomsMsg, /PHÒNG TRỐNG/);
+    assert.match(emptyRoomsMsg, /A101/);
+});

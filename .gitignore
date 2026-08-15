@@ -7,6 +7,8 @@ scheduleSnapshots.json
 scheduleSnapshots.json.tmp
 interactions.json
 interactions.json.tmp
+accessControl.json
+accessControl.json.tmp
 birthdayData.json
 birthdayData.json.tmp
 *.log

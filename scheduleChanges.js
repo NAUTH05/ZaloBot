@@ -168,7 +168,7 @@ function captureChangeState(state, currentSnapshot, observedAt = new Date().toIS
     };
 }
 
-// Lần 2 lúc 06:00 chỉ xác nhận ứng viên được chụp lúc 01:00 cùng ngày.
+// Lần 2 lúc 06:00 xác nhận thay đổi dựa trên so sánh bản snapshot 06:00 với baseline.
 function confirmChangeState(state, currentSnapshot, observedAt = new Date().toISOString()) {
     if (!state?.baseline || state.baseline.schemaVersion !== currentSnapshot.schemaVersion) {
         return {
@@ -195,20 +195,10 @@ function confirmChangeState(state, currentSnapshot, observedAt = new Date().toIS
         };
     }
 
-    const isSameDayCandidate = state.pending?.capturedDate === currentSnapshot.minimumDate;
-    const isSameSnapshot = state.pending?.snapshot?.fingerprint === currentSnapshot.fingerprint;
-    if (isSameDayCandidate && isSameSnapshot) {
-        return {
-            state: createBaselineState(currentSnapshot, observedAt),
-            confirmed: true,
-            changes: currentChanges
-        };
-    }
-
     return {
-        state: { ...state, pending: null, updatedAt: observedAt },
-        confirmed: false,
-        changes: null
+        state: createBaselineState(currentSnapshot, observedAt),
+        confirmed: true,
+        changes: currentChanges
     };
 }
 
@@ -310,7 +300,7 @@ function formatModifiedLesson(change, index) {
     }
     if (before.teacher !== after.teacher) details.push(changedLine("Giảng viên", before.teacher, after.teacher));
     if (before.group !== after.group) details.push(changedLine("Nhóm", before.group, after.group));
-    if (before.status !== after.status) {
+    if (before.status !== after.status && statusLabel(before.status) !== statusLabel(after.status)) {
         details.push(changedLine("Trạng thái", statusLabel(before.status), statusLabel(after.status)));
     }
     if (before.subject !== after.subject) details.push(changedLine("Môn", before.subject, after.subject));

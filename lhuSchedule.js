@@ -244,15 +244,181 @@ function formatWeeklySchedule(scheduleData, date = new Date()) {
     return `${header}\n\n${sections.join("\n\n════════════════\n\n")}`;
 }
 
+async function fetchExamSchedule(studentIdInput, date = new Date()) {
+    const studentData = await fetchStudentSchedule(studentIdInput, date);
+    const examLessons = (studentData.lessons || []).filter((l) => Number(l.CalenType) === 2);
+    return { ...studentData, examLessons };
+}
+
+async function searchTeacherByName(teacherNameInput) {
+    const query = String(teacherNameInput || "").trim();
+    if (!query) return [];
+
+    const response = await postJson("https://tapi.lhu.edu.vn/calen/auth/XemLich_GiaoVienSelectByName", { Name: query });
+    const rawList = response?.data || [];
+    const list = Array.isArray(rawList) ? rawList : (Array.isArray(rawList[0]) ? rawList[0] : []);
+
+    return list.map((item) => ({
+        teacherId: String(item.GiaoVienID || item.ID || item.MaGV || "").trim(),
+        fullName: [item.Ho, item.Ten].filter(Boolean).join(" ") || item.TenGiaoVien || query,
+        faculty: item.TenKhoa || item.Khoa || ""
+    })).filter((t) => t.teacherId);
+}
+
+async function fetchTeacherSchedule(teacherIdInput, date = new Date()) {
+    const teacherId = String(teacherIdInput || "").trim();
+    if (!teacherId) {
+        throw new LhuApiError("Mã giảng viên không hợp lệ");
+    }
+
+    const lessons = [];
+    let totalRecords = 0;
+
+    for (let pageIndex = 1; pageIndex <= MAX_PAGES; pageIndex += 1) {
+        const response = await postJson("https://tapi.lhu.edu.vn/calen/auth/XemLich_LichGiaoVien", {
+            GiaoVienID: teacherId,
+            Ngay: toLhuQueryDate(date),
+            PageIndex: pageIndex,
+            PageSize: PAGE_SIZE
+        });
+
+        const data = response?.data;
+        if (!Array.isArray(data) || data.length < 2) {
+            throw new LhuApiError("Cấu trúc lịch giảng viên không khớp");
+        }
+
+        if (pageIndex === 1) {
+            totalRecords = Number(data[0]?.[0]?.TotalRecord) || 0;
+        }
+
+        const pageLessons = Array.isArray(data[1]) ? data[1] : [];
+        lessons.push(...pageLessons);
+
+        if (lessons.length >= totalRecords || pageLessons.length < PAGE_SIZE) break;
+    }
+
+    const teacherName = lessons[0]?.GiaoVien || teacherId;
+    return { teacherId, teacherName, lessons };
+}
+
+function formatExamSchedule(examData) {
+    const exams = examData.examLessons || [];
+    const studentName = escapeMarkdown(examData.studentName || "Sinh viên");
+    const studentId = escapeMarkdown(examData.studentId);
+
+    const header = [
+        "# {orange}[LỊCH THI] DANH SÁCH MÔN THI{/orange}",
+        `**Sinh viên:** ${studentName}`,
+        `> **MSSV:** ${studentId}`,
+        `{green}Tổng cộng ${exams.length} ca thi{/green}`
+    ].join("\n");
+
+    if (exams.length === 0) {
+        return `${header}\n\n{green}[i] Không có lịch thi trong học kỳ này.{/green}`;
+    }
+
+    const items = exams.map((lesson, index) => {
+        const start = getApiDateTimeInfo(lesson.ThoiGianBD);
+        const end = getApiDateTimeInfo(lesson.ThoiGianKT);
+        const dateStr = start ? start.formattedDate : "Chưa rõ ngày";
+        const timeStr = start && end ? `${start.hour}:${start.minute} - ${end.hour}:${end.minute}` : "Chưa rõ giờ";
+        const location = [lesson.TenPhong, lesson.TenCoSo].filter(Boolean).join(" - ") || "Chưa xếp phòng";
+
+        return [
+            `**${index + 1}. ${escapeMarkdown(lesson.TenMonHoc || "Môn thi")}**`,
+            `> **Ngày thi:** ${escapeMarkdown(dateStr)}`,
+            `> **Giờ thi:** ${escapeMarkdown(timeStr)}`,
+            `> **Phòng thi:** ${escapeMarkdown(location)}`,
+            lesson.TenNhom ? `> **Nhóm/Lớp:** ${escapeMarkdown(lesson.TenNhom)}` : "",
+            `> **Hình thức:** {orange}[LỊCH THI]{/orange}`
+        ].filter(Boolean).join("\n");
+    });
+
+    return `${header}\n\n${items.join("\n\n────────────\n\n")}`;
+}
+
+function formatTeacherSchedule(scheduleData, date = new Date()) {
+    const week = getVietnamWeekInfo(date);
+    const lessons = lessonsForWeek(scheduleData.lessons || [], date);
+    const teacherName = escapeMarkdown(scheduleData.teacherName || "Giảng viên");
+
+    const header = [
+        "# {green}[GIẢNG VIÊN] LỊCH DẠY TUẦN NÀY{/green}",
+        `**Giảng viên:** ${teacherName}`,
+        `> **Tuần:** ${week.formattedStartDate} – ${week.formattedEndDate}`,
+        `{orange}Tổng cộng ${lessons.length} buổi dạy{/orange}`
+    ].join("\n");
+
+    if (lessons.length === 0) {
+        return `${header}\n\n{green}[i] Tuần này giảng viên không có lịch dạy.{/green}`;
+    }
+
+    const sections = week.days.map((day) => {
+        const dayLessons = lessons.filter(
+            (lesson) => getApiDateTimeInfo(lesson.ThoiGianBD)?.dateKey === day.dateKey
+        );
+        if (dayLessons.length === 0) return null;
+
+        const formatted = dayLessons.map((lesson, idx) => {
+            const start = getApiDateTimeInfo(lesson.ThoiGianBD);
+            const end = getApiDateTimeInfo(lesson.ThoiGianKT);
+            const time = start && end ? `${start.hour}:${start.minute} - ${end.hour}:${end.minute}` : "Chưa rõ giờ";
+            const location = [lesson.TenPhong, lesson.TenCoSo].filter(Boolean).join(" - ");
+
+            return [
+                `**${idx + 1}. ${escapeMarkdown(time)} · ${escapeMarkdown(lesson.TenMonHoc || "Lớp học")}**`,
+                `> **Nhóm/Lớp:** ${escapeMarkdown(lesson.TenNhom || "Chưa rõ")}`,
+                `> **Phòng:** ${escapeMarkdown(location || "Chưa rõ")}`
+            ].join("\n");
+        }).join("\n\n────────────\n\n");
+
+        return `## {orange}[NGÀY] ${escapeMarkdown(day.weekday.toUpperCase())} · ${day.formattedDate}{/orange}\n${formatted}`;
+    }).filter(Boolean);
+
+    return `${header}\n\n${sections.join("\n\n════════════════\n\n")}`;
+}
+
+function findEmptyRooms(campusInput, scheduleData, date = new Date()) {
+    const campusName = String(campusInput || "").trim() || "Cơ sở I";
+    const dateInfo = getVietnamDateInfo(date);
+
+    // Lọc tất cả các phòng đang có ca học tại cơ sở này trong ngày
+    const dayLessons = lessonsForDate(scheduleData?.lessons || [], date)
+        .filter((l) => (l.TenCoSo || "").toLowerCase().includes(campusName.toLowerCase()));
+
+    const occupiedRooms = new Set(dayLessons.map((l) => l.TenPhong).filter(Boolean));
+
+    const knownRooms = [
+        "A101", "A102", "A201", "A202", "B101", "B102", "B201", "B202",
+        "C401_PM08", "C402_PM07", "C501_PM10", "C502_PM09", "D401_Hybrid", "D502", "G308"
+    ];
+
+    const freeRooms = knownRooms.filter((r) => !occupiedRooms.has(r));
+
+    return `# {green}[PHÒNG TRỐNG] ${escapeMarkdown(campusName.toUpperCase())}{/green}
+
+> **Ngày:** ${dateInfo.weekday}, ${dateInfo.formattedDate}
+> **Các phòng đang sử dụng ca học (${occupiedRooms.size}):** ${[...occupiedRooms].map(escapeMarkdown).join(", ") || "Không có"}
+
+## {orange}DANH SÁCH PHÒNG TRỐNG GỢI Ý CÓ THỂ TỰ HỌC / HỌP NHÓM:{/orange}
+${freeRooms.length > 0 ? freeRooms.map((r) => `- **Phòng ${escapeMarkdown(r)}**`).join("\n") : "_Không tìm thấy phòng trống khả dụng_"}`;
+}
+
 module.exports = {
     API_URL,
     LhuApiError,
+    fetchExamSchedule,
     fetchStudentSchedule,
+    fetchTeacherSchedule,
+    findEmptyRooms,
     formatDailySchedule,
+    formatExamSchedule,
     formatLesson,
+    formatTeacherSchedule,
     formatWeeklySchedule,
     lessonsForDate,
     lessonsForWeek,
     normalizeStudentId,
-    resolveStudentIdForCommand
+    resolveStudentIdForCommand,
+    searchTeacherByName
 };
