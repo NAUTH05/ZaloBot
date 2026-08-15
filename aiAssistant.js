@@ -152,7 +152,18 @@ async function askScheduleAi(userQuestion, scheduleData, date = new Date()) {
             lastError = err;
         }
     }
-    throw lastError || new Error("Không thể kết nối tới các Gemini API models.");
+
+    const rawMsg = lastError?.message || "";
+    if (rawMsg.includes("is not found for API version") || rawMsg.includes("API key not valid") || rawMsg.includes("PERMISSION_DENIED")) {
+        throw new Error(
+            "Gemini API Key trong file .env không hợp lệ hoặc tài khoản Google chưa kích hoạt Generative Language API.\n" +
+            "> **Cách xử lý:**\n" +
+            "1. Truy cập https://aistudio.google.com/app/apikey để tạo mới API Key miễn phí.\n" +
+            "2. Dán mã Key mới (dạng AIzaSy...) vào GEMINI_API_KEY trong file .env và khởi động lại BOT."
+        );
+    }
+
+    throw lastError || new Error("Không thể kết nối tới các mô hình Gemini API.");
 }
 
 module.exports = {
