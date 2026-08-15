@@ -200,10 +200,10 @@ function isOwner(context) {
 
     if (ownerUserIds.length === 0 && ownerChatIds.length === 0) return false;
 
-    const userMatch = ownerUserIds.length === 0 || ownerUserIds.includes(String(context?.userId));
-    const chatMatch = ownerChatIds.length === 0 || ownerChatIds.includes(String(context?.chatId));
+    const userMatch = ownerUserIds.length > 0 && ownerUserIds.includes(String(context?.userId));
+    const chatMatch = ownerChatIds.length > 0 && ownerChatIds.includes(String(context?.chatId));
 
-    return userMatch && chatMatch;
+    return userMatch || chatMatch;
 }
 
 async function requireOwner(context) {

@@ -34,21 +34,20 @@ test("lệnh /help phản hồi động tùy theo quyền owner", async (t) => {
     const AsyncFunction = Object.getPrototypeOf(async function () { }).constructor;
     const fn = new AsyncFunction("chatId", "sendMessage", "context", "isOwner", handlerBody);
 
-    // Người dùng thường (không phải owner)
+    // Người dùng thường (không phải owner) -> Không được hiện lệnh Admin [CHỦ BOT]
     let normalMessage = null;
     await fn("group_chat_1", (chatId, messageText) => { normalMessage = messageText; return Promise.resolve(); }, { userId: "user456", chatId: "group_chat_1" }, isOwner);
     assert.ok(normalMessage, "Tin nhắn /help cho người dùng thường đã được tạo");
     assert.match(normalMessage, /HƯỚNG DẪN ZALOBOT/);
     assert.doesNotMatch(normalMessage, /\[CHỦ BOT\]/);
 
-    // Chủ BOT dùng /help trong nhóm chat thường (chatId khác OWNER_CHAT_ID) -> không hiện [CHỦ BOT]
+    // Chủ BOT dùng /help trong bất kỳ đâu (nhóm hay chat riêng) -> Đều hiển thị đầy đủ bộ lệnh ADMIN
     let groupOwnerMessage = null;
     await fn("group_chat_1", (chatId, messageText) => { groupOwnerMessage = messageText; return Promise.resolve(); }, { userId: "owner123", chatId: "group_chat_1" }, isOwner);
     assert.ok(groupOwnerMessage, "Tin nhắn /help cho owner trong nhóm đã được tạo");
     assert.match(groupOwnerMessage, /HƯỚNG DẪN ZALOBOT/);
-    assert.doesNotMatch(groupOwnerMessage, /\[CHỦ BOT\]/);
+    assert.match(groupOwnerMessage, /\[CHỦ BOT\]/);
 
-    // Chủ BOT dùng /help trong đúng chat riêng của owner (chatId khớp OWNER_CHAT_ID)
     let ownerMessage = null;
     await fn("private_owner_chat", (chatId, messageText) => { ownerMessage = messageText; return Promise.resolve(); }, { userId: "owner123", chatId: "private_owner_chat" }, isOwner);
     assert.ok(ownerMessage, "Tin nhắn /help cho chủ BOT trong chat riêng đã được tạo");
