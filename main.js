@@ -398,6 +398,107 @@ async function handleCommand(msg, parsedCommand) {
         } catch (error) {
             await sendMessage(chatId, formatErrorMessage(error));
         }
+    } else if (command === "lich") {
+        const saved = getSubscription(context);
+        const studentId = resolveStudentIdForCommand(argument, saved?.studentId);
+
+        if (!studentId) {
+            await sendMessage(
+                chatId,
+                formatWarningMessage(
+                    argument ? "MSSV KHÔNG HỢP LỆ" : "CHƯA LƯU MSSV",
+                    argument
+                        ? "> MSSV phải gồm đúng **9 chữ số**."
+                        : "> Hãy dùng **/find [MSSV]** hoặc **/lich [MSSV]**."
+                )
+            );
+            return;
+        }
+
+        try {
+            const data = await fetchStudentSchedule(studentId);
+            await sendMessage(chatId, formatDailySchedule(data), {
+                continuationHeader: "# {green}[LỊCH] HÔM NAY · TIẾP{/green}"
+            });
+        } catch (error) {
+            await sendMessage(chatId, formatErrorMessage(error));
+        }
+    } else if (command === "lichtuan") {
+        const saved = getSubscription(context);
+        const studentId = resolveStudentIdForCommand(argument, saved?.studentId);
+
+        if (!studentId) {
+            await sendMessage(
+                chatId,
+                formatWarningMessage(
+                    argument ? "MSSV KHÔNG HỢP LỆ" : "CHƯA LƯU MSSV",
+                    argument
+                        ? "> MSSV phải gồm đúng **9 chữ số**."
+                        : "> Hãy dùng **/find [MSSV]** hoặc **/lichtuan [MSSV]**."
+                )
+            );
+            return;
+        }
+
+        try {
+            const data = await fetchStudentSchedule(studentId);
+            await sendMessage(chatId, formatWeeklySchedule(data), {
+                continuationHeader: "# {green}[LỊCH] TUẦN · TIẾP{/green}"
+            });
+        } catch (error) {
+            await sendMessage(chatId, formatErrorMessage(error));
+        }
+    } else if (command === "huythongbao") {
+        if (disableNotifications(context)) {
+            await sendMessage(
+                chatId,
+                "# {orange}[TẮT] ĐÃ TẮT THÔNG BÁO{/orange}\n\n" +
+                "> Đã tắt tự động gửi thông báo lịch học hàng ngày.\n\n" +
+                "{green}MSSV đã lưu vẫn có thể dùng với /lich và /lichtuan.{/green}"
+            );
+        } else {
+            await sendMessage(
+                chatId,
+                formatWarningMessage(
+                    "CHƯA ĐĂNG KÝ THÔNG BÁO",
+                    "> Dùng **/dangky** để bật thông báo lịch học."
+                )
+            );
+        }
+    } else if (command === "sinhnhat") {
+        const dateInfo = getVietnamDateInfo();
+        if (!isBirthdayDate(dateInfo)) {
+            await sendMessage(chatId, formatWarningMessage(
+                "CHƯA ĐẾN NGÀY SINH NHẬT",
+                "> Lệnh **/sinhnhat [câu hỏi]** chỉ nhận câu hỏi trong ngày **27/08** theo giờ Việt Nam."
+            ));
+            return;
+        }
+        if (!argument) {
+            await sendMessage(chatId, formatWarningMessage(
+                "THIẾU CÂU HỎI",
+                "> **Cú pháp:** /sinhnhat [câu hỏi]\n> **Ví dụ:** /sinhnhat Điều bạn mong chờ nhất ở tuổi mới là gì?"
+            ));
+            return;
+        }
+        try {
+            const question = addQuestion({
+                year: Number(dateInfo.year),
+                text: argument,
+                author: {
+                    userId: context.userId,
+                    displayName: context.userDisplayName,
+                    chatId: context.chatId
+                }
+            });
+            await sendMessage(chatId,
+                `# {green}[OK] ĐÃ GHI NHẬN CÂU HỎI #${question.id}{/green}\n\n` +
+                `> ${escapeMarkdown(question.text)}\n\n` +
+                "Cảm ơn bạn! Câu trả lời sẽ được gửi khi chủ BOT dùng **/congbo**."
+            );
+        } catch (error) {
+            await sendMessage(chatId, formatWarningMessage("KHÔNG THỂ GHI NHẬN", `> ${escapeMarkdown(error.message)}`));
+        }
     } else if (command === "lichthi") {
         const saved = getSubscription(context);
         const studentId = resolveStudentIdForCommand(argument, saved?.studentId);
