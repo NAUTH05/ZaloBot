@@ -119,6 +119,47 @@ function callGeminiApi(prompt, apiKey, modelName = process.env.GEMINI_MODEL || "
     });
 }
 
+function callGeminiInteractionsApi(prompt, apiKey, modelName = "gemini-2.5-flash") {
+    return new Promise((resolve, reject) => {
+        const payload = JSON.stringify({
+            model: modelName,
+            input: prompt
+        });
+
+        const url = `https://generativelanguage.googleapis.com/v1beta/interactions?key=${apiKey}`;
+        const req = https.request(url, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Content-Length": Buffer.byteLength(payload)
+            },
+            timeout: 25000
+        }, (res) => {
+            let data = "";
+            res.on("data", chunk => data += chunk);
+            res.on("end", () => {
+                try {
+                    const parsed = JSON.parse(data);
+                    if (res.statusCode < 200 || res.statusCode >= 300) {
+                        reject(new Error(parsed.error?.message || `Interactions API lỗi ${res.statusCode}`));
+                        return;
+                    }
+                    const text = parsed.outputs?.[0]?.text || parsed.steps?.[0]?.outputs?.[0]?.text;
+                    if (!text) reject(new Error("Interactions API không trả kết quả văn bản"));
+                    else resolve(text);
+                } catch (e) {
+                    reject(new Error("Không thể đọc phản hồi từ Interactions API"));
+                }
+            });
+        });
+
+        req.on("error", reject);
+        req.on("timeout", () => req.destroy(new Error("Interactions API Timeout")));
+        req.write(payload);
+        req.end();
+    });
+}
+
 async function askScheduleAi(userQuestion, scheduleData, date = new Date()) {
     const apiKey = (process.env.GEMINI_API_KEY || process.env.AI_API_KEY || "").trim();
     if (!apiKey || apiKey === "your_gemini_api_key_here") {
@@ -138,6 +179,7 @@ async function askScheduleAi(userQuestion, scheduleData, date = new Date()) {
 
     const candidateModels = Array.from(new Set([
         process.env.GEMINI_MODEL,
+        "gemini-2.5-flash",
         "gemini-2.0-flash",
         "gemini-1.5-flash-latest",
         "gemini-1.5-flash",
@@ -152,6 +194,11 @@ async function askScheduleAi(userQuestion, scheduleData, date = new Date()) {
             lastError = err;
         }
     }
+
+    // Nếu generateContent không hoạt động với các mô hình trên, thử Interactions API dự phòng
+    try {
+        return await callGeminiInteractionsApi(systemPrompt, apiKey, "gemini-2.5-flash");
+    } catch (_) {}
 
     const rawMsg = lastError?.message || "";
     if (rawMsg.includes("is not found for API version") || rawMsg.includes("API key not valid") || rawMsg.includes("PERMISSION_DENIED")) {
