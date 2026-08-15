@@ -120,9 +120,9 @@ function callGeminiApi(prompt, apiKey) {
 }
 
 async function askScheduleAi(userQuestion, scheduleData, date = new Date()) {
-    const apiKey = process.env.GEMINI_API_KEY || process.env.AI_API_KEY;
-    if (!apiKey) {
-        throw new Error("BOT chưa được cấu hình GEMINI_API_KEY trong file .env. Vui lòng thêm GEMINI_API_KEY để dùng tính năng /ai.");
+    const apiKey = (process.env.GEMINI_API_KEY || process.env.AI_API_KEY || "").trim();
+    if (!apiKey || apiKey === "your_gemini_api_key_here") {
+        throw new Error("BOT chưa được dán GEMINI_API_KEY vào file .env. Vui lòng dán Gemini API Key của bạn vào file .env rồi khởi động lại BOT.");
     }
 
     const context = formatScheduleContextForAi(scheduleData, date, 3);

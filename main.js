@@ -147,7 +147,8 @@ function getCommandArgument(match) {
 
 function friendlyError(error) {
     if (error?.userMessage) return error.userMessage;
-    return "Không thể lấy lịch từ LHU lúc này. Bạn vui lòng thử lại sau.";
+    if (error?.message) return error.message;
+    return "Không thể thực hiện yêu cầu lúc này. Bạn vui lòng thử lại sau.";
 }
 
 function formatErrorMessage(error) {
