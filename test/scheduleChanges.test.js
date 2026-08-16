@@ -166,7 +166,7 @@ test("format thông báo dùng rich text, ngày dd/mm/yyyy và chỉ hiện trư
         new Date("2026-08-10T03:35:00.000Z")
     );
 
-    assert.match(message, /^# \{red\}\[!\] LỊCH HỌC CÓ THAY ĐỔI\{\/red\}/);
+    assert.match(message, /^# \{orange\}\[!\] LỊCH HỌC CÓ THAY ĐỔI\{\/orange\}/);
     assert.match(message, /\{orange\}\[\*\] ĐIỀU CHỈNH · 1\{\/orange\}/);
     assert.match(message, /10\/08\/2026 lúc 10:35/);
     assert.match(message, /~~10\/08\/2026~~ → \*\*11\/08\/2026\*\*/);

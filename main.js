@@ -137,7 +137,23 @@ async function sendMessage(chatId, text, options = {}) {
     if (current) chunks.push(current);
     for (let index = 0; index < chunks.length; index += 1) {
         const prefix = index > 0 && continuationHeader ? `${continuationHeader}\n\n` : "";
-        await Promise.resolve(bot.sendMessage(chatId, `${prefix}${chunks[index]}`, messageOptions));
+        const payload = `${prefix}${chunks[index]}`;
+        try {
+            await Promise.resolve(bot.sendMessage(chatId, payload, messageOptions));
+        } catch (error) {
+            if (messageOptions.parse_mode) {
+                console.warn(`Lỗi gửi markdown Zalo (${error.message}), đang gửi lại dạng plain text...`);
+                const plainPayload = payload
+                    .replace(/\{(?:green|red|orange|blue)\}(.*?)\{\/(?:green|red|orange|blue)\}/g, "$1")
+                    .replace(/^#+\s+/gm, "")
+                    .replace(/\\([\\*_~`>])/g, "$1");
+                const fallbackOptions = { ...otherOptions };
+                delete fallbackOptions.parse_mode;
+                await Promise.resolve(bot.sendMessage(chatId, plainPayload, fallbackOptions));
+            } else {
+                throw error;
+            }
+        }
     }
 }
 
@@ -152,7 +168,7 @@ function friendlyError(error) {
 }
 
 function formatErrorMessage(error) {
-    return `# {red}[X] KHÔNG THỂ THỰC HIỆN{/red}\n\n${escapeMarkdown(friendlyError(error))}`;
+    return `# {orange}[X] KHÔNG THỂ THỰC HIỆN{/orange}\n\n${escapeMarkdown(friendlyError(error))}`;
 }
 
 function formatWarningMessage(title, message) {
@@ -612,7 +628,7 @@ async function handleCommand(msg, parsedCommand) {
         await sendMessage(
             chatId,
             result
-                ? `# {red}[BLOCK BOT] ĐÃ CHẶN THÀNH CÔNG{/red}\n\n> **Đối tượng:** ${escapeMarkdown(result.targetName)} (${escapeMarkdown(result.targetId)})\n> **Loại:** ${escapeMarkdown(result.targetType)}`
+                ? `# {orange}[BLOCK BOT] ĐÃ CHẶN THÀNH CÔNG{/orange}\n\n> **Đối tượng:** ${escapeMarkdown(result.targetName)} (${escapeMarkdown(result.targetId)})\n> **Loại:** ${escapeMarkdown(result.targetType)}`
                 : formatWarningMessage("KHÔNG THỂ CHẶN", "> Không tìm thấy ID/Tên phù hợp.")
         );
     } else if (command === "unblockbot") {
@@ -706,7 +722,7 @@ async function handleCommand(msg, parsedCommand) {
         const msgContent = [
             `# {orange}[ADMIN] DANH SÁCH QUẢN TRỊ TRUY CẬP{/orange}`,
             `> **Bot Mode:** \`${summary.botMode}\`  •  **AI Mode:** \`${summary.aiMode}\``,
-            `## {red}[CHẶN BOT] ${summary.botBlocked.length}{/red}\n${formatSection("Chặn Bot", summary.botBlocked)}`,
+            `## {orange}[CHẶN BOT] ${summary.botBlocked.length}{/orange}\n${formatSection("Chặn Bot", summary.botBlocked)}`,
             `## {orange}[CHẶN AI] ${summary.aiBlocked.length}{/orange}\n${formatSection("Chặn AI", summary.aiBlocked)}`,
             `## {green}[ALLOWLIST BOT] ${summary.botAllowlist.length}{/green}\n${formatSection("Allowlist Bot", summary.botAllowlist)}`,
             `## {green}[ALLOWLIST AI] ${summary.aiAllowlist.length}{/green}\n${formatSection("Allowlist AI", summary.aiAllowlist)}`

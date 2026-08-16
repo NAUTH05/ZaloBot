@@ -184,7 +184,7 @@ function formatLesson(lesson, index) {
     const type = Number(lesson.Type) === 0 ? "Lý thuyết" : "Thực hành";
     const location = [lesson.TenPhong, lesson.TenCoSo].filter(Boolean).join(" - ");
 
-    const statusColor = status === "BÁO NGHỈ" ? "red" : status === "LỊCH THI" ? "orange" : "green";
+    const statusColor = status === "BÁO NGHỈ" ? "orange" : status === "LỊCH THI" ? "orange" : "green";
     const lines = [
         `**${index + 1}. ${escapeMarkdown(time)} · ${escapeMarkdown(lesson.TenMonHoc || "Chưa rõ môn")}**`
     ];

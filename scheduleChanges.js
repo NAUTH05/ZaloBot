@@ -328,7 +328,7 @@ function formatScheduleChangeMessage(scheduleData, changes, date = new Date()) {
     const now = getVietnamDateInfo(date);
     const totalChanges = changes.added.length + changes.removed.length + changes.modified.length;
     const sections = [
-        "# {red}[!] LỊCH HỌC CÓ THAY ĐỔI{/red}",
+        "# {orange}[!] LỊCH HỌC CÓ THAY ĐỔI{/orange}",
         `**Sinh viên:** ${escapeMarkdown(scheduleData.studentName || "Sinh viên")}  •  **MSSV:** ${escapeMarkdown(scheduleData.studentId)}`,
         `**Xác nhận:** ${now.formattedDate} lúc ${now.hour}:${now.minute}`,
         `{orange}Tổng cộng ${totalChanges} thay đổi đã được xác nhận{/orange}`
@@ -342,7 +342,7 @@ function formatScheduleChangeMessage(scheduleData, changes, date = new Date()) {
     }
     if (changes.removed.length) {
         sections.push(
-            `## {red}[-] ĐÃ XÓA · ${changes.removed.length}{/red}\n` +
+            `## {orange}[-] ĐÃ XÓA · ${changes.removed.length}{/orange}\n` +
             changes.removed.map(formatCompactLesson).join("\n\n────────────\n\n")
         );
     }
