@@ -107,7 +107,7 @@ function logDiscord(level, message) {
 async function sendMessage(chatId, text, options = {}) {
     // Chia tin dài theo dòng để tránh vượt giới hạn tin nhắn của Zalo.
     const {
-        continuationHeader = "# {green}[...] NỘI DUNG TIẾP THEO{/green}",
+        continuationHeader = "",
         parse_mode = "markdown",
         ...otherOptions
     } = options;
@@ -299,9 +299,7 @@ async function publishBirthdayResults(year) {
             continue;
         }
         try {
-            await sendMessage(target.chatId, message, {
-                continuationHeader: `# {green}[SINH NHẬT ${year}] HỎI & ĐÁP · TIẾP{/green}`
-            });
+            await sendMessage(target.chatId, message);
             markResultSent(year, target.chatId, digest);
             result.sent += 1;
         } catch (error) {
@@ -417,9 +415,7 @@ async function handleCommand(msg, parsedCommand) {
 
         try {
             const data = await fetchStudentSchedule(studentId);
-            await sendMessage(chatId, formatDailySchedule(data), {
-                continuationHeader: "# {green}[LỊCH] HÔM NAY · TIẾP{/green}"
-            });
+            await sendMessage(chatId, formatDailySchedule(data));
         } catch (error) {
             await sendMessage(chatId, formatErrorMessage(error));
         }
@@ -442,9 +438,7 @@ async function handleCommand(msg, parsedCommand) {
 
         try {
             const data = await fetchStudentSchedule(studentId);
-            await sendMessage(chatId, formatWeeklySchedule(data), {
-                continuationHeader: "# {green}[LỊCH] TUẦN · TIẾP{/green}"
-            });
+            await sendMessage(chatId, formatWeeklySchedule(data));
         } catch (error) {
             await sendMessage(chatId, formatErrorMessage(error));
         }
@@ -917,9 +911,7 @@ async function checkAndNotifyScheduleChanges() {
                     const changeMessage = formatScheduleChangeMessage(data, result.changes);
                     for (const subscription of targetMap.values()) {
                         try {
-                            await sendMessage(subscription.chatId, changeMessage, {
-                                continuationHeader: "# {red}[!] LỊCH HỌC THAY ĐỔI · TIẾP{/red}"
-                            });
+                            await sendMessage(subscription.chatId, changeMessage);
                         } catch (error) {
                             logDiscord("ERROR", `Không thể gửi cảnh báo thay đổi cho chat ${subscription.chatId}: ${error.message}`);
                         }
@@ -946,9 +938,7 @@ async function sendDailySchedulesAtSix() {
                 const dailyMessage = formatDailySchedule(data);
                 for (const subscription of targetMap.values()) {
                     try {
-                        await sendMessage(subscription.chatId, dailyMessage, {
-                            continuationHeader: "# {green}[LỊCH] HÔM NAY · TIẾP{/green}"
-                        });
+                        await sendMessage(subscription.chatId, dailyMessage);
                     } catch (error) {
                         logDiscord("ERROR", `Không thể gửi lịch 06:00 cho chat ${subscription.chatId}: ${error.message}`);
                     }

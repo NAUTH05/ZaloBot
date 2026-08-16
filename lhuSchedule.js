@@ -227,7 +227,7 @@ function formatWeeklySchedule(scheduleData, date = new Date()) {
         `**Sinh viên:** ${studentName}`,
         `> **MSSV:** ${studentId}`,
         `> **Tuần:** ${week.formattedStartDate} – ${week.formattedEndDate}`,
-        `{orange}Tổng cộng ${lessons.length} buổi học{/orange}`
+        `> **Tổng cộng:** {orange}${lessons.length} buổi học{/orange}`
     ].join("\n");
 
     if (lessons.length === 0) {

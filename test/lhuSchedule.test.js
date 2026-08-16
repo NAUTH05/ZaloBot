@@ -115,7 +115,7 @@ test("định dạng và nhóm lịch học cả tuần", () => {
     const message = formatWeeklySchedule(data, new Date("2026-08-09T05:00:00Z"));
     assert.match(message, /^# \{green\}\[LỊCH\] TUẦN NÀY\{\/green\}/);
     assert.match(message, /03\/08\/2026 – 09\/08\/2026/);
-    assert.match(message, /\{orange\}Tổng cộng 2 buổi học\{\/orange\}/);
+    assert.match(message, /\{orange\}2 buổi học\{\/orange\}/);
     assert.match(message, /THỨ HAI/);
     assert.match(message, /CHỦ NHẬT/);
     assert.match(message, /Lập trình Web/);
@@ -124,7 +124,7 @@ test("định dạng và nhóm lịch học cả tuần", () => {
 });
 
 test("escape dữ liệu động để không làm vỡ Markdown của Zalo", () => {
-    assert.equal(escapeMarkdown("Nguyễn *A* [K24]"), "Nguyễn \\*A\\* \\[K24\\]");
+    assert.equal(escapeMarkdown("Nguyễn *A* [K24]"), "Nguyễn \\*A\\* [K24]");
 
     const message = formatDailySchedule({
         studentId: "123456789",
@@ -139,8 +139,8 @@ test("escape dữ liệu động để không làm vỡ Markdown của Zalo", ()
         }]
     }, new Date("2026-08-09T05:00:00Z"));
 
-    assert.match(message, /Nguyễn \\\*A\\\* \\\[K24\\\]/);
-    assert.match(message, /C\\# \\\[Nâng cao\\\]/);
+    assert.match(message, /Nguyễn \\\*A\\\* \[K24\]/);
+    assert.match(message, /C# \[Nâng cao\]/);
     assert.match(message, /A\\_101/);
 });
 

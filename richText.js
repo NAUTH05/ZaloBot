@@ -5,7 +5,7 @@ function text(value) {
 // Dữ liệu từ API LHU và hồ sơ Zalo có thể chứa ký tự Markdown.
 // Escape trước khi chèn vào template để không làm hỏng rich text của cả tin nhắn.
 function escapeMarkdown(value) {
-    return text(value).replace(/([\\*_~`#>{}\[\]])/g, "\\$1");
+    return text(value).replace(/([\\*_~`>])/g, "\\$1");
 }
 
 module.exports = { escapeMarkdown };
