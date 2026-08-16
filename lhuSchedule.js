@@ -239,7 +239,7 @@ function formatWeeklySchedule(scheduleData, date = new Date()) {
             (lesson) => getApiDateTimeInfo(lesson.ThoiGianBD)?.dateKey === day.dateKey
         );
         if (dayLessons.length === 0) return null;
-        return `## {orange}[NGÀY] ${escapeMarkdown(day.weekday.toUpperCase())} · ${day.formattedDate}{/orange}\n` +
+        return `# {orange}[NGÀY] ${escapeMarkdown(day.weekday.toUpperCase())} · ${day.formattedDate}{/orange}\n` +
             dayLessons.map(formatLesson).join("\n\n────────────\n\n");
     }).filter(Boolean);
 
@@ -374,7 +374,7 @@ function formatTeacherSchedule(scheduleData, date = new Date()) {
             ].join("\n");
         }).join("\n\n────────────\n\n");
 
-        return `## {orange}[NGÀY] ${escapeMarkdown(day.weekday.toUpperCase())} · ${day.formattedDate}{/orange}\n${formatted}`;
+        return `# {orange}[NGÀY] ${escapeMarkdown(day.weekday.toUpperCase())} · ${day.formattedDate}{/orange}\n${formatted}`;
     }).filter(Boolean);
 
     return `${header}\n\n${sections.join("\n\n════════════════\n\n")}`;
