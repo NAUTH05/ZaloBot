@@ -116,25 +116,28 @@ async function sendMessage(chatId, text, options = {}) {
     const chunks = [];
     let current = "";
 
-    for (const line of String(text).split("\n")) {
-        const next = current ? `${current}\n${line}` : line;
-        if (next.length <= maxLength) {
-            current = next;
-            continue;
-        }
-
-        if (current) chunks.push(current);
-        if (line.length <= maxLength) {
-            current = line;
-        } else {
-            for (let index = 0; index < line.length; index += maxLength) {
-                chunks.push(line.slice(index, index + maxLength));
-            }
+    const blocks = String(text).split(/(?<=\n\n)/);
+    for (const block of blocks) {
+        if (current && (current + block).length > maxLength) {
+            chunks.push(current.trim());
             current = "";
         }
-    }
 
-    if (current) chunks.push(current);
+        if (block.length <= maxLength) {
+            current += block;
+        } else {
+            for (const line of block.split("\n")) {
+                const next = current ? `${current}\n${line}` : line;
+                if (next.length <= maxLength) {
+                    current = next;
+                } else {
+                    if (current.trim()) chunks.push(current.trim());
+                    current = line;
+                }
+            }
+        }
+    }
+    if (current.trim()) chunks.push(current.trim());
     for (let index = 0; index < chunks.length; index += 1) {
         const prefix = index > 0 && continuationHeader ? `${continuationHeader}\n\n` : "";
         const payload = `${prefix}${chunks[index]}`;
