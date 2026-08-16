@@ -112,7 +112,7 @@ async function sendMessage(chatId, text, options = {}) {
         ...otherOptions
     } = options;
     const messageOptions = { ...otherOptions, parse_mode };
-    const maxLength = 1600;
+    const maxLength = 750;
     const chunks = [];
     let current = "";
 
