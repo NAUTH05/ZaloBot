@@ -50,17 +50,19 @@ function postJson(urlString, body) {
                 "User-Agent": "ZaloBOT-LHU/1.0"
             }
         }, (response) => {
-            let raw = "";
-            response.setEncoding("utf8");
+            const chunks = [];
+            let totalBytes = 0;
             response.on("data", (chunk) => {
-                raw += chunk;
-                if (raw.length > 10 * 1024 * 1024) {
+                chunks.push(chunk);
+                totalBytes += chunk.length;
+                if (totalBytes > 10 * 1024 * 1024) {
                     request.destroy(new Error("Phản hồi API LHU quá lớn"));
                 }
             });
             response.on("end", () => {
                 let parsed;
                 try {
+                    const raw = Buffer.concat(chunks).toString("utf8");
                     parsed = raw ? JSON.parse(raw) : {};
                 } catch (_) {
                     reject(new LhuApiError("API LHU trả dữ liệu không hợp lệ", undefined, response.statusCode));

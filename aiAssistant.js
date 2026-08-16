@@ -110,10 +110,11 @@ function callGeminiApi(prompt, apiKey, modelName = process.env.GEMINI_MODEL || "
             },
             timeout: 25000
         }, (res) => {
-            let data = "";
-            res.on("data", chunk => data += chunk);
+            const chunks = [];
+            res.on("data", chunk => chunks.push(chunk));
             res.on("end", () => {
                 try {
+                    const data = Buffer.concat(chunks).toString("utf8");
                     const parsed = JSON.parse(data);
                     if (res.statusCode < 200 || res.statusCode >= 300) {
                         reject(new Error(parsed.error?.message || `Gemini API lỗi ${res.statusCode}`));
@@ -151,10 +152,11 @@ function callGeminiInteractionsApi(prompt, apiKey, modelName = "gemini-2.5-flash
             },
             timeout: 25000
         }, (res) => {
-            let data = "";
-            res.on("data", chunk => data += chunk);
+            const chunks = [];
+            res.on("data", chunk => chunks.push(chunk));
             res.on("end", () => {
                 try {
+                    const data = Buffer.concat(chunks).toString("utf8");
                     const parsed = JSON.parse(data);
                     if (res.statusCode < 200 || res.statusCode >= 300) {
                         reject(new Error(parsed.error?.message || `Interactions API lỗi ${res.statusCode}`));
