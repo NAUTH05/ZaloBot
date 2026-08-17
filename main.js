@@ -900,6 +900,11 @@ async function handleCommand(msg, parsedCommand) {
 
 {green}Bot luôn lập lịch theo giờ Thành phố Hồ Chí Minh.{/green}`;
         await sendMessage(chatId, message);
+    } else if (command === "test6h") {
+        if (!await requireOwner(context)) return;
+        await sendMessage(chatId, "⏰ *[TEST]* Bắt đầu kích hoạt thử nghiệm gửi lịch 06:00...");
+        await sendDailySchedulesAtSix();
+        await sendMessage(chatId, "✅ *[TEST]* Đã hoàn tất thử nghiệm gửi lịch 06:00.");
     }
 }
 
@@ -914,12 +919,13 @@ function groupEnabledSubscriptionsByStudent() {
     return grouped;
 }
 
-let scheduledCheckRunning = false;
+let isCheckRunning = false;
+let isDailySixRunning = false;
 
 // Tự động kiểm tra và thông báo NGAY LẬP TỨC khi phát hiện lịch có thay đổi (chạy mỗi 15 phút)
 async function checkAndNotifyScheduleChanges() {
-    if (scheduledCheckRunning) return;
-    scheduledCheckRunning = true;
+    if (isCheckRunning) return;
+    isCheckRunning = true;
     try {
         for (const [studentId, targetMap] of groupEnabledSubscriptionsByStudent().entries()) {
             try {
@@ -941,23 +947,47 @@ async function checkAndNotifyScheduleChanges() {
             }
         }
     } finally {
-        scheduledCheckRunning = false;
+        isCheckRunning = false;
     }
 }
 
 // 06:00 giờ Việt Nam: kiểm tra nốt thay đổi (nếu có) và gửi lịch học hôm nay.
 async function sendDailySchedulesAtSix() {
-    await checkAndNotifyScheduleChanges();
-    if (scheduledCheckRunning) return;
-    scheduledCheckRunning = true;
+    if (isDailySixRunning) return;
+    isDailySixRunning = true;
+    console.log("⏰ Bắt đầu tiến trình gửi lịch học 06:00 hàng ngày...");
+    logDiscord("INFO", "Bắt đầu tiến trình gửi lịch học 06:00 hàng ngày...");
     try {
-        for (const [studentId, targetMap] of groupEnabledSubscriptionsByStudent().entries()) {
+        const subscriptionsGrouped = groupEnabledSubscriptionsByStudent();
+        console.log(`[06:00] Tìm thấy ${subscriptionsGrouped.size} MSSV có đăng ký nhận thông báo.`);
+
+        for (const [studentId, targetMap] of subscriptionsGrouped.entries()) {
             try {
                 const data = await fetchStudentSchedule(studentId);
+
+                // 1. Kiểm tra thay đổi lịch trước khi gửi (nếu có)
+                try {
+                    const result = confirmScheduleChange(data);
+                    if (result.confirmed) {
+                        const changeMessage = formatScheduleChangeMessage(data, result.changes);
+                        for (const subscription of targetMap.values()) {
+                            try {
+                                await sendMessage(subscription.chatId, changeMessage);
+                            } catch (error) {
+                                logDiscord("ERROR", `Không thể gửi cảnh báo thay đổi cho chat ${subscription.chatId}: ${error.message}`);
+                            }
+                        }
+                    }
+                } catch (changeError) {
+                    console.error(`Lỗi kiểm tra thay đổi cho MSSV ${studentId}:`, changeError.message);
+                }
+
+                // 2. Gửi lịch học hôm nay cho tất cả các chat đăng ký MSSV này
                 const dailyMessage = formatDailySchedule(data);
                 for (const subscription of targetMap.values()) {
                     try {
                         await sendMessage(subscription.chatId, dailyMessage);
+                        console.log(`[06:00] Đã gửi lịch thành công cho MSSV ${studentId} tới chat ${subscription.chatId}`);
                     } catch (error) {
                         logDiscord("ERROR", `Không thể gửi lịch 06:00 cho chat ${subscription.chatId}: ${error.message}`);
                     }
@@ -967,7 +997,8 @@ async function sendDailySchedulesAtSix() {
             }
         }
     } finally {
-        scheduledCheckRunning = false;
+        isDailySixRunning = false;
+        console.log("⏰ Hoàn tất tiến trình gửi lịch học 06:00.");
     }
 }
 
