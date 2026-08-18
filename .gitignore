@@ -11,4 +11,6 @@ accessControl.json
 accessControl.json.tmp
 birthdayData.json
 birthdayData.json.tmp
+dutyScheduleData.json
+dutyScheduleData.json.tmp
 *.log

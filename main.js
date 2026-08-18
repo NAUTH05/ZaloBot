@@ -61,6 +61,19 @@ const {
     wasInvitationSent,
     wasResultSent
 } = require("./birthdayStore");
+const {
+    addDutySchedule,
+    addDutySchedules,
+    deleteDutySchedule,
+    disableDutyNotifications,
+    enableDutyNotifications,
+    formatDutyList,
+    formatDutyNotification,
+    getDutyScheduleForDate,
+    getDutySchedules,
+    getDutySubscriptions,
+    updateDutySchedule
+} = require("./dutyScheduleStore");
 
 const isTestEnv = process.env.NODE_ENV === "test" || require.main !== module;
 
@@ -192,17 +205,19 @@ function parseCommand(rawText) {
 
     // Xóa bot mention dạng /cmd@Bot MrYukitoBoBo hoặc /cmd@botname -> /cmd
     let clean = rawText
-        .replace(/(\/\w+)@Bot\b(?:\s+[\w\d_]+)*/gi, "$1")
+        .replace(/(\/\w+)@Bot\b(?:[ \t]+[\w\d_]+)*/gi, "$1")
         .replace(/(\/\w+)@[\w\d_]+/gi, "$1")
-        .replace(/@Bot\b(?:\s+[\w\d_]+)*/gi, "")
+        .replace(/@Bot\b(?:[ \t]+[\w\d_]+)*/gi, "")
         .replace(/@[\w\d_]+/gi, "")
         .trim();
 
     if (!clean.startsWith("/")) return null;
 
-    const parts = clean.split(/\s+/);
-    const command = parts[0].slice(1).toLowerCase();
-    const argument = parts.slice(1).join(" ").trim();
+    const match = clean.match(/^\/(\w+)(?:\s+([\s\S]*))?$/);
+    if (!match) return null;
+
+    const command = match[1].toLowerCase();
+    const argument = (match[2] || "").trim();
 
     return { command, argument };
 }
@@ -234,6 +249,11 @@ async function requireOwner(context) {
 function parseQuestionIdAndText(argument) {
     const match = String(argument || "").match(/^#?(\d+)(?:\s*\|\s*|\s+)([\s\S]+)$/);
     return match ? { id: Number(match[1]), text: match[2].trim() } : null;
+}
+
+function parseDutyIdOrDateAndText(argument) {
+    const match = String(argument || "").trim().match(/^(\[?\d{1,2}\/\d{1,2}\]?|#?\d+)(?:\s*\|\s*|\s+)([\s\S]+)$/);
+    return match ? { target: match[1], text: match[2].trim() } : null;
 }
 
 function resolveQuestionYear(argument, date = new Date()) {
@@ -854,6 +874,111 @@ async function handleCommand(msg, parsedCommand) {
             `> **User ID:** ${escapeMarkdown(context.userId)}\n` +
             `> **Chat ID:** ${escapeMarkdown(context.chatId)}`
         );
+    } else if (command === "lichtruc") {
+        const todayDuties = getDutyScheduleForDate();
+        if (todayDuties && todayDuties.length > 0) {
+            await sendMessage(chatId, formatDutyNotification(todayDuties));
+        } else {
+            await sendMessage(chatId, formatDutyList(getDutySchedules()));
+        }
+    } else if (command === "themlichtruc" || command === "addlichtruc") {
+        if (!await requireOwner(context)) return;
+        if (!argument) {
+            await sendMessage(
+                chatId,
+                formatWarningMessage(
+                    "SAI CÚ PHÁP",
+                    "> **Cú pháp:** /themlichtruc [dd/mm] [Name 1 - Name 2]\n> **Ví dụ một dòng:** /themlichtruc 25/08 Nhân - Sang\n> **Nhiều dòng:** gửi mỗi lịch trên một dòng sau lệnh."
+                )
+            );
+            return;
+        }
+        try {
+            const items = argument.includes("\n")
+                ? addDutySchedules(argument)
+                : [addDutySchedule(argument)];
+            const summary = items.map((item) =>
+                `> **#${item.id}** \`[${escapeMarkdown(item.dateStr)}]\` — \`${escapeMarkdown(item.assigned)}\``
+            ).join("\n");
+            await sendMessage(chatId, `# {green}[OK] ĐÃ THÊM ${items.length} LỊCH TRỰC{/green}\n\n${summary}`);
+        } catch (error) {
+            await sendMessage(chatId, formatWarningMessage("KHÔNG THỂ THÊM LỊCH TRỰC", `> ${escapeMarkdown(error.message)}`));
+        }
+    } else if (command === "sualichtruc" || command === "editlichtruc") {
+        if (!await requireOwner(context)) return;
+        const parsed = parseDutyIdOrDateAndText(argument);
+        if (!parsed) {
+            await sendMessage(
+                chatId,
+                formatWarningMessage(
+                    "SAI CÚ PHÁP",
+                    "> **Cú pháp:** /sualichtruc [ID hoặc dd/mm] [Nội dung mới]\n> **Ví dụ:** /sualichtruc #1 [25/08] [Nguyễn Văn A - Võ Văn E]"
+                )
+            );
+            return;
+        }
+        try {
+            const item = updateDutySchedule(parsed.target, parsed.text);
+            await sendMessage(
+                chatId,
+                item
+                    ? `# {green}[OK] ĐÃ SỬA LỊCH TRỰC #${item.id}{/green}\n\n` +
+                      `> **Ngày:** \`[${escapeMarkdown(item.dateStr)}]\`\n` +
+                      `> **Phân công:** \`[${escapeMarkdown(item.assigned)}]\``
+                    : formatWarningMessage("KHÔNG TÌM THẤY", `> Không tìm thấy lịch trực **${escapeMarkdown(parsed.target)}**.`)
+            );
+        } catch (error) {
+            await sendMessage(chatId, formatWarningMessage("KHÔNG THỂ SỬA LỊCH TRỰC", `> ${escapeMarkdown(error.message)}`));
+        }
+    } else if (command === "xoalichtruc" || command === "dellichtruc") {
+        if (!await requireOwner(context)) return;
+        const target = String(argument || "").trim();
+        if (!target) {
+            await sendMessage(
+                chatId,
+                formatWarningMessage(
+                    "SAI CÚ PHÁP",
+                    "> **Cú pháp:** /xoalichtruc [ID hoặc dd/mm]\n> **Ví dụ:** /xoalichtruc #1 hoặc /xoalichtruc 25/08"
+                )
+            );
+            return;
+        }
+        const deleted = deleteDutySchedule(target);
+        await sendMessage(
+            chatId,
+            deleted
+                ? `# {green}[OK] ĐÃ XÓA LỊCH TRỰC #${deleted.id}{/green}\n\n` +
+                  `> **Ngày:** \`[${escapeMarkdown(deleted.dateStr)}]\`\n` +
+                  `> **Phân công:** \`[${escapeMarkdown(deleted.assigned)}]\``
+                : formatWarningMessage("KHÔNG TÌM THẤY", `> Không tìm thấy lịch trực **${escapeMarkdown(target)}**.`)
+        );
+    } else if (command === "danhsachlichtruc") {
+        const items = getDutySchedules();
+        await sendMessage(chatId, formatDutyList(items));
+    } else if (command === "dangkylich") {
+        enableDutyNotifications(context);
+        await sendMessage(
+            chatId,
+            "# {green}[OK] ĐÃ ĐĂNG KÝ LỊCH TRỰC{/green}\n\n" +
+            "> Cuộc trò chuyện này sẽ tự động nhận thông báo lịch trực ban vào lúc **06:00 sáng** hàng ngày.\n\n" +
+            "{orange}Dùng /huydangkylich nếu muốn tắt thông báo.{/orange}"
+        );
+    } else if (command === "huydangkylich" || command === "huylichtruc") {
+        if (disableDutyNotifications(context)) {
+            await sendMessage(
+                chatId,
+                "# {orange}[TẮT] ĐÃ HỦY ĐĂNG KÝ LỊCH TRỰC{/orange}\n\n" +
+                "> Đã tắt tự động gửi thông báo lịch trực ban lúc 06:00 sáng cho cuộc trò chuyện này."
+            );
+        } else {
+            await sendMessage(
+                chatId,
+                formatWarningMessage(
+                    "CHƯA ĐĂNG KÝ LỊCH TRỰC",
+                    "> Cuộc trò chuyện này chưa đăng ký nhận thông báo lịch trực. Dùng **/dangkylich** để bật."
+                )
+            );
+        }
     } else if (command === "help") {
         // NGHIÊM CẤM hiển thị lệnh admin cho người dùng không phải owner
         const ownerSection = isOwner(context)
@@ -863,6 +988,11 @@ async function handleCommand(msg, parsedCommand) {
               "- **/allowbot**, **/allowai** — Quản lý Allowlist cho phép dùng\n" +
               "- **/accessmode [bot|ai] [all|allowlist]** — Đổi chế độ phân quyền\n" +
               "- **/accesslist** — Xem toàn bộ danh sách phân quyền & blocklist\n\n" +
+              "## {orange}[LỊCH TRỰC] QUẢN TRỊ OWNER{/orange}\n" +
+              "- **/themlichtruc [dd/mm] [Tên 1 - Tên 2]** — Thêm một hoặc nhiều lịch trực, mỗi lịch một dòng\n" +
+              "- **/sualichtruc [ID/Ngày] [Nội dung mới]** — Sửa lịch trực ban\n" +
+              "- **/xoalichtruc [ID/Ngày]** — Xóa lịch trực ban\n" +
+              "- **/danhsachlichtruc** — Xem danh sách phân công lịch trực\n\n" +
               "## {orange}[SINH NHẬT] QUẢN TRỊ OWNER{/orange}\n" +
               "- **/danhsach [năm]** — Xem các câu hỏi sinh nhật\n" +
               "- **/them**, **/sua**, **/xoa**, **/traloi**, **/congbo** — Quản lý Hỏi & Đáp"
@@ -877,13 +1007,16 @@ async function handleCommand(msg, parsedCommand) {
 - **/lichthi [MSSV]** — Xem danh sách lịch thi học kỳ
 - **/lichgv [Tên giảng viên]** — Xem lịch giảng dạy của thầy/cô
 - **/phongtrong [Cơ sở]** — Tìm phòng trống tự học / họp nhóm
+- **/lichtruc** — Xem phân công lịch trực ban hôm nay
 
 ## {orange}[TRỢ LÝ AI] HỎI ĐÁP TỰ NHIÊN{/orange}
 - **/ai [câu hỏi]** — Hỏi AI về lịch rảnh, ngày báo nghỉ (VD: /ai Trong 2 tuần tới tớ rảnh ngày nào?)
 
 ## {orange}[THÔNG BÁO] TỰ ĐỘNG{/orange}
-- **/dangky [MSSV]** — Bật nhận thông báo tự động (báo thay đổi tức thì + lịch hôm nay 06:00)
-- **/huythongbao** — Tắt thông báo tự động
+- **/dangky [MSSV]** — Bật nhận thông báo tự động lịch học (báo thay đổi tức thì + lịch hôm nay 06:00)
+- **/dangkylich** — Đăng ký nhận thông báo lịch trực ban lúc 06:00 sáng hàng ngày
+- **/huydangkylich** — Hủy nhận thông báo lịch trực ban
+- **/huythongbao** — Tắt thông báo tự động lịch học
 
 ## {orange}[HỆ THỐNG] THÔNG TIN{/orange}
 - **/time** — Xem giờ hệ thống
@@ -905,6 +1038,16 @@ async function handleCommand(msg, parsedCommand) {
         await sendMessage(chatId, "⏰ *[TEST]* Bắt đầu kích hoạt thử nghiệm gửi lịch 06:00...");
         await sendDailySchedulesAtSix();
         await sendMessage(chatId, "✅ *[TEST]* Đã hoàn tất thử nghiệm gửi lịch 06:00.");
+    } else if (command === "test6hlichtruc") {
+        if (!await requireOwner(context)) return;
+        await sendMessage(chatId, "⏰ *[TEST]* Bắt đầu kích hoạt thử nghiệm gửi thông báo lịch trực 06:00...");
+        const result = await sendDailyDutyNotificationAtSix();
+        await sendMessage(
+            chatId,
+            `✅ *[TEST]* Đã hoàn tất thử nghiệm gửi lịch trực 06:00.\n` +
+            `> **Đã gửi:** ${result.sent}\n` +
+            `> **Lỗi:** ${result.failed}`
+        );
     }
 }
 
@@ -1002,6 +1145,37 @@ async function sendDailySchedulesAtSix() {
     }
 }
 
+async function sendDailyDutyNotificationAtSix(date = new Date()) {
+    const todayDuties = getDutyScheduleForDate(date);
+    if (!todayDuties || todayDuties.length === 0) {
+        console.log("[06:00] Không có lịch trực cho ngày hôm nay.");
+        return { sent: 0, skipped: 0, failed: 0 };
+    }
+
+    const message = formatDutyNotification(todayDuties, date);
+    if (!message) return { sent: 0, skipped: 0, failed: 0 };
+
+    const subscriptions = getDutySubscriptions();
+    if (subscriptions.length === 0) {
+        console.log("[06:00] Chưa có cuộc trò chuyện nào sử dụng /dangkylich.");
+        return { sent: 0, skipped: 0, failed: 0 };
+    }
+
+    console.log(`[06:00] Gửi thông báo lịch trực tới ${subscriptions.length} cuộc trò chuyện đã đăng ký...`);
+    const result = { sent: 0, skipped: 0, failed: 0 };
+
+    for (const sub of subscriptions) {
+        try {
+            await sendMessage(sub.chatId, message);
+            result.sent += 1;
+        } catch (error) {
+            result.failed += 1;
+            logDiscord("ERROR", `Không thể gửi thông báo lịch trực cho chat ${sub.chatId}: ${error.message}`);
+        }
+    }
+    return result;
+}
+
 if (!isTestEnv) {
     // Kiểm tra và báo thay đổi lịch tức thì mỗi 15 phút
     schedule.scheduleJob({ rule: "*/15 * * * *", tz: TIME_ZONE }, checkAndNotifyScheduleChanges);
@@ -1087,5 +1261,6 @@ module.exports = {
     parseQuestionIdAndText,
     publishBirthdayResults,
     sendBirthdayInvitations,
+    sendDailyDutyNotificationAtSix,
     sendWelcomeMessage
 };

@@ -38,6 +38,11 @@ Các bản ghi `subscriptions.json` theo schema cũ chỉ có `chat.id` sẽ kh�
 - `/time`: kiểm tra giờ Việt Nam mà bot đang dùng.
 - `/myid`: xem User ID và Chat ID của người gửi.
 - `/sinhnhat [câu hỏi]`: gửi câu hỏi trong ngày 27/08.
+- `/lichtruc`: xem phân công lịch trực ban hôm nay.
+- `/themlichtruc [dd/mm] [Name 1 - Name 2]`: chủ BOT thêm một hoặc nhiều phân công lịch trực ban (mỗi lịch một dòng).
+- `/sualichtruc [ID/Ngày] [Nội dung mới]`: chủ BOT sửa phân công lịch trực.
+- `/xoalichtruc [ID/Ngày]`: chủ BOT xóa phân công lịch trực.
+- `/danhsachlichtruc`: chủ BOT xem danh sách lịch trực đã phân công.
 - `/danhsach [năm]`: chủ BOT xem danh sách câu hỏi; mặc định là năm hiện tại.
 - `/them [câu hỏi]`: chủ BOT thêm câu hỏi thủ công.
 - `/sua [ID] [câu hỏi mới]`: chủ BOT sửa nội dung câu hỏi.
@@ -45,6 +50,7 @@ Các bản ghi `subscriptions.json` theo schema cũ chỉ có `chat.id` sẽ kh�
 - `/traloi [ID] [câu trả lời]`: chủ BOT ghi hoặc cập nhật câu trả lời; phần trả lời có thể xuống dòng.
 - `/congbo [năm]`: gửi toàn bộ câu đã trả lời tới mọi user/nhóm từng tương tác với bot.
 - `/help`: xem hướng dẫn.
+
 
 Chạy kiểm thử bằng `npm test`.
 
