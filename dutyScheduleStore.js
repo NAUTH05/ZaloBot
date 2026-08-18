@@ -118,6 +118,25 @@ function parseDutyInput(rawInput) {
     };
 }
 
+function parseDutyInputs(rawInput) {
+    const lines = Array.isArray(rawInput)
+        ? rawInput
+        : String(rawInput || "").split(/\r?\n/);
+    const nonEmptyLines = lines
+        .map((line, index) => ({ lineNumber: index + 1, text: String(line || "").trim() }))
+        .filter((line) => line.text);
+
+    if (nonEmptyLines.length === 0) return [];
+
+    return nonEmptyLines.map((line) => {
+        const parsed = parseDutyInput(line.text);
+        if (!parsed) {
+            throw new Error(`Cú pháp lịch trực không hợp lệ ở dòng ${line.lineNumber}: ${line.text}`);
+        }
+        return parsed;
+    });
+}
+
 function addDutySchedule(rawInput, filePath = FILE_PATH) {
     const parsed = typeof rawInput === "string" ? parseDutyInput(rawInput) : rawInput;
     if (!parsed || !parsed.dateStr || !parsed.assigned) {
@@ -142,6 +161,31 @@ function addDutySchedule(rawInput, filePath = FILE_PATH) {
     data.schedules.push(newItem);
     writeDutyData(data, filePath);
     return newItem;
+}
+
+function addDutySchedules(rawInput, filePath = FILE_PATH) {
+    const parsedItems = parseDutyInputs(rawInput);
+    if (parsedItems.length === 0) {
+        throw new Error("Chưa có dòng lịch trực nào để thêm.");
+    }
+
+    const data = readDutyData(filePath);
+    let nextId = data.schedules.reduce((max, item) => Math.max(max, Number(item.id) || 0), 0) + 1;
+    const nowIso = new Date().toISOString();
+    const newItems = parsedItems.map((parsed) => ({
+        id: nextId++,
+        dateStr: parsed.dateStr,
+        day: parsed.day,
+        month: parsed.month,
+        year: parsed.year,
+        assigned: parsed.assigned,
+        createdAt: nowIso,
+        updatedAt: nowIso
+    }));
+
+    data.schedules.push(...newItems);
+    writeDutyData(data, filePath);
+    return newItems;
 }
 
 function findDutyIndex(schedules, target) {
@@ -279,6 +323,7 @@ function formatDutyList(dutyItems) {
 module.exports = {
     FILE_PATH,
     addDutySchedule,
+    addDutySchedules,
     deleteDutySchedule,
     disableDutyNotifications,
     enableDutyNotifications,
@@ -288,6 +333,7 @@ module.exports = {
     getDutySchedules,
     getDutySubscriptions,
     parseDutyInput,
+    parseDutyInputs,
     readDutyData,
     updateDutySchedule,
     writeDutyData

@@ -65,4 +65,8 @@ test("parseCommand bóc tách lệnh chính xác với mọi định dạng ment
     assert.deepEqual(parseCommand("@Bot MrYukitoBoBo /help "), { command: "help", argument: "" });
     assert.deepEqual(parseCommand("@Bot MrYukitoBoBo /find 123456789"), { command: "find", argument: "123456789" });
     assert.deepEqual(parseCommand("/lich@botname 123456789"), { command: "lich", argument: "123456789" });
+    assert.deepEqual(parseCommand("/themlichtruc\n19/08 Nhân – Sang\n20/08 Thuận – Cường"), {
+        command: "themlichtruc",
+        argument: "19/08 Nhân – Sang\n20/08 Thuận – Cường"
+    });
 });

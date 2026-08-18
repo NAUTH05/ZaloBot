@@ -5,12 +5,14 @@ const os = require("node:os");
 const path = require("node:path");
 const {
     addDutySchedule,
+    addDutySchedules,
     deleteDutySchedule,
     formatDutyList,
     formatDutyNotification,
     getDutyScheduleForDate,
     getDutySchedules,
     parseDutyInput,
+    parseDutyInputs,
     updateDutySchedule
 } = require("../dutyScheduleStore");
 
@@ -19,6 +21,42 @@ function temporaryFile(t) {
     t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
     return path.join(directory, "dutyScheduleData.json");
 }
+
+test("phân tích và thêm nhiều lịch trực từ nội dung nhiều dòng", (t) => {
+    const filePath = temporaryFile(t);
+    const input = [
+        "19/08 Nhân – Sang",
+        "20/08 Thuận – Cường",
+        "21/08 Huy – Nhân",
+        "01/09 Thuận – Cường"
+    ].join("\n");
+
+    const parsed = parseDutyInputs(input);
+    assert.equal(parsed.length, 4);
+    assert.deepEqual(parsed[0], {
+        day: 19,
+        month: 8,
+        year: undefined,
+        dateStr: "19/08",
+        assigned: "Nhân – Sang"
+    });
+
+    const added = addDutySchedules(input, filePath);
+    assert.deepEqual(added.map((item) => item.id), [1, 2, 3, 4]);
+    assert.deepEqual(added.map((item) => item.dateStr), ["19/08", "20/08", "21/08", "01/09"]);
+    assert.equal(getDutySchedules(filePath).length, 4);
+});
+
+test("không ghi một phần danh sách khi có dòng lịch trực sai", (t) => {
+    const filePath = temporaryFile(t);
+    addDutySchedule("18/08 Nhân - Sang", filePath);
+
+    assert.throws(
+        () => addDutySchedules("19/08 Nhân - Sang\ndòng không hợp lệ\n20/08 Thuận - Cường", filePath),
+        /dòng 2/
+    );
+    assert.equal(getDutySchedules(filePath).length, 1);
+});
 
 test("phân tích cú pháp lịch trực bóc tách chuẩn các dạng dd/mm và tên người trực", () => {
     assert.deepEqual(parseDutyInput("[25/08] [Nguyễn Văn A - Trần Thị B]"), {

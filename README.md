@@ -39,7 +39,7 @@ Các bản ghi `subscriptions.json` theo schema cũ chỉ có `chat.id` sẽ kh�
 - `/myid`: xem User ID và Chat ID của người gửi.
 - `/sinhnhat [câu hỏi]`: gửi câu hỏi trong ngày 27/08.
 - `/lichtruc`: xem phân công lịch trực ban hôm nay.
-- `/themlichtruc [dd/mm] [Name 1 - Name 2]`: chủ BOT thêm phân công lịch trực ban.
+- `/themlichtruc [dd/mm] [Name 1 - Name 2]`: chủ BOT thêm một hoặc nhiều phân công lịch trực ban (mỗi lịch một dòng).
 - `/sualichtruc [ID/Ngày] [Nội dung mới]`: chủ BOT sửa phân công lịch trực.
 - `/xoalichtruc [ID/Ngày]`: chủ BOT xóa phân công lịch trực.
 - `/danhsachlichtruc`: chủ BOT xem danh sách lịch trực đã phân công.
