@@ -1309,9 +1309,9 @@ async function handleCommand(msg, parsedCommand) {
     }
 }
 
-function groupEnabledSubscriptionsByStudent(notificationTime = null) {
+function groupSubscriptionsByStudent(subscriptions, notificationTime = null) {
     const grouped = new Map();
-    for (const subscription of Object.values(getEnabledSubscriptions())) {
+    for (const subscription of subscriptions) {
         const notificationTimes = normalizeNotificationTimes(subscription);
         if (notificationTime && !notificationTimes.some((item) => item.time === notificationTime)) continue;
         const targets = grouped.get(subscription.studentId) || new Map();
@@ -1320,6 +1320,10 @@ function groupEnabledSubscriptionsByStudent(notificationTime = null) {
         grouped.set(subscription.studentId, targets);
     }
     return grouped;
+}
+
+function groupEnabledSubscriptionsByStudent(notificationTime = null) {
+    return groupSubscriptionsByStudent(Object.values(getEnabledSubscriptions()), notificationTime);
 }
 
 let isCheckRunning = false;
@@ -1356,12 +1360,24 @@ async function checkAndNotifyScheduleChanges() {
 
 // Gửi lịch học cho các đăng ký có cùng giờ thông báo.
 async function sendDailySchedulesAtTime(notificationTime = DEFAULT_NOTIFICATION_TIME) {
-    if (runningDailyNotificationTimes.has(notificationTime)) return;
+    const subscriptionsGrouped = groupEnabledSubscriptionsByStudent(notificationTime);
+    if (subscriptionsGrouped.size === 0) {
+        return { processed: false, matchedStudents: 0, sent: 0, failed: 0 };
+    }
+    if (runningDailyNotificationTimes.has(notificationTime)) {
+        return { processed: false, matchedStudents: subscriptionsGrouped.size, sent: 0, failed: 0 };
+    }
+
     runningDailyNotificationTimes.add(notificationTime);
+    const dispatchResult = {
+        processed: true,
+        matchedStudents: subscriptionsGrouped.size,
+        sent: 0,
+        failed: 0
+    };
     console.log(`⏰ Bắt đầu tiến trình gửi lịch học ${notificationTime} hàng ngày...`);
     logDiscord("INFO", `Bắt đầu tiến trình gửi lịch học ${notificationTime} hàng ngày...`);
     try {
-        const subscriptionsGrouped = groupEnabledSubscriptionsByStudent(notificationTime);
         console.log(`[${notificationTime}] Tìm thấy ${subscriptionsGrouped.size} MSSV có đăng ký nhận thông báo.`);
 
         for (const [studentId, targetMap] of subscriptionsGrouped.entries()) {
@@ -1393,15 +1409,19 @@ async function sendDailySchedulesAtTime(notificationTime = DEFAULT_NOTIFICATION_
                 for (const subscription of targetMap.values()) {
                     try {
                         await sendMessage(subscription.chatId, dailyMessage);
+                        dispatchResult.sent += 1;
                         console.log(`[${notificationTime}] Đã gửi lịch thành công cho MSSV ${studentId} tới chat ${subscription.chatId}`);
                     } catch (error) {
+                        dispatchResult.failed += 1;
                         logDiscord("ERROR", `Không thể gửi lịch ${notificationTime} cho chat ${subscription.chatId}: ${error.message}`);
                     }
                 }
             } catch (error) {
+                dispatchResult.failed += targetMap.size;
                 logDiscord("ERROR", `Không thể gửi lịch ${notificationTime} cho MSSV ${studentId}: ${error.message}`);
             }
         }
+        return dispatchResult;
     } finally {
         runningDailyNotificationTimes.delete(notificationTime);
         console.log(`⏰ Hoàn tất tiến trình gửi lịch học ${notificationTime}.`);
@@ -1466,8 +1486,8 @@ async function startRuntime() {
         await flushPersistenceWrites();
     }));
     schedule.scheduleJob({ rule: "* * * * *", tz: TIME_ZONE }, asyncCommand(async () => {
-        await sendScheduledDailySchedules();
-        await flushPersistenceWrites();
+        const result = await sendScheduledDailySchedules();
+        if (result.processed) await flushPersistenceWrites();
     }));
     schedule.scheduleJob({ rule: "5 0 27 8 *", tz: TIME_ZONE }, asyncCommand(async () => {
         await sendBirthdayInvitations();
@@ -1560,6 +1580,7 @@ module.exports = {
     formatGeneralHelp,
     formatAdminHelp,
     getBroadcastTargets,
+    groupSubscriptionsByStudent,
     handleCommand,
     isOwner,
     parseDangKyArgument,

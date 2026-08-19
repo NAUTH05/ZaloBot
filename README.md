@@ -83,7 +83,7 @@ Quy trình dành cho chủ BOT:
 
 Bot ghi nhận dấu gửi theo nội dung. Chạy lại `/congbo` mà không thay đổi dữ liệu sẽ không gửi trùng; nếu câu hỏi hoặc đáp án đã thay đổi, bot sẽ gửi bản cập nhật.
 
-Bot kiểm tra thay đổi lịch mỗi 15 phút theo `Asia/Ho_Chi_Minh`. Lịch học hằng ngày được gửi theo từng giờ trong danh sách đăng ký (mặc định `06:00`); scheduler chạy mỗi phút để phục vụ các mốc `hh:mm`.
+Bot kiểm tra thay đổi lịch mỗi 15 phút theo `Asia/Ho_Chi_Minh`. Lịch học hằng ngày được gửi theo từng giờ trong danh sách đăng ký (mặc định `06:00`); scheduler đối chiếu mốc `hh:mm` mỗi phút nhưng bỏ qua im lặng nếu không có đăng ký khớp giờ, không tạo log hay flush dữ liệu thừa.
 
 ## Firestore
 
