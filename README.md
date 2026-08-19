@@ -23,6 +23,8 @@ FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY--
 # FIREBASE_STATE_COLLECTION=bot_state
 ```
 
+Danh sách đầy đủ biến môi trường có trong [`.env.example`](.env.example). File `.env` thật không commit lên Git vì chứa token và private key.
+
 Để lấy `OWNER_USER_ID`, nhắn `/myid` cho bot rồi sao chép giá trị **User ID**. Có thể cấu hình nhiều chủ BOT bằng cách phân tách ID bằng dấu phẩy. Sau khi sửa `.env`, cần khởi động lại bot.
 
 `CHAT_ID` cũ không còn được sử dụng. Mỗi cuộc trò chuyện dùng `/find [MSSV]` để lưu MSSV, sau đó dùng `/dangky` để chủ động bật thông báo.
