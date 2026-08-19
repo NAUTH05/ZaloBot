@@ -1,7 +1,21 @@
 const fs = require("fs");
 const path = require("path");
-const { cert, getApps, initializeApp } = require("firebase-admin/app");
-const { getFirestore } = require("firebase-admin/firestore");
+let cert;
+let getApps;
+let initializeApp;
+let getFirestore;
+
+try {
+    ({ cert, getApps, initializeApp } = require("firebase-admin/app"));
+    ({ getFirestore } = require("firebase-admin/firestore"));
+} catch (_) {
+    // Compatibility with firebase-admin versions before modular subpath exports.
+    const legacyAdmin = require("firebase-admin");
+    cert = legacyAdmin.credential.cert;
+    getApps = () => legacyAdmin.apps || [];
+    initializeApp = legacyAdmin.initializeApp.bind(legacyAdmin);
+    getFirestore = legacyAdmin.firestore.bind(legacyAdmin);
+}
 
 const DEFAULT_COLLECTION = "bot_state";
 const DEFAULT_CREDENTIAL_PATH = "";
