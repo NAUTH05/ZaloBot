@@ -8,7 +8,7 @@ process.env.BOT_TOKEN ||= "test-token";
 test("ba nhóm help tách đúng lệnh thường, trực nhật và admin", async () => {
     const mainPath = path.join(__dirname, "../main.js");
     const code = fs.readFileSync(mainPath, "utf8");
-    const { formatAdminHelp, formatDutyHelp, formatGeneralHelp, parseCommand, suggestCommandCorrection } = require("../main.js");
+    const { formatAdminHelp, formatBirthdayInvitation, formatBirthdayResults, formatDutyHelp, formatGeneralHelp, parseCommand, suggestCommandCorrection } = require("../main.js");
     const general = formatGeneralHelp();
     const duty = formatDutyHelp();
     const admin = formatAdminHelp();
@@ -19,13 +19,18 @@ test("ba nhóm help tách đúng lệnh thường, trực nhật và admin", asy
     assert.match(general, /\/start/);
     assert.match(general, /\/find 123456789/);
     assert.doesNotMatch(general, /blockbot|themlichtruc|helpadmin/);
+    assert.doesNotMatch(general, /help411/);
     assert.match(duty, /\/lichtruc/);
     assert.match(duty, /\/dangkylich/);
+    assert.doesNotMatch(duty, /help411/);
     assert.doesNotMatch(duty, /blockbot|themlichtruc|helpadmin/);
     assert.match(admin, /\/blockbot/);
     assert.match(admin, /\/themlichtruc/);
     assert.match(admin, /\/thongbao/);
     assert.match(admin, /\/helpadmin/);
+    assert.match(formatBirthdayInvitation(2026), /21 tuổi/);
+    assert.match(formatBirthdayInvitation(2026), /bạn muốn/);
+    assert.match(formatBirthdayResults(2026, [{ id: 1, text: "Bạn hỏi gì?", answer: "Câu trả lời" }]), /21 tuổi/);
     assert.match(general, /_\(Ví dụ:/);
     assert.deepEqual(parseCommand("/help411"), { command: "help411", argument: "" });
     assert.deepEqual(parseCommand("/helpadmin"), { command: "helpadmin", argument: "" });

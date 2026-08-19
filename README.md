@@ -64,7 +64,6 @@ Các bản ghi `subscriptions.json` theo schema cũ chỉ có `chat.id` sẽ kh�
 - `/congbo [năm]`: gửi toàn bộ câu đã trả lời tới mọi user/nhóm từng tương tác với bot.
 - `/thongbao [nội dung]`: chủ BOT gửi thông báo cập nhật tới mọi user/nhóm từng tương tác với bot.
 - `/help`: xem các lệnh thông thường và ví dụ.
-- `/help411`: xem các lệnh trực nhật phòng 411.
 - `/helpadmin`: chủ BOT xem toàn bộ lệnh, gồm cả lệnh quản trị.
 
 

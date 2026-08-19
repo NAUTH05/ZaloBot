@@ -82,6 +82,7 @@ const {
 } = require("./dutyScheduleStore");
 
 const isTestEnv = process.env.NODE_ENV === "test" || require.main !== module;
+const BIRTH_YEAR = 2005;
 
 if (!process.env.BOT_TOKEN) {
     throw new Error("Thiếu BOT_TOKEN trong file .env");
@@ -301,9 +302,10 @@ async function sendBotAnnouncement(message) {
 }
 
 function formatBirthdayInvitation(year) {
+    const age = Math.max(0, Number(year) - BIRTH_YEAR);
     return `# {green}[SINH NHẬT ${year}] HỎI TÔI BẤT KỲ ĐIỀU GÌ{/green}
 
-Hôm nay, **27/08**, là sinh nhật của tôi!
+Hôm nay, **27/08**, là sinh nhật của tôi. Năm nay tôi **${age} tuổi**!
 
 > Hãy dùng **/sinhnhat [câu hỏi]** để gửi cho tôi bất kỳ câu hỏi nào bạn muốn.
 > **Ví dụ:** /sinhnhat Điều bạn tự hào nhất trong năm qua là gì?
@@ -312,12 +314,13 @@ Hôm nay, **27/08**, là sinh nhật của tôi!
 }
 
 function formatBirthdayResults(year, questions) {
+    const age = Math.max(0, Number(year) - BIRTH_YEAR);
     const sections = questions.map((question) =>
         `## {orange}[#${question.id}] ${escapeMarkdown(question.text)}{/orange}\n${escapeMarkdown(question.answer)}`
     );
     return `# {green}[SINH NHẬT ${year}] CÔNG BỐ HỎI & ĐÁP{/green}
 
-Cảm ơn mọi người đã gửi câu hỏi cho sinh nhật 27/08 của tôi!
+Cảm ơn mọi người đã gửi câu hỏi cho sinh nhật 27/08 của tôi. Năm nay tôi **${age} tuổi**!
 
 ${sections.join("\n\n")}`;
 }
@@ -426,7 +429,7 @@ const COMMAND_EXAMPLES = {
     phongtrong: "/phongtrong 1",
     ai: "/ai Hôm nay tôi học môn gì?",
     huythongbao: "/huythongbao",
-    sinhnhat: "/sinhnhat Điều bạn tự hào nhất là gì?",
+    sinhnhat: "/sinhnhat Bạn muốn hỏi tôi điều gì?",
     myid: "/myid",
     lichtruc: "/lichtruc",
     themlichtruc: "/themlichtruc 25/08 Nhân - Sang",
@@ -528,10 +531,9 @@ function formatGeneralHelp() {
 - **/huythongbao** — Tắt thông báo lịch học. _(Ví dụ: /huythongbao)_
 
 ## {orange}[KHÁC] TIỆN ÍCH{/orange}
-- **/sinhnhat [Câu hỏi]** — Gửi câu hỏi sinh nhật ngày 27/08. _(Ví dụ: /sinhnhat Thầy thích môn học nào nhất?)_
+- **/sinhnhat [Câu hỏi]** — Gửi câu hỏi sinh nhật ngày 27/08. _(Ví dụ: /sinhnhat Điều bạn mong chờ nhất ở tuổi mới là gì?)_
 - **/time** — Xem giờ hệ thống. _(Ví dụ: /time)_
 - **/myid** — Xem User ID và Chat ID. _(Ví dụ: /myid)_
-- **/help411** — Xem lệnh trực nhật phòng 411. _(Ví dụ: /help411)_
 - **/help** — Xem hướng dẫn này. _(Ví dụ: /help)_`;
 }
 
@@ -543,7 +545,7 @@ function formatDutyHelp() {
 - **/danhsachlichtruc** — Xem toàn bộ lịch trực nhật phòng 411. _(Ví dụ: /danhsachlichtruc)_
 - **/dangkylich** — Nhận thông báo trực nhật lúc 06:00 hàng ngày. _(Ví dụ: /dangkylich)_
 - **/huydangkylich** — Hủy thông báo trực nhật. _(Ví dụ: /huydangkylich)_
-- **/help411** — Xem hướng dẫn này. _(Ví dụ: /help411)_`;
+`;
 }
 
 function formatAdminHelp() {
