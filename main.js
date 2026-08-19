@@ -25,7 +25,12 @@ const {
     getAllSubscriptions,
     getEnabledSubscriptions,
     getSubscription,
-    saveStudent
+    DEFAULT_NOTIFICATION_TIME,
+    normalizeNotificationTime,
+    normalizeNotificationTimes,
+    removeNotificationTime,
+    saveStudent,
+    updateNotificationTime
 } = require("./subscriptions");
 const { getMessageContext } = require("./userContext");
 const {
@@ -48,6 +53,7 @@ const {
     unblockTarget
 } = require("./accessControl");
 const { askScheduleAi } = require("./aiAssistant");
+const { flushPersistenceWrites, initializeFirestorePersistence } = require("./firestorePersistence");
 const {
     addQuestion,
     answerQuestion,
@@ -81,7 +87,7 @@ if (!process.env.BOT_TOKEN) {
     throw new Error("Thiếu BOT_TOKEN trong file .env");
 }
 
-const bot = new ZaloBot(process.env.BOT_TOKEN, { polling: !isTestEnv });
+const bot = new ZaloBot(process.env.BOT_TOKEN, { polling: false });
 
 function logDiscord(level, message) {
     const webhookUrl = process.env.DISCORD_WEBHOOK;
@@ -279,6 +285,21 @@ function getBroadcastTargets() {
     return [...targets.values()];
 }
 
+async function sendBotAnnouncement(message) {
+    const targets = getBroadcastTargets();
+    const result = { targets: targets.length, sent: 0, failed: 0 };
+    for (const target of targets) {
+        try {
+            await sendMessage(target.chatId, message);
+            result.sent += 1;
+        } catch (error) {
+            result.failed += 1;
+            logDiscord("ERROR", `Không thể gửi thông báo cập nhật cho chat ${target.chatId}: ${error.message}`);
+        }
+    }
+    return result;
+}
+
 function formatBirthdayInvitation(year) {
     return `# {green}[SINH NHẬT ${year}] HỎI TÔI BẤT KỲ ĐIỀU GÌ{/green}
 
@@ -361,6 +382,125 @@ async function sendWelcomeMessage(chatId, displayName = "bạn") {
     );
 }
 
+function parseDangKyArgument(argument, savedStudentId) {
+    const raw = String(argument || "").trim();
+    const saved = normalizeStudentId(savedStudentId);
+    if (!raw) return { studentId: saved, notificationTime: null };
+
+    const parts = raw.split(/\s+/);
+    if (parts.length === 1 && raw.includes(":")) {
+        return { studentId: saved, notificationTime: normalizeNotificationTime(raw) };
+    }
+
+    if (parts.length === 1) {
+        return { studentId: normalizeStudentId(raw), notificationTime: null };
+    }
+
+    if (parts.length === 2) {
+        return {
+            studentId: normalizeStudentId(parts[0]),
+            notificationTime: normalizeNotificationTime(parts[1])
+        };
+    }
+
+    return { studentId: null, notificationTime: null };
+}
+
+function parseNotificationTimeEditArgument(argument) {
+    const match = String(argument || "").trim().match(/^#?(\d+)\s+(.+)$/);
+    if (!match) return null;
+    return { id: Number(match[1]), notificationTime: normalizeNotificationTime(match[2]) };
+}
+
+const COMMAND_EXAMPLES = {
+    start: "/start",
+    find: "/find 123456789",
+    dangky: "/dangky 08:00",
+    danhsachdangky: "/danhsachdangky",
+    suadangky: "/suadangky #1 20:00",
+    xoadangky: "/xoadangky #1",
+    lich: "/lich 123456789",
+    lichtuan: "/lichtuan 123456789",
+    lichthi: "/lichthi 123456789",
+    lichgv: "/lichgv Nguyễn Văn A",
+    phongtrong: "/phongtrong 1",
+    ai: "/ai Hôm nay tôi học môn gì?",
+    huythongbao: "/huythongbao",
+    sinhnhat: "/sinhnhat Điều bạn tự hào nhất là gì?",
+    myid: "/myid",
+    lichtruc: "/lichtruc",
+    themlichtruc: "/themlichtruc 25/08 Nhân - Sang",
+    sualichtruc: "/sualichtruc 25/08 Nhân - Cường",
+    xoalichtruc: "/xoalichtruc 25/08",
+    danhsachlichtruc: "/danhsachlichtruc",
+    dangkylich: "/dangkylich",
+    huydangkylich: "/huydangkylich",
+    help: "/help",
+    help411: "/help411",
+    helpadmin: "/helpadmin",
+    time: "/time",
+    thongbao: "/thongbao Bot vừa cập nhật tính năng mới",
+    blockbot: "/blockbot 123456",
+    unblockbot: "/unblockbot 123456",
+    blockai: "/blockai 123456",
+    unblockai: "/unblockai 123456",
+    allowbot: "/allowbot 123456",
+    unallowbot: "/unallowbot 123456",
+    allowai: "/allowai 123456",
+    unallowai: "/unallowai 123456",
+    accessmode: "/accessmode bot allowlist",
+    accesslist: "/accesslist",
+    danhsach: "/danhsach 2026",
+    them: "/them Câu hỏi mới",
+    sua: "/sua 1 Nội dung mới",
+    xoa: "/xoa 1",
+    traloi: "/traloi 1 Nội dung trả lời",
+    congbo: "/congbo 2026",
+    test6h: "/test6h",
+    test6hlichtruc: "/test6hlichtruc"
+};
+
+function editDistance(left, right) {
+    const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+    for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
+        const current = [leftIndex];
+        for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
+            current[rightIndex] = Math.min(
+                current[rightIndex - 1] + 1,
+                previous[rightIndex] + 1,
+                previous[rightIndex - 1] + (left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1)
+            );
+        }
+        previous.splice(0, previous.length, ...current);
+    }
+    return previous[right.length];
+}
+
+function suggestCommandCorrection(command) {
+    const compact = String(command || "").toLowerCase();
+    const knownCommands = Object.keys(COMMAND_EXAMPLES).sort((a, b) => b.length - a.length);
+    for (const known of knownCommands) {
+        if (!compact.startsWith(known) || compact === known) continue;
+        const suffix = compact.slice(known.length);
+        if (known === "dangky" && /^([01]\d|2[0-3])([0-5]\d)$/.test(suffix)) {
+            return `/dangky ${suffix.slice(0, 2)}:${suffix.slice(2)}`;
+        }
+        return `/${known} ${suffix}`;
+    }
+    const nearest = knownCommands
+        .map((known) => ({ known, distance: editDistance(compact, known) }))
+        .sort((a, b) => a.distance - b.distance || a.known.localeCompare(b.known))[0];
+    return nearest && nearest.distance <= 2 && compact.length >= 4
+        ? COMMAND_EXAMPLES[nearest.known]
+        : "/help";
+}
+
+function formatNotificationTimes(subscription) {
+    const times = normalizeNotificationTimes(subscription);
+    if (!times.length) return "> _Chưa có giờ thông báo nào._";
+    return times.map((item) => `- **#${item.id}** — \`${item.time}\``).join("\n");
+}
+
 function formatGeneralHelp() {
     return `# {green}[BOT] HƯỚNG DẪN ZALOBOT LHU{/green}
 
@@ -379,7 +519,12 @@ function formatGeneralHelp() {
 - **/ai [Câu hỏi]** — Hỏi AI về lịch học. _(Ví dụ: /ai Trong 2 tuần tới tôi rảnh ngày nào?)_
 
 ## {orange}[THÔNG BÁO] LỊCH HỌC{/orange}
-- **/dangky [MSSV]** — Bật thông báo lịch học. _(Ví dụ: /dangky 123456789)_
+- **/dangky [MSSV]** — Bật thông báo với giờ mặc định 06:00. _(Ví dụ: /dangky 123456789)_
+- **/dangky [hh:mm]** — Bật thông báo lịch học theo giờ tùy chọn. _(Ví dụ: /dangky 05:30)_
+- **/dangky [MSSV] [hh:mm]** — Lưu MSSV và giờ thông báo. _(Ví dụ: /dangky 123456789 05:30)_
+- **/danhsachdangky** — Xem các giờ đang nhận lịch. _(Ví dụ: /danhsachdangky)_
+- **/suadangky #ID [hh:mm]** — Sửa một giờ thông báo. _(Ví dụ: /suadangky #1 20:00)_
+- **/xoadangky #ID** — Xóa một giờ thông báo. _(Ví dụ: /xoadangky #1)_
 - **/huythongbao** — Tắt thông báo lịch học. _(Ví dụ: /huythongbao)_
 
 ## {orange}[KHÁC] TIỆN ÍCH{/orange}
@@ -434,6 +579,7 @@ ${formatDutyHelp()}
 - **/congbo [Năm]** — Công bố các câu đã trả lời. _(Ví dụ: /congbo 2026)_
 
 ## {orange}[KIỂM TRA HỆ THỐNG]{/orange}
+- **/thongbao [Nội dung]** — Gửi thông báo cập nhật tới các chat đang dùng bot. _(Ví dụ: /thongbao Bot vừa cập nhật tính năng mới)_
 - **/test6h** — Thử gửi lịch học 06:00. _(Ví dụ: /test6h)_
 - **/test6hlichtruc** — Thử gửi lịch trực nhật phòng 411. _(Ví dụ: /test6hlichtruc)_
 - **/helpadmin** — Xem toàn bộ lệnh. _(Ví dụ: /helpadmin)_`;
@@ -472,23 +618,25 @@ async function handleCommand(msg, parsedCommand) {
                 (subscription.notificationsEnabled
                     ? "{green}[BẬT] Thông báo lịch đang hoạt động.{/green}\n\n"
                     : "{orange}[TẮT] Thông báo lịch chưa được bật.{/orange}\n\n") +
-                "> Dùng **/lich** để xem lịch hoặc **/dangky** để nhận lịch lúc 06:00."
+                "> Dùng **/lich** để xem lịch hoặc **/dangky [hh:mm]** để chọn giờ nhận lịch."
             );
         } catch (error) {
             await sendMessage(chatId, formatErrorMessage(error));
         }
     } else if (command === "dangky") {
         const saved = getSubscription(context);
-        const studentId = resolveStudentIdForCommand(argument, saved?.studentId);
+        const parsedRegistration = parseDangKyArgument(argument, saved?.studentId);
+        const studentId = parsedRegistration.studentId;
+        const notificationTime = parsedRegistration.notificationTime;
+        const registrationParts = String(argument || "").trim().split(/\s+/).filter(Boolean);
+        const hasExplicitTime = argument.includes(":") || registrationParts.length === 2;
 
-        if (!studentId) {
+        if (!studentId || (hasExplicitTime && !parsedRegistration.notificationTime)) {
             await sendMessage(
                 chatId,
                 formatWarningMessage(
-                    argument ? "MSSV KHÔNG HỢP LỆ" : "CHƯA LƯU MSSV",
-                    argument
-                        ? "> MSSV phải gồm đúng **9 chữ số**."
-                        : "> Hãy dùng **/find [MSSV]** hoặc **/dangky [MSSV]**."
+                    argument ? "SAI CÚ PHÁP" : "CHƯA LƯU MSSV",
+                    "> **Cú pháp:** /dangky [hh:mm] hoặc /dangky [MSSV] [hh:mm]\n> **Ví dụ:** /dangky 05:30\n> Giờ hợp lệ từ **00:00** đến **23:59**."
                 )
             );
             return;
@@ -500,19 +648,61 @@ async function handleCommand(msg, parsedCommand) {
                 .some((subscription) => subscription.studentId === studentId);
             enableNotifications(context, {
                 studentId,
-                studentName: data.studentName
+                studentName: data.studentName,
+                notificationTime
             });
+            const updatedSubscription = getSubscription(context);
+            const notificationTimes = normalizeNotificationTimes(updatedSubscription);
             initializeScheduleSnapshot(data, new Date(), !wasAlreadyWatched);
             await sendMessage(
                 chatId,
                 "# {green}[OK] ĐĂNG KÝ THÀNH CÔNG{/green}\n\n" +
                 `**Sinh viên:** ${escapeMarkdown(data.studentName || "Sinh viên")}\n` +
                 `> **MSSV:** ${escapeMarkdown(studentId)}\n\n` +
-                "{green}Thông báo lịch học sẽ được tự động gửi vào lúc 06:00 hàng ngày.{/green}"
+                `{green}Đã đăng ký ${notificationTimes.length} giờ: ${notificationTimes.map((item) => `#${item.id} ${item.time}`).join(", ")}.{/green}`
             );
         } catch (error) {
             await sendMessage(chatId, formatErrorMessage(error));
         }
+    } else if (command === "danhsachdangky") {
+        const saved = getSubscription(context);
+        await sendMessage(
+            chatId,
+            `# {green}[THÔNG BÁO] DANH SÁCH GIỜ NHẬN LỊCH{/green}\n\n${formatNotificationTimes(saved)}`
+        );
+    } else if (command === "suadangky") {
+        const saved = getSubscription(context);
+        const parsed = parseNotificationTimeEditArgument(argument);
+        if (!saved || !parsed || !parsed.notificationTime) {
+            await sendMessage(chatId, formatWarningMessage(
+                "SAI CÚ PHÁP",
+                "> **Cú pháp:** /suadangky #ID hh:mm\n> **Ví dụ:** /suadangky #1 20:00"
+            ));
+            return;
+        }
+        const updated = updateNotificationTime(context, parsed.id, parsed.notificationTime);
+        await sendMessage(
+            chatId,
+            updated
+                ? `# {green}[OK] ĐÃ SỬA GIỜ THÔNG BÁO{/green}\n\n${formatNotificationTimes(updated)}`
+                : formatWarningMessage("KHÔNG THỂ SỬA", "> ID không tồn tại hoặc giờ này đã được đăng ký.")
+        );
+    } else if (command === "xoadangky") {
+        const parsedId = String(argument || "").trim().match(/^#?(\d+)$/)?.[1];
+        if (!parsedId) {
+            await sendMessage(chatId, formatWarningMessage(
+                "SAI CÚ PHÁP",
+                "> **Cú pháp:** /xoadangky #ID\n> **Ví dụ:** /xoadangky #1"
+            ));
+            return;
+        }
+        const removed = removeNotificationTime(context, Number(parsedId));
+        await sendMessage(
+            chatId,
+            removed
+                ? `# {green}[OK] ĐÃ XÓA GIỜ ${removed.removed.time}{/green}\n\n${formatNotificationTimes(removed.subscription)}`
+                : formatWarningMessage("KHÔNG TÌM THẤY", `> Không có giờ thông báo **#${parsedId}**.`)
+        );
     } else if (command === "lich") {
         const saved = getSubscription(context);
         const studentId = resolveStudentIdForCommand(argument, saved?.studentId);
@@ -945,6 +1135,24 @@ async function handleCommand(msg, parsedCommand) {
             `> **Câu chưa trả lời (không công bố):** ${unanswered}\n\n` +
             "{orange}Nếu sửa câu hỏi hoặc câu trả lời, chạy /congbo lần nữa sẽ gửi bản cập nhật; bản không đổi sẽ không bị gửi trùng.{/orange}"
         );
+    } else if (command === "thongbao") {
+        if (!await requireOwner(context)) return;
+        if (!argument) {
+            await sendMessage(chatId, formatWarningMessage(
+                "THIẾU NỘI DUNG",
+                "> **Cú pháp:** /thongbao [Nội dung cập nhật]\n> **Ví dụ:** /thongbao Bot vừa cập nhật giờ thông báo tùy chọn."
+            ));
+            return;
+        }
+        const message = `# {green}[BOT] THÔNG BÁO CẬP NHẬT{/green}\n\n${escapeMarkdown(argument)}`;
+        const result = await sendBotAnnouncement(message);
+        await sendMessage(
+            chatId,
+            "# {green}[OK] ĐÃ GỬI THÔNG BÁO{/green}\n\n" +
+            `> **Tổng cuộc trò chuyện:** ${result.targets}\n` +
+            `> **Gửi thành công:** ${result.sent}\n` +
+            `> **Gửi lỗi:** ${result.failed}`
+        );
     } else if (command === "myid") {
         await sendMessage(
             chatId,
@@ -1089,12 +1297,23 @@ async function handleCommand(msg, parsedCommand) {
             `> **Đã gửi:** ${result.sent}\n` +
             `> **Lỗi:** ${result.failed}`
         );
+    } else {
+        const suggestion = suggestCommandCorrection(command);
+        await sendMessage(
+            chatId,
+            formatWarningMessage(
+                "LỆNH KHÔNG HỢP LỆ",
+                `> Không nhận diện được **/${escapeMarkdown(command)}**.\n> Vui lòng sử dụng **${suggestion}** để sửa cú pháp.`
+            )
+        );
     }
 }
 
-function groupEnabledSubscriptionsByStudent() {
+function groupEnabledSubscriptionsByStudent(notificationTime = null) {
     const grouped = new Map();
     for (const subscription of Object.values(getEnabledSubscriptions())) {
+        const notificationTimes = normalizeNotificationTimes(subscription);
+        if (notificationTime && !notificationTimes.some((item) => item.time === notificationTime)) continue;
         const targets = grouped.get(subscription.studentId) || new Map();
         // Một MSSV chỉ gửi một lần vào cùng một chat, dù nhiều thành viên cùng đăng ký.
         targets.set(subscription.chatId, subscription);
@@ -1104,7 +1323,7 @@ function groupEnabledSubscriptionsByStudent() {
 }
 
 let isCheckRunning = false;
-let isDailySixRunning = false;
+const runningDailyNotificationTimes = new Set();
 
 // Tự động kiểm tra và thông báo NGAY LẬP TỨC khi phát hiện lịch có thay đổi (chạy mỗi 15 phút)
 async function checkAndNotifyScheduleChanges() {
@@ -1135,15 +1354,15 @@ async function checkAndNotifyScheduleChanges() {
     }
 }
 
-// 06:00 giờ Việt Nam: kiểm tra nốt thay đổi (nếu có) và gửi lịch học hôm nay.
-async function sendDailySchedulesAtSix() {
-    if (isDailySixRunning) return;
-    isDailySixRunning = true;
-    console.log("⏰ Bắt đầu tiến trình gửi lịch học 06:00 hàng ngày...");
-    logDiscord("INFO", "Bắt đầu tiến trình gửi lịch học 06:00 hàng ngày...");
+// Gửi lịch học cho các đăng ký có cùng giờ thông báo.
+async function sendDailySchedulesAtTime(notificationTime = DEFAULT_NOTIFICATION_TIME) {
+    if (runningDailyNotificationTimes.has(notificationTime)) return;
+    runningDailyNotificationTimes.add(notificationTime);
+    console.log(`⏰ Bắt đầu tiến trình gửi lịch học ${notificationTime} hàng ngày...`);
+    logDiscord("INFO", `Bắt đầu tiến trình gửi lịch học ${notificationTime} hàng ngày...`);
     try {
-        const subscriptionsGrouped = groupEnabledSubscriptionsByStudent();
-        console.log(`[06:00] Tìm thấy ${subscriptionsGrouped.size} MSSV có đăng ký nhận thông báo.`);
+        const subscriptionsGrouped = groupEnabledSubscriptionsByStudent(notificationTime);
+        console.log(`[${notificationTime}] Tìm thấy ${subscriptionsGrouped.size} MSSV có đăng ký nhận thông báo.`);
 
         for (const [studentId, targetMap] of subscriptionsGrouped.entries()) {
             try {
@@ -1154,7 +1373,10 @@ async function sendDailySchedulesAtSix() {
                     const result = confirmScheduleChange(data);
                     if (result.confirmed) {
                         const changeMessage = formatScheduleChangeMessage(data, result.changes);
-                        for (const subscription of targetMap.values()) {
+                        // Nếu lần kiểm tra này xác nhận thay đổi, thông báo tới mọi đăng ký
+                        // của MSSV, không chỉ nhóm đang nhận lịch ở đúng mốc giờ hiện tại.
+                        const allStudentTargets = groupEnabledSubscriptionsByStudent().get(studentId) || targetMap;
+                        for (const subscription of allStudentTargets.values()) {
                             try {
                                 await sendMessage(subscription.chatId, changeMessage);
                             } catch (error) {
@@ -1171,19 +1393,29 @@ async function sendDailySchedulesAtSix() {
                 for (const subscription of targetMap.values()) {
                     try {
                         await sendMessage(subscription.chatId, dailyMessage);
-                        console.log(`[06:00] Đã gửi lịch thành công cho MSSV ${studentId} tới chat ${subscription.chatId}`);
+                        console.log(`[${notificationTime}] Đã gửi lịch thành công cho MSSV ${studentId} tới chat ${subscription.chatId}`);
                     } catch (error) {
-                        logDiscord("ERROR", `Không thể gửi lịch 06:00 cho chat ${subscription.chatId}: ${error.message}`);
+                        logDiscord("ERROR", `Không thể gửi lịch ${notificationTime} cho chat ${subscription.chatId}: ${error.message}`);
                     }
                 }
             } catch (error) {
-                logDiscord("ERROR", `Không thể gửi lịch 06:00 cho MSSV ${studentId}: ${error.message}`);
+                logDiscord("ERROR", `Không thể gửi lịch ${notificationTime} cho MSSV ${studentId}: ${error.message}`);
             }
         }
     } finally {
-        isDailySixRunning = false;
-        console.log("⏰ Hoàn tất tiến trình gửi lịch học 06:00.");
+        runningDailyNotificationTimes.delete(notificationTime);
+        console.log(`⏰ Hoàn tất tiến trình gửi lịch học ${notificationTime}.`);
     }
+}
+
+async function sendDailySchedulesAtSix() {
+    return sendDailySchedulesAtTime("06:00");
+}
+
+async function sendScheduledDailySchedules(date = new Date()) {
+    const dateInfo = getVietnamDateInfo(date);
+    const notificationTime = `${dateInfo.hour}:${dateInfo.minute}`;
+    return sendDailySchedulesAtTime(notificationTime);
 }
 
 async function sendDailyDutyNotificationAtSix(date = new Date()) {
@@ -1217,15 +1449,35 @@ async function sendDailyDutyNotificationAtSix(date = new Date()) {
     return result;
 }
 
-if (!isTestEnv) {
-    // Kiểm tra và báo thay đổi lịch tức thì mỗi 15 phút
-    schedule.scheduleJob({ rule: "*/15 * * * *", tz: TIME_ZONE }, checkAndNotifyScheduleChanges);
-    // 06:00 hàng ngày: Gửi lịch học hôm nay
-    schedule.scheduleJob({ rule: "0 6 * * *", tz: TIME_ZONE }, sendDailySchedulesAtSix);
-    // 00:05 ngày 27/08 hằng năm. Kiểm tra lúc khởi động ở dưới sẽ bù nếu bot khởi động muộn.
+async function startRuntime() {
+    await initializeFirestorePersistence({
+        storeIds: [
+            "accessControl",
+            "birthdayData",
+            "dutyScheduleData",
+            "interactions",
+            "scheduleSnapshots",
+            "subscriptions"
+        ]
+    });
+    // Chỉ bật scheduler sau khi state Firestore đã được hydrate vào bộ nhớ.
+    schedule.scheduleJob({ rule: "*/15 * * * *", tz: TIME_ZONE }, asyncCommand(async () => {
+        await checkAndNotifyScheduleChanges();
+        await flushPersistenceWrites();
+    }));
+    schedule.scheduleJob({ rule: "* * * * *", tz: TIME_ZONE }, asyncCommand(async () => {
+        await sendScheduledDailySchedules();
+        await flushPersistenceWrites();
+    }));
     schedule.scheduleJob({ rule: "5 0 27 8 *", tz: TIME_ZONE }, asyncCommand(async () => {
         await sendBirthdayInvitations();
+        await flushPersistenceWrites();
     }));
+    await bot.startPolling();
+    console.log(`Bot đã khởi động. Tự động kiểm tra thay đổi lịch mỗi 15 phút và gửi lịch theo giờ đăng ký (${TIME_ZONE}).`);
+    logDiscord("INFO", `Bot đã khởi động - timezone ${TIME_ZONE}`);
+    await sendBirthdayInvitations();
+    await flushPersistenceWrites();
 }
 
 bot.on("message", asyncCommand(async (msg) => {
@@ -1254,11 +1506,14 @@ bot.on("message", asyncCommand(async (msg) => {
 
     const parsed = parseCommand(msg.text);
 
+    const looksLikeCommand = String(msg.text || "").trim().startsWith("/");
     if (interaction.isFirstInteraction && !parsed) {
-        try {
-            await sendWelcomeMessage(context.chatId, msg.from?.display_name);
-        } catch (error) {
-            logDiscord("ERROR", `Không thể gửi lời chào mừng tới chat ${context.chatId}: ${error.message}`);
+        if (!looksLikeCommand) {
+            try {
+                await sendWelcomeMessage(context.chatId, msg.from?.display_name);
+            } catch (error) {
+                logDiscord("ERROR", `Không thể gửi lời chào mừng tới chat ${context.chatId}: ${error.message}`);
+            }
         }
     }
 
@@ -1267,7 +1522,16 @@ bot.on("message", asyncCommand(async (msg) => {
 
     if (parsed) {
         await handleCommand(msg, parsed);
+    } else if (looksLikeCommand) {
+        await sendMessage(
+            context.chatId,
+            formatWarningMessage(
+                "LỆNH KHÔNG HỢP LỆ",
+                "> Không thể phân tích lệnh này.\n> Vui lòng dùng **/help** để xem cú pháp và ví dụ."
+            )
+        );
     }
+    await flushPersistenceWrites();
 }));
 
 bot.on("polling_error", (error) => {
@@ -1282,13 +1546,10 @@ bot.on("error", (error) => {
 });
 
 if (!isTestEnv) {
-    console.log(`Bot đã khởi động. Tự động kiểm tra thay đổi lịch mỗi 15 phút và gửi lịch hôm nay lúc 06:00 (${TIME_ZONE}).`);
-    logDiscord("INFO", `Bot đã khởi động - timezone ${TIME_ZONE}`);
-
-    // Không chờ tới năm sau nếu tiến trình được khởi động lại trong chính ngày sinh nhật.
-    sendBirthdayInvitations().catch((error) => {
-        console.error("Lỗi gửi thông báo sinh nhật khi khởi động:", error);
-        logDiscord("ERROR", `birthday_startup_error: ${error.message}`);
+    startRuntime().catch((error) => {
+        console.error("Không thể khởi động persistence/runtime:", error);
+        logDiscord("ERROR", `runtime_startup_error: ${error.message}`);
+        process.exitCode = 1;
     });
 }
 
@@ -1301,10 +1562,17 @@ module.exports = {
     getBroadcastTargets,
     handleCommand,
     isOwner,
+    parseDangKyArgument,
     parseCommand,
     parseQuestionIdAndText,
     publishBirthdayResults,
     sendBirthdayInvitations,
+    sendBotAnnouncement,
     sendDailyDutyNotificationAtSix,
-    sendWelcomeMessage
+    sendDailySchedulesAtSix,
+    sendDailySchedulesAtTime,
+    sendScheduledDailySchedules,
+    sendWelcomeMessage,
+    suggestCommandCorrection,
+    startRuntime
 };

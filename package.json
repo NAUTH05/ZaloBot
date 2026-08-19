@@ -6,10 +6,12 @@
   "main": "main.js",
   "scripts": {
     "start": "node main.js",
+    "migrate:firestore": "node migrateToFirestore.js recent_json",
     "test": "node --test --test-force-exit"
   },
   "dependencies": {
     "dotenv": "^17.2.1",
+    "firebase-admin": "^14.2.0",
     "node-schedule": "^2.1.1",
     "node-zalo-bot": "^0.1.6"
   }

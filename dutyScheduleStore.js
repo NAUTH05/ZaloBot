@@ -1,7 +1,7 @@
-const fs = require("fs");
 const path = require("path");
 const { getVietnamDateInfo } = require("./timezone");
 const { escapeMarkdown } = require("./richText");
+const { readJsonStore, writeJsonStore } = require("./firestorePersistence");
 
 const FILE_PATH = path.join(__dirname, "dutyScheduleData.json");
 const DUTY_SCHEMA_VERSION = 1;
@@ -11,15 +11,13 @@ function pad2(num) {
 }
 
 function readDutyData(filePath = FILE_PATH) {
-    if (!fs.existsSync(filePath)) {
-        return {
+    const empty = {
             schemaVersion: DUTY_SCHEMA_VERSION,
             schedules: [],
             subscriptions: {}
         };
-    }
     try {
-        const data = JSON.parse(fs.readFileSync(filePath, "utf8"));
+        const data = readJsonStore(filePath, FILE_PATH, empty);
         return {
             schemaVersion: DUTY_SCHEMA_VERSION,
             schedules: Array.isArray(data.schedules) ? data.schedules : [],
@@ -72,9 +70,7 @@ function getDutySubscriptions(filePath = FILE_PATH) {
 
 
 function writeDutyData(data, filePath = FILE_PATH) {
-    const temporaryPath = `${filePath}.tmp`;
-    fs.writeFileSync(temporaryPath, JSON.stringify(data, null, 2), "utf8");
-    fs.renameSync(temporaryPath, filePath);
+    writeJsonStore(filePath, FILE_PATH, data);
 }
 
 /**

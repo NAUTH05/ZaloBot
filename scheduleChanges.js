@@ -1,8 +1,8 @@
 const crypto = require("crypto");
-const fs = require("fs");
 const path = require("path");
 const { getApiDateTimeInfo, getVietnamDateInfo } = require("./timezone");
 const { escapeMarkdown } = require("./richText");
+const { readJsonStore, writeJsonStore } = require("./firestorePersistence");
 
 const FILE_PATH = path.join(__dirname, "scheduleSnapshots.json");
 const SNAPSHOT_SCHEMA_VERSION = 2;
@@ -203,9 +203,8 @@ function confirmChangeState(state, currentSnapshot, observedAt = new Date().toIS
 }
 
 function readStates() {
-    if (!fs.existsSync(FILE_PATH)) return {};
     try {
-        const data = JSON.parse(fs.readFileSync(FILE_PATH, "utf8"));
+        const data = readJsonStore(FILE_PATH, FILE_PATH, {});
         return data && typeof data === "object" && !Array.isArray(data) ? data : {};
     } catch (error) {
         console.error("Không đọc được scheduleSnapshots.json:", error.message);
@@ -214,9 +213,7 @@ function readStates() {
 }
 
 function writeStates(states) {
-    const temporaryPath = `${FILE_PATH}.tmp`;
-    fs.writeFileSync(temporaryPath, JSON.stringify(states, null, 2), "utf8");
-    fs.renameSync(temporaryPath, FILE_PATH);
+    writeJsonStore(FILE_PATH, FILE_PATH, states);
 }
 
 function initializeScheduleSnapshot(scheduleData, date = new Date(), force = false) {

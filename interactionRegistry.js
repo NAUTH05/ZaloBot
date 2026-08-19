@@ -1,12 +1,11 @@
-const fs = require("fs");
 const path = require("path");
+const { readJsonStore, writeJsonStore } = require("./firestorePersistence");
 
 const FILE_PATH = path.join(__dirname, "interactions.json");
 
 function readRegistry(filePath = FILE_PATH) {
-    if (!fs.existsSync(filePath)) return {};
     try {
-        const data = JSON.parse(fs.readFileSync(filePath, "utf8"));
+        const data = readJsonStore(filePath, FILE_PATH, {});
         return data && typeof data === "object" && !Array.isArray(data) ? data : {};
     } catch (error) {
         console.error(`Không đọc được ${path.basename(filePath)}:`, error.message);
@@ -15,9 +14,7 @@ function readRegistry(filePath = FILE_PATH) {
 }
 
 function writeRegistry(registry, filePath = FILE_PATH) {
-    const temporaryPath = `${filePath}.tmp`;
-    fs.writeFileSync(temporaryPath, JSON.stringify(registry, null, 2), "utf8");
-    fs.renameSync(temporaryPath, filePath);
+    writeJsonStore(filePath, FILE_PATH, registry);
 }
 
 function detectChatType(msg = {}) {
