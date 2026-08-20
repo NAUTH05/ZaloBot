@@ -40,6 +40,7 @@ const {
     initializeScheduleSnapshot
 } = require("./scheduleChanges");
 const { TIME_ZONE, getVietnamDateInfo } = require("./timezone");
+const { resolveScheduleTarget } = require("./scheduleDatePolicy");
 const { escapeMarkdown } = require("./richText");
 const { getInteractionTargets, recordInteraction } = require("./interactionRegistry");
 const {
@@ -1361,7 +1362,7 @@ async function checkAndNotifyScheduleChanges() {
 }
 
 // Gửi lịch học cho các đăng ký có cùng giờ thông báo.
-async function sendDailySchedulesAtTime(notificationTime = DEFAULT_NOTIFICATION_TIME) {
+async function sendDailySchedulesAtTime(notificationTime = DEFAULT_NOTIFICATION_TIME, deliveryAt = new Date()) {
     const subscriptionsGrouped = groupEnabledSubscriptionsByStudent(notificationTime);
     if (subscriptionsGrouped.size === 0) {
         return { processed: false, matchedStudents: 0, sent: 0, failed: 0 };
@@ -1371,6 +1372,7 @@ async function sendDailySchedulesAtTime(notificationTime = DEFAULT_NOTIFICATION_
     }
 
     runningDailyNotificationTimes.add(notificationTime);
+    const scheduleTarget = resolveScheduleTarget(deliveryAt);
     const dispatchResult = {
         processed: true,
         matchedStudents: subscriptionsGrouped.size,
@@ -1384,7 +1386,7 @@ async function sendDailySchedulesAtTime(notificationTime = DEFAULT_NOTIFICATION_
 
         for (const [studentId, targetMap] of subscriptionsGrouped.entries()) {
             try {
-                const data = await fetchStudentSchedule(studentId);
+                const data = await fetchStudentSchedule(studentId, scheduleTarget.targetDate);
 
                 // 1. Kiểm tra thay đổi lịch trước khi gửi (nếu có)
                 try {
@@ -1407,7 +1409,7 @@ async function sendDailySchedulesAtTime(notificationTime = DEFAULT_NOTIFICATION_
                 }
 
                 // 2. Gửi lịch học hôm nay cho tất cả các chat đăng ký MSSV này
-                const dailyMessage = formatDailySchedule(data);
+                const dailyMessage = formatDailySchedule(data, scheduleTarget.targetDate, { referenceDate: deliveryAt });
                 for (const subscription of targetMap.values()) {
                     try {
                         await sendMessage(subscription.chatId, dailyMessage);
@@ -1437,7 +1439,7 @@ async function sendDailySchedulesAtSix() {
 async function sendScheduledDailySchedules(date = new Date()) {
     const dateInfo = getVietnamDateInfo(date);
     const notificationTime = `${dateInfo.hour}:${dateInfo.minute}`;
-    return sendDailySchedulesAtTime(notificationTime);
+    return sendDailySchedulesAtTime(notificationTime, date);
 }
 
 async function sendDailyDutyNotificationAtSix(date = new Date()) {

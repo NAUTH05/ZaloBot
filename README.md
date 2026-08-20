@@ -84,6 +84,8 @@ Bot ghi nhận dấu gửi theo nội dung. Chạy lại `/congbo` mà không th
 
 Bot kiểm tra thay đổi lịch mỗi 15 phút theo `Asia/Ho_Chi_Minh`. Lịch học hằng ngày được gửi theo từng giờ trong danh sách đăng ký (mặc định `06:00`); scheduler đối chiếu mốc `hh:mm` mỗi phút nhưng bỏ qua im lặng nếu không có đăng ký khớp giờ, không tạo log hay flush dữ liệu thừa.
 
+Ngày lịch được xác định bằng policy theo cửa sổ thời gian: thông báo từ `00:00` đến trước `20:00` gửi lịch hôm nay, còn từ `20:00` đến `23:59` gửi lịch ngày mai. Policy nằm riêng trong `scheduleDatePolicy.js` để có thể thêm loại thông báo hoặc khung giờ mới mà không phải thêm điều kiện đặc biệt vào scheduler. Ngày không có lớp và cuối tuần vẫn được gửi với trạng thái không có lịch học.
+
 ## Firestore
 
 Bot dùng Firebase Admin SDK để đọc/ghi state trong Firestore collection `bot_state`, với mỗi file JSON cũ tương ứng một document: `subscriptions`, `interactions`, `scheduleSnapshots`, `dutyScheduleData`, `birthdayData`, `accessControl`.
