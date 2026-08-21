@@ -78,8 +78,9 @@ function isCurrentSubscription(subscription) {
         subscription.chatId != null && subscription.userId != null;
 }
 
-function getSubscription(context) {
-    return getAllSubscriptions()[createSubscriptionKey(context)] || null;
+function getSubscription(context, filePath = FILE_PATH) {
+    const data = readJsonStore(filePath, FILE_PATH, {});
+    return data?.[createSubscriptionKey(context)] || null;
 }
 
 function removeLegacyChatRecord(subscriptions, context) {
@@ -88,9 +89,9 @@ function removeLegacyChatRecord(subscriptions, context) {
 }
 
 // /find chỉ lưu MSSV cho đúng user trong đúng chat. /dangky mới bật thông báo.
-function saveStudent(contextInput, { studentId, studentName }) {
+function saveStudent(contextInput, { studentId, studentName }, filePath = FILE_PATH) {
     const context = normalizeContext(contextInput);
-    const subscriptions = getAllSubscriptions();
+    const subscriptions = readJsonStore(filePath, FILE_PATH, {});
     const key = createSubscriptionKey(context);
     const existing = subscriptions[key];
     removeLegacyChatRecord(subscriptions, context);
@@ -103,13 +104,13 @@ function saveStudent(contextInput, { studentId, studentName }) {
         notificationsEnabled: existing?.studentId === studentId && existing.notificationsEnabled === true,
         updatedAt: new Date().toISOString()
     };
-    writeSubscriptions(subscriptions);
+    writeJsonStore(filePath, FILE_PATH, subscriptions);
     return subscriptions[key];
 }
 
-function enableNotifications(contextInput, { studentId, studentName, notificationTime } = {}) {
+function enableNotifications(contextInput, { studentId, studentName, notificationTime } = {}, filePath = FILE_PATH) {
     const context = normalizeContext(contextInput);
-    const subscriptions = getAllSubscriptions();
+    const subscriptions = readJsonStore(filePath, FILE_PATH, {});
     const key = createSubscriptionKey(context);
     removeLegacyChatRecord(subscriptions, context);
     const existing = subscriptions[key] || {};
@@ -133,22 +134,22 @@ function enableNotifications(contextInput, { studentId, studentName, notificatio
         notificationsEnabled: true,
         updatedAt: new Date().toISOString()
     };
-    writeSubscriptions(subscriptions);
+    writeJsonStore(filePath, FILE_PATH, subscriptions);
     return subscriptions[key];
 }
 
-function disableNotifications(context) {
-    const subscriptions = getAllSubscriptions();
+function disableNotifications(context, filePath = FILE_PATH) {
+    const subscriptions = readJsonStore(filePath, FILE_PATH, {});
     const key = createSubscriptionKey(context);
     if (!subscriptions[key]?.notificationsEnabled) return false;
     subscriptions[key].notificationsEnabled = false;
     subscriptions[key].updatedAt = new Date().toISOString();
-    writeSubscriptions(subscriptions);
+    writeJsonStore(filePath, FILE_PATH, subscriptions);
     return true;
 }
 
-function updateNotificationTime(contextInput, timeId, notificationTime) {
-    const subscriptions = getAllSubscriptions();
+function updateNotificationTime(contextInput, timeId, notificationTime, filePath = FILE_PATH) {
+    const subscriptions = readJsonStore(filePath, FILE_PATH, {});
     const key = createSubscriptionKey(contextInput);
     const subscription = subscriptions[key];
     const normalizedTime = normalizeNotificationTime(notificationTime, null);
@@ -159,12 +160,12 @@ function updateNotificationTime(contextInput, timeId, notificationTime) {
     times[index] = { ...times[index], time: normalizedTime, updatedAt: new Date().toISOString() };
     subscription.notificationTimes = times;
     subscription.updatedAt = new Date().toISOString();
-    writeSubscriptions(subscriptions);
+    writeJsonStore(filePath, FILE_PATH, subscriptions);
     return subscription;
 }
 
-function removeNotificationTime(contextInput, timeId) {
-    const subscriptions = getAllSubscriptions();
+function removeNotificationTime(contextInput, timeId, filePath = FILE_PATH) {
+    const subscriptions = readJsonStore(filePath, FILE_PATH, {});
     const key = createSubscriptionKey(contextInput);
     const subscription = subscriptions[key];
     if (!subscription) return null;
@@ -174,8 +175,32 @@ function removeNotificationTime(contextInput, timeId) {
     subscription.notificationTimes = times.filter((item) => Number(item.id) !== Number(timeId));
     if (subscription.notificationTimes.length === 0) subscription.notificationsEnabled = false;
     subscription.updatedAt = new Date().toISOString();
-    writeSubscriptions(subscriptions);
+    writeJsonStore(filePath, FILE_PATH, subscriptions);
     return { subscription, removed };
+}
+
+function updateSubscriptionMetadata(contextInput, changes = {}, filePath = FILE_PATH) {
+    const context = normalizeContext(contextInput);
+    const subscriptions = readJsonStore(filePath, FILE_PATH, {});
+    const key = createSubscriptionKey(context);
+    const subscription = subscriptions[key];
+    if (!subscription) return null;
+    if (changes.studentId != null) subscription.studentId = String(changes.studentId).trim();
+    if (changes.studentName != null) subscription.studentName = String(changes.studentName).trim();
+    if (changes.userDisplayName != null) subscription.userDisplayName = String(changes.userDisplayName).trim();
+    subscription.updatedAt = new Date().toISOString();
+    writeJsonStore(filePath, FILE_PATH, subscriptions);
+    return subscription;
+}
+
+function deleteSubscription(contextInput, filePath = FILE_PATH) {
+    const subscriptions = readJsonStore(filePath, FILE_PATH, {});
+    const key = createSubscriptionKey(contextInput);
+    if (!subscriptions[key]) return null;
+    const removed = subscriptions[key];
+    delete subscriptions[key];
+    writeJsonStore(filePath, FILE_PATH, subscriptions);
+    return removed;
 }
 
 function getEnabledSubscriptions() {
@@ -194,6 +219,7 @@ module.exports = {
     DEFAULT_NOTIFICATION_TIME,
     FILE_PATH,
     createSubscriptionKey,
+    deleteSubscription,
     disableNotifications,
     enableNotifications,
     getAllSubscriptions,
@@ -204,5 +230,6 @@ module.exports = {
     normalizeNotificationTimes,
     removeNotificationTime,
     saveStudent,
-    updateNotificationTime
+    updateNotificationTime,
+    updateSubscriptionMetadata
 };

@@ -120,6 +120,8 @@ Dashboard có phần **Add or update chat** để bổ sung/sửa `chatId`, `use
 
 Phần **Admin identities** lưu `userId`/`chatId` quản trị trong Firestore store `adminSettings` và gộp chúng với `OWNER_USER_ID`/`OWNER_CHAT_ID`. **Command console** gọi trực tiếp `handleCommand` hiện có, nên có thể thực thi các lệnh bot bằng một admin context đã được cấp quyền mà không nhân đôi business logic.
 
+Dashboard được chia thành các tab: tổng quan, chat directory, users & MSSV, groups, đăng ký nhận lịch, lịch trực, chat health, command console, settings và logs/audit. Theme mặc định là dark xanh dương sáng, có nút chuyển light theme. Admin có thể thêm/sửa/xóa member theo từng chat, chỉnh trạng thái, make admin, quản lý subscription và xem thời điểm tạo/cập nhật từng giờ nhận lịch. API `/zalobot/api/admin/workspace` hợp nhất user, chat/group, MSSV, từng giờ đăng ký, lịch trực và access control nhưng vẫn giữ backend bot là nguồn dữ liệu thật.
+
 Trên VPS, cấu hình `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL` và `FIREBASE_PRIVATE_KEY` trong `.env`. Trong `FIREBASE_PRIVATE_KEY`, các dòng PEM được nối bằng chuỗi `\n`. `FIREBASE_SERVICE_ACCOUNT_PATH` chỉ là phương án dự phòng tùy chọn. Chạy migration một lần:
 
 ```text

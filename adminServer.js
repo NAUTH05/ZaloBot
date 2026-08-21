@@ -12,10 +12,28 @@ const {
     setFeatureOverride,
     upsertChat
 } = require("./chatDirectory");
-const { getInteractionTargets } = require("./interactionRegistry");
+const { getInteractionTargets, removeInteractionMember, upsertInteractionMember } = require("./interactionRegistry");
 const { getAdminSettings, removeAdmin, upsertAdmin } = require("./adminSettings");
-const { getAllSubscriptions, getEnabledSubscriptions } = require("./subscriptions");
-const { getDutySubscriptions, readDutyData } = require("./dutyScheduleStore");
+const {
+    deleteSubscription,
+    disableNotifications,
+    enableNotifications,
+    getAllSubscriptions,
+    getEnabledSubscriptions,
+    removeNotificationTime,
+    updateNotificationTime,
+    updateSubscriptionMetadata
+} = require("./subscriptions");
+const {
+    addDutySchedules,
+    deleteDutySchedule,
+    disableDutyNotifications,
+    enableDutyNotifications,
+    getDutySubscriptions,
+    readDutyData,
+    updateDutySchedule
+} = require("./dutyScheduleStore");
+const { buildAdminData } = require("./adminDataService");
 const { readJsonStore, writeJsonStore } = require("./firestorePersistence");
 const { getSystemLogs } = require("./operationalLog");
 
@@ -187,15 +205,17 @@ function enrichedChats() {
 }
 
 function dashboardSummary() {
-    const chats = enrichedChats();
+    const workspace = buildAdminData();
+    const chats = workspace.chats;
     const subscriptions = Object.values(getEnabledSubscriptions());
     const duty = getDutySubscriptions();
     return {
         bot: { status: "online", health: "healthy", checkedAt: new Date().toISOString() },
         chats: {
             total: chats.length,
-            users: chats.filter((chat) => chat.chatType === "private").length,
-            groups: chats.filter((chat) => chat.chatType === "group").length,
+            users: workspace.users.length,
+            groups: workspace.groups.length,
+            unknown: chats.filter((chat) => chat.chatType === "unknown").length,
             active: chats.filter((chat) => chat.status === "active").length,
             inactive: chats.filter((chat) => chat.status === "inactive").length,
             disabled: chats.filter((chat) => chat.status === "disabled").length,
@@ -223,13 +243,15 @@ function subscriptionsForChat(chatId) {
 }
 
 function detailForChat(chatId) {
-    const chat = enrichedChats().find((item) => String(item.chatId) === String(chatId)) || getChat(chatId);
+    const workspace = buildAdminData();
+    const chat = workspace.chats.find((item) => String(item.chatId) === String(chatId)) || getChat(chatId);
     if (!chat) return null;
     return {
         chat: publicChat(chat),
         deliveryHistory: Array.isArray(chat.deliveryHistory) ? chat.deliveryHistory.slice(-50).reverse() : [],
-        subscriptions: subscriptionsForChat(chatId),
-        duty: getDutySubscriptions().filter((item) => String(item.chatId) === String(chatId))
+        subscriptions: workspace.subscriptions.filter((item) => String(item.chatId) === String(chatId)),
+        members: workspace.users.filter((user) => user.chats.some((item) => String(item.chatId) === String(chatId))),
+        duty: workspace.duty.subscriptions.filter((item) => String(item.chatId) === String(chatId))
     };
 }
 
@@ -267,11 +289,12 @@ async function handleApi(request, response, url, options = {}) {
         return json(response, 200, { ok: true }, { "Set-Cookie": sessionCookie(request, "", 0) });
     }
     if (!requireAdmin(request, response)) return;
+    if (url.pathname === `${BASE_PATH}/api/admin/workspace` && request.method === "GET") return json(response, 200, buildAdminData());
     if (url.pathname === `${BASE_PATH}/api/admin/dashboard` && request.method === "GET") return json(response, 200, dashboardSummary());
     if (url.pathname === `${BASE_PATH}/api/admin/chats` && request.method === "GET") {
         const filter = String(url.searchParams.get("status") || "all");
         const type = String(url.searchParams.get("type") || "all");
-        const chats = enrichedChats().filter((chat) => (filter === "all" || chat.status === filter) && (type === "all" || chat.chatType === type)).map(publicChat);
+        const chats = buildAdminData().chats.filter((chat) => (filter === "all" || chat.status === filter) && (type === "all" || chat.chatType === type)).map(publicChat);
         return json(response, 200, { chats });
     }
     if (url.pathname === `${BASE_PATH}/api/admin/chats` && request.method === "POST") {
@@ -285,10 +308,45 @@ async function handleApi(request, response, url, options = {}) {
         } catch (error) { return json(response, 400, { error: error.message }); }
     }
     if (url.pathname === `${BASE_PATH}/api/admin/users` && request.method === "GET") {
-        return json(response, 200, { users: enrichedChats().filter((chat) => chat.chatType === "private").map(publicChat) });
+        return json(response, 200, { users: buildAdminData().users });
+    }
+    if (url.pathname === `${BASE_PATH}/api/admin/users` && request.method === "POST") {
+        let body;
+        try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
+        try {
+            const chat = upsertChat({ restoreDeleted: true, chatId: body.chatId, chatType: body.chatType || "unknown", displayName: body.chatTitle || body.chatId, status: "active" });
+            if (!chat) return json(response, 400, { error: "chatId is required" });
+            const member = upsertInteractionMember({ chatId: chat.chatId, userId: body.userId, displayName: body.displayName, chatType: body.chatType, chatTitle: body.chatTitle });
+            audit("user.create", request, { result: "success", chatId: chat.chatId, userId: member.userId });
+            return json(response, 201, { member });
+        } catch (error) { return json(response, 400, { error: error.message }); }
     }
     if (url.pathname === `${BASE_PATH}/api/admin/groups` && request.method === "GET") {
-        return json(response, 200, { groups: enrichedChats().filter((chat) => chat.chatType === "group").map(publicChat) });
+        return json(response, 200, { groups: buildAdminData().groups.map(publicChat) });
+    }
+    const userMatch = url.pathname.match(new RegExp(`^${BASE_PATH.replace("/", "\\/")}/api/admin/users/([^/]+)$`));
+    if (userMatch && ["PATCH", "DELETE"].includes(request.method)) {
+        let body = {};
+        try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
+        const userId = decodeURIComponent(userMatch[1]);
+        try {
+            body.chatId = body.chatId || url.searchParams.get("chatId");
+            if (!body.chatId) return json(response, 400, { error: "chatId is required" });
+            let result;
+            if (request.method === "PATCH") {
+                result = upsertInteractionMember({ chatId: body.chatId, userId, displayName: body.displayName, status: body.status, chatType: body.chatType, chatTitle: body.chatTitle });
+                if (["disabled", "removed"].includes(body.status)) {
+                    for (const subscription of subscriptionsForChat(body.chatId).filter((item) => String(item.userId) === userId)) disableNotifications({ chatId: body.chatId, userId });
+                }
+            } else {
+                const hard = body.hard === true || url.searchParams.get("hard") === "1";
+                result = removeInteractionMember(body.chatId, userId, hard);
+                if (hard) for (const subscription of subscriptionsForChat(body.chatId).filter((item) => String(item.userId) === userId)) deleteSubscription({ chatId: body.chatId, userId });
+            }
+            if (!result) return json(response, 404, { error: "User membership not found" });
+            audit(`user.${request.method.toLowerCase()}`, request, { result: "success", chatId: body.chatId, userId, hard: body.hard === true });
+            return json(response, 200, { ok: true, member: result });
+        } catch (error) { return json(response, 400, { error: error.message }); }
     }
     const chatMatch = url.pathname.match(new RegExp(`^${BASE_PATH.replace("/", "\\/")}/api/admin/chats/([^/]+)$`));
     if (chatMatch && request.method === "GET") {
@@ -337,6 +395,50 @@ async function handleApi(request, response, url, options = {}) {
             duty: getDutySubscriptions().filter((item) => isChatEligible(item.chatId, "duty")),
             dutySchedules: readDutyData().schedules || []
         });
+    }
+    if (url.pathname === `${BASE_PATH}/api/admin/subscriptions` && request.method === "PATCH") {
+        let body;
+        try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
+        const context = { chatId: body.chatId, userId: body.userId, userDisplayName: body.userDisplayName || "" };
+        try {
+            let result;
+            if (body.action === "enable") result = enableNotifications(context, { studentId: body.studentId, studentName: body.studentName });
+            else if (body.action === "disable") result = disableNotifications(context);
+            else if (body.action === "add_time") result = enableNotifications(context, { studentId: body.studentId, studentName: body.studentName, notificationTime: body.time });
+            else if (body.action === "update_time") result = updateNotificationTime(context, body.timeId, body.time);
+            else if (body.action === "remove_time") result = removeNotificationTime(context, body.timeId);
+            else if (body.action === "metadata") result = updateSubscriptionMetadata(context, body);
+            else if (body.action === "delete") result = deleteSubscription(context);
+            else return json(response, 400, { error: "Unsupported subscription action" });
+            if (result == null || result === false) return json(response, 404, { error: "Subscription or notification time not found" });
+            audit(`subscription.${body.action}`, request, { result: "success", chatId: body.chatId, userId: body.userId });
+            return json(response, 200, { ok: true, result });
+        } catch (error) {
+            audit(`subscription.${body.action || "update"}`, request, { result: "failed", error: error.message });
+            return json(response, 400, { error: error.message });
+        }
+    }
+    if (url.pathname === `${BASE_PATH}/api/admin/duty/schedules` && ["POST", "PATCH", "DELETE"].includes(request.method)) {
+        let body;
+        try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
+        try {
+            let result;
+            if (request.method === "POST") result = addDutySchedules(body.input);
+            else if (request.method === "PATCH") result = updateDutySchedule(body.target, body.input);
+            else result = deleteDutySchedule(body.target);
+            if (!result) return json(response, 404, { error: "Duty schedule not found" });
+            audit(`duty_schedule.${request.method.toLowerCase()}`, request, { result: "success", target: body.target || null });
+            return json(response, 200, { ok: true, result });
+        } catch (error) { return json(response, 400, { error: error.message }); }
+    }
+    if (url.pathname === `${BASE_PATH}/api/admin/duty/subscriptions` && request.method === "PATCH") {
+        let body;
+        try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
+        const context = { chatId: body.chatId, chatTitle: body.chatTitle, userDisplayName: body.chatTitle };
+        const result = body.enabled === true ? enableDutyNotifications(context) : disableDutyNotifications(context);
+        if (!result) return json(response, 404, { error: "Duty subscription not found" });
+        audit("duty_subscription.update", request, { result: "success", chatId: body.chatId, enabled: body.enabled === true });
+        return json(response, 200, { ok: true, result });
     }
     if (url.pathname === `${BASE_PATH}/api/admin/settings` && request.method === "GET") return json(response, 200, getAdminSettings());
     if (url.pathname === `${BASE_PATH}/api/admin/settings/admins` && ["POST", "PATCH"].includes(request.method)) {

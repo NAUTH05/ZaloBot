@@ -6,7 +6,7 @@ const path = require("node:path");
 const { createAdminServer } = require("../adminServer");
 
 function preserveRuntimeFiles(t) {
-    const names = ["adminAudit.json", "adminSettings.json", "chatDirectory.json"];
+    const names = ["adminAudit.json", "adminSettings.json", "chatDirectory.json", "interactions.json", "subscriptions.json"];
     const snapshots = names.map((name) => {
         const filePath = path.join(__dirname, "..", name);
         return { filePath, existed: fs.existsSync(filePath), content: fs.existsSync(filePath) ? fs.readFileSync(filePath) : null };
@@ -51,6 +51,12 @@ test("admin server protects API and serves the dashboard under /zalobot", async 
     const dashboard = await request(port, "GET", "/zalobot/api/admin/dashboard", null, cookie);
     assert.equal(dashboard.status, 200);
     assert.equal(dashboard.body.bot.status, "online");
+    const workspace = await request(port, "GET", "/zalobot/api/admin/workspace", null, cookie);
+    assert.equal(workspace.status, 200);
+    assert.ok(Array.isArray(workspace.body.users));
+    assert.ok(Array.isArray(workspace.body.groups));
+    assert.ok(Array.isArray(workspace.body.subscriptions));
+    assert.ok(workspace.body.duty && Array.isArray(workspace.body.duty.schedules));
     const page = await new Promise((resolve, reject) => http.get({ hostname: "127.0.0.1", port, path: "/zalobot/" }, (response) => { let body = ""; response.on("data", (chunk) => { body += chunk; }); response.on("end", () => resolve({ status: response.statusCode, body })); }).on("error", reject));
     assert.equal(page.status, 200);
     assert.match(page.body, /ZaloBot Admin/);
@@ -77,6 +83,12 @@ test("admin API exposes chat CRUD, settings and command execution", async (t) =>
     assert.equal(updated.status, 200);
     assert.equal(updated.body.chat.chatType, "group");
 
+    const user = await request(port, "POST", "/zalobot/api/admin/users", { chatId: "dashboard-test-chat", userId: "dashboard-member", displayName: "Dashboard Member", chatType: "group" }, cookie);
+    assert.equal(user.status, 201);
+    const userUpdated = await request(port, "PATCH", "/zalobot/api/admin/users/dashboard-member", { chatId: "dashboard-test-chat", displayName: "Renamed Member", status: "disabled" }, cookie);
+    assert.equal(userUpdated.status, 200);
+    assert.equal(userUpdated.body.member.displayName, "Renamed Member");
+
     const admin = await request(port, "POST", "/zalobot/api/admin/settings/admins", { userId: "dashboard-admin-user", chatId: "dashboard-admin-chat" }, cookie);
     assert.equal(admin.status, 200);
     const settings = await request(port, "GET", "/zalobot/api/admin/settings", null, cookie);
@@ -85,6 +97,9 @@ test("admin API exposes chat CRUD, settings and command execution", async (t) =>
     assert.equal(command.status, 200);
     assert.equal(executed.command, "/quanlychat");
     assert.equal(command.body.messages[0].text, "Command result");
+
+    const userDeleted = await request(port, "DELETE", "/zalobot/api/admin/users/dashboard-member?hard=1&chatId=dashboard-test-chat", null, cookie);
+    assert.equal(userDeleted.status, 200, JSON.stringify(userDeleted.body));
 
     const deleted = await request(port, "DELETE", "/zalobot/api/admin/chats/dashboard-test-chat?hard=1", null, cookie);
     assert.equal(deleted.status, 200, JSON.stringify(deleted.body));
