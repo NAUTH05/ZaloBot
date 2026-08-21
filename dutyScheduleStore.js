@@ -39,11 +39,15 @@ function enableDutyNotifications(context, filePath = FILE_PATH) {
 
     const data = readDutyData(filePath);
     const title = context.chatTitle || context.userDisplayName || `Chat ${chatId}`;
+    const existing = data.subscriptions[chatId] || {};
     const entry = {
+        ...existing,
         chatId,
         chatTitle: title,
         enabled: true,
-        registeredAt: new Date().toISOString()
+        registeredAt: existing.registeredAt || new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        disabledAt: null
     };
 
     data.subscriptions[chatId] = entry;
@@ -56,9 +60,11 @@ function disableDutyNotifications(context, filePath = FILE_PATH) {
     if (!chatId) return false;
 
     const data = readDutyData(filePath);
-    if (!data.subscriptions[chatId]) return false;
+    if (!data.subscriptions[chatId]?.enabled) return false;
 
-    delete data.subscriptions[chatId];
+    data.subscriptions[chatId].enabled = false;
+    data.subscriptions[chatId].disabledAt = new Date().toISOString();
+    data.subscriptions[chatId].updatedAt = new Date().toISOString();
     writeDutyData(data, filePath);
     return true;
 }

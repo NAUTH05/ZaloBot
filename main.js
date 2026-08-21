@@ -44,6 +44,16 @@ const { resolveScheduleTarget } = require("./scheduleDatePolicy");
 const { escapeMarkdown } = require("./richText");
 const { getInteractionTargets, recordInteraction } = require("./interactionRegistry");
 const {
+    getAllChats,
+    getChat,
+    isChatEligible,
+    recordDeliveryFailure,
+    recordDeliverySuccess,
+    setChatStatus,
+    setFeatureOverride,
+    upsertChat
+} = require("./chatDirectory");
+const {
     allowTarget,
     blockTarget,
     canUseAi,
@@ -165,7 +175,8 @@ async function sendMessage(chatId, text, options = {}) {
         try {
             await Promise.resolve(bot.sendMessage(chatId, payload, messageOptions));
         } catch (error) {
-            if (messageOptions.parse_mode) {
+            const permanentChatError = Number(error?.response?.statusCode || error?.statusCode || 0) === 410 || /410\s+The chat_id is invalid/i.test(String(error?.message || ""));
+            if (messageOptions.parse_mode && !permanentChatError) {
                 console.warn(`Lỗi gửi markdown Zalo (${error.message}), đang gửi lại dạng plain text...`);
                 const plainPayload = payload
                     .replace(/\{(?:green|red|orange|blue)\}(.*?)\{\/(?:green|red|orange|blue)\}/g, "$1")
@@ -270,9 +281,16 @@ function resolveQuestionYear(argument, date = new Date()) {
     return Number(getVietnamDateInfo(date).year);
 }
 
-function getBroadcastTargets() {
+function getBroadcastTargets(feature = "broadcast") {
     const targets = new Map();
     for (const target of getInteractionTargets()) {
+        upsertChat({
+            chatId: target.chatId,
+            chatType: target.chatType,
+            displayName: target.chatTitle || target.lastUserDisplayName,
+            lastInboundInteractionAt: target.lastInteractionAt,
+            firstInteractionAt: target.firstInteractionAt
+        });
         targets.set(String(target.chatId), target);
     }
     // Giữ tương thích với dữ liệu có trước khi sổ tương tác được bổ sung.
@@ -282,9 +300,10 @@ function getBroadcastTargets() {
         const rawChatId = subscription?.chatId ?? legacyChatId;
         if (rawChatId == null) continue;
         const chatId = String(rawChatId);
+        upsertChat({ chatId, chatType: subscription.chatType || "unknown", displayName: subscription.chatTitle || subscription.userDisplayName || "" });
         if (!targets.has(chatId)) targets.set(chatId, { chatId, chatType: "unknown" });
     }
-    return [...targets.values()];
+    return [...targets.values()].filter((target) => isChatEligible(target.chatId, feature));
 }
 
 async function sendBotAnnouncement(message) {
@@ -292,8 +311,12 @@ async function sendBotAnnouncement(message) {
     const result = { targets: targets.length, sent: 0, failed: 0 };
     for (const target of targets) {
         try {
-            await sendMessage(target.chatId, message);
-            result.sent += 1;
+            const delivery = await sendNotification(target.chatId, message, { feature: "broadcast", operation: "announcement" });
+            if (delivery.sent) result.sent += 1;
+            else if (delivery.failed) {
+                result.failed += 1;
+                logDiscord("ERROR", `Không thể gửi thông báo cập nhật cho chat ${target.chatId}: ${delivery.error.message}`);
+            }
         } catch (error) {
             result.failed += 1;
             logDiscord("ERROR", `Không thể gửi thông báo cập nhật cho chat ${target.chatId}: ${error.message}`);
@@ -326,7 +349,7 @@ Cảm ơn mọi người đã gửi câu hỏi cho sinh nhật 27/08 của tôi.
 ${sections.join("\n\n")}`;
 }
 
-async function sendBirthdayInvitations(targets = getBroadcastTargets(), date = new Date()) {
+async function sendBirthdayInvitations(targets = getBroadcastTargets("birthday"), date = new Date()) {
     const dateInfo = getVietnamDateInfo(date);
     if (!isBirthdayDate(dateInfo)) return { sent: 0, skipped: targets.length, failed: 0 };
 
@@ -339,9 +362,14 @@ async function sendBirthdayInvitations(targets = getBroadcastTargets(), date = n
             continue;
         }
         try {
-            await sendMessage(target.chatId, message);
-            markInvitationSent(year, target.chatId, date);
-            result.sent += 1;
+            const delivery = await sendNotification(target.chatId, message, { feature: "birthday", operation: "invitation" });
+            if (delivery.sent) {
+                markInvitationSent(year, target.chatId, date);
+                result.sent += 1;
+            } else if (delivery.failed) {
+                result.failed += 1;
+                logDiscord("ERROR", `Không thể gửi lời mời sinh nhật cho chat ${target.chatId}: ${delivery.error.message}`);
+            }
         } catch (error) {
             result.failed += 1;
             logDiscord("ERROR", `Không thể gửi lời mời sinh nhật cho chat ${target.chatId}: ${error.message}`);
@@ -357,15 +385,20 @@ async function publishBirthdayResults(year) {
     const message = formatBirthdayResults(year, answeredQuestions);
     const digest = crypto.createHash("sha256").update(message).digest("hex");
     const result = { noAnswers: false, sent: 0, skipped: 0, failed: 0 };
-    for (const target of getBroadcastTargets()) {
+    for (const target of getBroadcastTargets("birthday")) {
         if (wasResultSent(year, target.chatId, digest)) {
             result.skipped += 1;
             continue;
         }
         try {
-            await sendMessage(target.chatId, message);
-            markResultSent(year, target.chatId, digest);
-            result.sent += 1;
+            const delivery = await sendNotification(target.chatId, message, { feature: "birthday", operation: "results" });
+            if (delivery.sent) {
+                markResultSent(year, target.chatId, digest);
+                result.sent += 1;
+            } else if (delivery.failed) {
+                result.failed += 1;
+                logDiscord("ERROR", `Không thể công bố sinh nhật cho chat ${target.chatId}: ${delivery.error.message}`);
+            }
         } catch (error) {
             result.failed += 1;
             logDiscord("ERROR", `Không thể công bố sinh nhật cho chat ${target.chatId}: ${error.message}`);
@@ -454,6 +487,13 @@ const COMMAND_EXAMPLES = {
     unallowai: "/unallowai 123456",
     accessmode: "/accessmode bot allowlist",
     accesslist: "/accesslist",
+    quanlychat: "/quanlychat inactive 1",
+    thongtinch: "/thongtinch 123456",
+    vohieuchat: "/vohieuchat 123456",
+    kichhoatchat: "/kichhoatchat 123456",
+    thuchatchat: "/thuchatchat 123456",
+    xoachat: "/xoachat 123456",
+    chatfeature: "/chatfeature 123456 schedule off",
     danhsach: "/danhsach 2026",
     them: "/them Câu hỏi mới",
     sua: "/sua 1 Nội dung mới",
@@ -582,10 +622,86 @@ ${formatDutyHelp()}
 - **/congbo [Năm]** — Công bố các câu đã trả lời. _(Ví dụ: /congbo 2026)_
 
 ## {orange}[KIỂM TRA HỆ THỐNG]{/orange}
+- **/quanlychat [bộ lọc] [trang]** — Xem user/nhóm và trạng thái gửi thông báo. _(Ví dụ: /quanlychat inactive 1)_
+- **/thongtinch [Chat ID]** — Xem chi tiết một chat. _(Ví dụ: /thongtinch 123456)_
+- **/vohieuchat [Chat ID] [lý do]** — Admin tắt gửi tới chat. _(Ví dụ: /vohieuchat 123456 yêu cầu ngừng)_
+- **/kichhoatchat [Chat ID]** — Kích hoạt lại chat. _(Ví dụ: /kichhoatchat 123456)_
+- **/thuchatchat [Chat ID]** — Gửi thử và kích hoạt nếu thành công. _(Ví dụ: /thuchatchat 123456)_
+- **/xoachat [Chat ID]** — Xóa mềm khỏi các tác vụ thông báo. _(Ví dụ: /xoachat 123456)_
+- **/chatfeature [Chat ID] [schedule|duty|birthday|broadcast] [on|off|auto]** — Ghi đè từng tính năng.
 - **/thongbao [Nội dung]** — Gửi thông báo cập nhật tới các chat đang dùng bot. _(Ví dụ: /thongbao Bot vừa cập nhật tính năng mới)_
 - **/test6h** — Thử gửi lịch học 06:00. _(Ví dụ: /test6h)_
 - **/test6hlichtruc** — Thử gửi lịch trực nhật phòng 411. _(Ví dụ: /test6hlichtruc)_
 - **/helpadmin** — Xem toàn bộ lệnh. _(Ví dụ: /helpadmin)_`;
+}
+
+function formatChatTime(value) {
+    if (!value) return "-";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString("vi-VN", { timeZone: TIME_ZONE });
+}
+
+function formatChatDirectoryList(argument = "") {
+    const [rawFilter = "all", rawPage = "1"] = String(argument || "").trim().split(/\s+/).filter(Boolean);
+    const filter = rawFilter.toLowerCase();
+    const page = Math.max(1, Number(rawPage) || 1);
+    const allowed = new Set(["all", "active", "inactive", "disabled", "removed", "private", "group", "unknown"]);
+    if (!allowed.has(filter)) return null;
+    const all = getAllChats().filter((chat) => filter === "all" || chat.status === filter || chat.chatType === filter);
+    const pageSize = 10;
+    const totalPages = Math.max(1, Math.ceil(all.length / pageSize));
+    const currentPage = Math.min(page, totalPages);
+    const rows = all.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((chat) => {
+        const name = chat.displayName || "Không rõ tên";
+        const lastError = chat.lastError ? `${chat.lastError.status || chat.lastError.code || "ERR"}: ${chat.lastError.message}` : "-";
+        return `- **${escapeMarkdown(name)}** · \`${escapeMarkdown(chat.chatId)}\`\n  ${escapeMarkdown(chat.chatType)} · **${escapeMarkdown(chat.status)}** · Thành công: ${escapeMarkdown(formatChatTime(chat.lastSuccessfulDeliveryAt))}\n  Lỗi cuối: ${escapeMarkdown(lastError.slice(0, 140))}`;
+    });
+    return `# {orange}[ADMIN] QUẢN LÝ CHAT{/orange}\n\n> **Bộ lọc:** ${escapeMarkdown(filter)} · **Trang:** ${currentPage}/${totalPages} · **Tổng:** ${all.length}\n\n${rows.join("\n\n") || "> _Không có chat phù hợp._"}`;
+}
+
+function formatChatDetails(record) {
+    if (!record) return null;
+    const overrides = Object.entries(record.notificationOverrides || {}).map(([feature, value]) => `${feature}=${value == null ? "auto" : value ? "on" : "off"}`).join(", ");
+    const error = record.lastError;
+    return `# {orange}[ADMIN] CHI TIẾT CHAT{/orange}\n\n` +
+        `> **Chat ID:** \`${escapeMarkdown(record.chatId)}\`\n` +
+        `> **Loại:** ${escapeMarkdown(record.chatType || "unknown")}\n` +
+        `> **Tên:** ${escapeMarkdown(record.displayName || "Không rõ")}\n` +
+        `> **Trạng thái:** **${escapeMarkdown(record.status || "active")}**\n` +
+        `> **Lý do:** ${escapeMarkdown(record.statusReason || "-")}\n` +
+        `> **Tính năng:** ${escapeMarkdown(overrides || "auto")}\n` +
+        `> **Tương tác cuối:** ${escapeMarkdown(formatChatTime(record.lastInboundInteractionAt || record.lastInteractionAt))}\n` +
+        `> **Gửi thành công cuối:** ${escapeMarkdown(formatChatTime(record.lastSuccessfulDeliveryAt))}\n` +
+        `> **Lỗi liên tiếp:** ${Number(record.consecutiveFailureCount) || 0}\n` +
+        `> **Lỗi cuối:** ${escapeMarkdown(error ? `${error.status || error.code || "ERR"} ${error.message}` : "-")}\n` +
+        `> **Thời điểm lỗi:** ${escapeMarkdown(formatChatTime(error?.at))}`;
+}
+
+function syncChatDirectoryFromLegacyStores() {
+    const syncedChatIds = new Set();
+    for (const target of getInteractionTargets()) {
+        upsertChat({
+            chatId: target.chatId,
+            chatType: target.chatType,
+            displayName: target.chatTitle || target.lastUserDisplayName,
+            firstInteractionAt: target.firstInteractionAt,
+            lastInboundInteractionAt: target.lastInteractionAt
+        });
+        syncedChatIds.add(String(target.chatId));
+    }
+    for (const [key, subscription] of Object.entries(getAllSubscriptions())) {
+        const legacyChatId = !key.includes("::") ? key : null;
+        const chatId = subscription?.chatId ?? legacyChatId;
+        if (chatId != null) {
+            upsertChat({ chatId, chatType: subscription.chatType || "unknown", displayName: subscription.chatTitle || subscription.userDisplayName || "" });
+            syncedChatIds.add(String(chatId));
+        }
+    }
+    for (const subscription of getDutySubscriptions()) {
+        upsertChat({ chatId: subscription.chatId, chatType: subscription.chatType || "unknown", displayName: subscription.chatTitle || "" });
+        syncedChatIds.add(String(subscription.chatId));
+    }
+    return syncedChatIds.size;
 }
 
 async function handleCommand(msg, parsedCommand) {
@@ -1023,6 +1139,61 @@ async function handleCommand(msg, parsedCommand) {
         ].join("\n\n");
 
         await sendMessage(chatId, msgContent);
+    } else if (command === "quanlychat") {
+        if (!await requireOwner(context)) return;
+        const content = formatChatDirectoryList(argument);
+        if (!content) {
+            await sendMessage(chatId, formatWarningMessage("SAI CÚ PHÁP", "> **Cú pháp:** /quanlychat [all|active|inactive|disabled|removed|private|group] [trang]"));
+            return;
+        }
+        await sendMessage(chatId, content);
+    } else if (command === "thongtinch") {
+        if (!await requireOwner(context)) return;
+        const targetId = String(argument || "").trim();
+        const content = formatChatDetails(getChat(targetId));
+        await sendMessage(chatId, content || formatWarningMessage("KHÔNG TÌM THẤY", "> Chat ID chưa có trong sổ quản lý."));
+    } else if (["vohieuchat", "kichhoatchat", "xoachat", "thuchatchat"].includes(command)) {
+        if (!await requireOwner(context)) return;
+        const parts = String(argument || "").trim().split(/\s+/).filter(Boolean);
+        const targetId = parts.shift();
+        if (!targetId) {
+            await sendMessage(chatId, formatWarningMessage("SAI CÚ PHÁP", `> **Cú pháp:** /${command} [Chat ID]`));
+            return;
+        }
+        if (command === "vohieuchat") {
+            const reason = parts.join(" ") || "admin_disabled";
+            setChatStatus(targetId, "disabled", String(context.userId), reason);
+            await sendMessage(chatId, `# {orange}[CHAT] ĐÃ VÔ HIỆU HÓA{/orange}\n\n> \`${escapeMarkdown(targetId)}\`\n> **Lý do:** ${escapeMarkdown(reason)}`);
+        } else if (command === "kichhoatchat") {
+            setChatStatus(targetId, "active", String(context.userId), "admin_reactivated");
+            await sendMessage(chatId, `# {green}[CHAT] ĐÃ KÍCH HOẠT{/green}\n\n> \`${escapeMarkdown(targetId)}\``);
+        } else if (command === "xoachat") {
+            setChatStatus(targetId, "removed", String(context.userId), "admin_removed");
+            await sendMessage(chatId, `# {orange}[CHAT] ĐÃ XÓA MỀM{/orange}\n\n> \`${escapeMarkdown(targetId)}\`\n> Dữ liệu lịch sử vẫn được giữ lại.`);
+        } else {
+            const result = await sendNotification(targetId, "[TEST] Bot đang kiểm tra khả năng gửi thông báo tới chat này.", { feature: "broadcast", operation: "admin_test", bypassEligibility: true });
+            if (result.sent) {
+                setChatStatus(targetId, "active", String(context.userId), "admin_test_succeeded");
+                await sendMessage(chatId, `# {green}[CHAT] KIỂM TRA THÀNH CÔNG{/green}\n\n> \`${escapeMarkdown(targetId)}\``);
+            } else if (result.skipped) {
+                await sendMessage(chatId, formatWarningMessage("CHAT ĐANG BỊ KHÓA", "> Hãy dùng /kichhoatchat trước khi thử lại."));
+            } else {
+                await sendMessage(chatId, formatWarningMessage("CHAT VẪN KHÔNG GỬI ĐƯỢC", `> ${escapeMarkdown(result.error?.message || "Lỗi không xác định")}`));
+            }
+        }
+    } else if (command === "chatfeature") {
+        if (!await requireOwner(context)) return;
+        const [targetId, feature, mode] = String(argument || "").trim().split(/\s+/);
+        if (!targetId || !feature || !["on", "off", "auto"].includes(String(mode || "").toLowerCase())) {
+            await sendMessage(chatId, formatWarningMessage("SAI CÚ PHÁP", "> **Cú pháp:** /chatfeature [Chat ID] [schedule|duty|birthday|broadcast] [on|off|auto]"));
+            return;
+        }
+        try {
+            setFeatureOverride(targetId, feature.toLowerCase(), mode.toLowerCase() === "auto" ? null : mode.toLowerCase() === "on");
+            await sendMessage(chatId, `# {green}[CHAT FEATURE] ĐÃ CẬP NHẬT{/green}\n\n> **Chat:** \`${escapeMarkdown(targetId)}\`\n> **Tính năng:** ${escapeMarkdown(feature)}\n> **Chế độ:** ${escapeMarkdown(mode)}`);
+        } catch (error) {
+            await sendMessage(chatId, formatWarningMessage("KHÔNG THỂ CẬP NHẬT", `> ${escapeMarkdown(error.message)}`));
+        }
     } else if (command === "danhsach") {
         if (!await requireOwner(context)) return;
         if (argument && !/^\d{4}$/.test(String(argument).trim())) {
@@ -1312,6 +1483,21 @@ async function handleCommand(msg, parsedCommand) {
     }
 }
 
+async function sendNotification(chatId, text, options = {}) {
+    const configuredThreshold = Number(process.env.CHAT_MAX_CONSECUTIVE_FAILURES || 3);
+    const defaultThreshold = Number.isInteger(configuredThreshold) && configuredThreshold > 0 ? configuredThreshold : 3;
+    const { feature = "broadcast", operation = feature, maxConsecutiveFailures = defaultThreshold, bypassEligibility = false } = options;
+    if (!bypassEligibility && !isChatEligible(chatId, feature)) return { skipped: true, reason: "inactive_or_disabled" };
+    try {
+        await sendMessage(chatId, text, options.sendOptions || {});
+        recordDeliverySuccess(chatId);
+        return { sent: true };
+    } catch (error) {
+        const record = recordDeliveryFailure(chatId, error, { feature, operation, maxConsecutiveFailures });
+        return { failed: true, error, suspended: record?.status === "inactive" };
+    }
+}
+
 function groupSubscriptionsByStudent(subscriptions, notificationTime = null) {
     const grouped = new Map();
     for (const subscription of subscriptions) {
@@ -1326,7 +1512,10 @@ function groupSubscriptionsByStudent(subscriptions, notificationTime = null) {
 }
 
 function groupEnabledSubscriptionsByStudent(notificationTime = null) {
-    return groupSubscriptionsByStudent(Object.values(getEnabledSubscriptions()), notificationTime);
+    return groupSubscriptionsByStudent(
+        Object.values(getEnabledSubscriptions()).filter((subscription) => isChatEligible(subscription.chatId, "schedule")),
+        notificationTime
+    );
 }
 
 let isCheckRunning = false;
@@ -1345,11 +1534,8 @@ async function checkAndNotifyScheduleChanges() {
                 if (result.confirmed) {
                     const changeMessage = formatScheduleChangeMessage(data, result.changes);
                     for (const subscription of targetMap.values()) {
-                        try {
-                            await sendMessage(subscription.chatId, changeMessage);
-                        } catch (error) {
-                            logDiscord("ERROR", `Không thể gửi cảnh báo thay đổi cho chat ${subscription.chatId}: ${error.message}`);
-                        }
+                        const delivery = await sendNotification(subscription.chatId, changeMessage, { feature: "schedule", operation: "schedule_change" });
+                        if (delivery.failed) logDiscord("ERROR", `Không thể gửi cảnh báo thay đổi cho chat ${subscription.chatId}: ${delivery.error.message}`);
                     }
                 }
             } catch (error) {
@@ -1397,11 +1583,8 @@ async function sendDailySchedulesAtTime(notificationTime = DEFAULT_NOTIFICATION_
                         // của MSSV, không chỉ nhóm đang nhận lịch ở đúng mốc giờ hiện tại.
                         const allStudentTargets = groupEnabledSubscriptionsByStudent().get(studentId) || targetMap;
                         for (const subscription of allStudentTargets.values()) {
-                            try {
-                                await sendMessage(subscription.chatId, changeMessage);
-                            } catch (error) {
-                                logDiscord("ERROR", `Không thể gửi cảnh báo thay đổi cho chat ${subscription.chatId}: ${error.message}`);
-                            }
+                            const delivery = await sendNotification(subscription.chatId, changeMessage, { feature: "schedule", operation: "schedule_change" });
+                            if (delivery.failed) logDiscord("ERROR", `Không thể gửi cảnh báo thay đổi cho chat ${subscription.chatId}: ${delivery.error.message}`);
                         }
                     }
                 } catch (changeError) {
@@ -1411,13 +1594,13 @@ async function sendDailySchedulesAtTime(notificationTime = DEFAULT_NOTIFICATION_
                 // 2. Gửi lịch học hôm nay cho tất cả các chat đăng ký MSSV này
                 const dailyMessage = formatDailySchedule(data, scheduleTarget.targetDate, { referenceDate: deliveryAt });
                 for (const subscription of targetMap.values()) {
-                    try {
-                        await sendMessage(subscription.chatId, dailyMessage);
+                    const delivery = await sendNotification(subscription.chatId, dailyMessage, { feature: "schedule", operation: "daily_schedule" });
+                    if (delivery.sent) {
                         dispatchResult.sent += 1;
                         console.log(`[${notificationTime}] Đã gửi lịch thành công cho MSSV ${studentId} tới chat ${subscription.chatId}`);
-                    } catch (error) {
+                    } else if (delivery.failed) {
                         dispatchResult.failed += 1;
-                        logDiscord("ERROR", `Không thể gửi lịch ${notificationTime} cho chat ${subscription.chatId}: ${error.message}`);
+                        logDiscord("ERROR", `Không thể gửi lịch ${notificationTime} cho chat ${subscription.chatId}: ${delivery.error.message}`);
                     }
                 }
             } catch (error) {
@@ -1452,7 +1635,7 @@ async function sendDailyDutyNotificationAtSix(date = new Date()) {
     const message = formatDutyNotification(todayDuties, date);
     if (!message) return { sent: 0, skipped: 0, failed: 0 };
 
-    const subscriptions = getDutySubscriptions();
+    const subscriptions = getDutySubscriptions().filter((subscription) => isChatEligible(subscription.chatId, "duty"));
     if (subscriptions.length === 0) {
         console.log("[06:00] Chưa có cuộc trò chuyện nào sử dụng /dangkylich.");
         return { sent: 0, skipped: 0, failed: 0 };
@@ -1462,12 +1645,12 @@ async function sendDailyDutyNotificationAtSix(date = new Date()) {
     const result = { sent: 0, skipped: 0, failed: 0 };
 
     for (const sub of subscriptions) {
-        try {
-            await sendMessage(sub.chatId, message);
+        const delivery = await sendNotification(sub.chatId, message, { feature: "duty", operation: "daily_duty" });
+        if (delivery.sent) {
             result.sent += 1;
-        } catch (error) {
+        } else if (delivery.failed) {
             result.failed += 1;
-            logDiscord("ERROR", `Không thể gửi thông báo lịch trực nhật phòng 411 cho chat ${sub.chatId}: ${error.message}`);
+            logDiscord("ERROR", `Không thể gửi thông báo lịch trực nhật phòng 411 cho chat ${sub.chatId}: ${delivery.error.message}`);
         }
     }
     return result;
@@ -1478,12 +1661,14 @@ async function startRuntime() {
         storeIds: [
             "accessControl",
             "birthdayData",
+            "chatDirectory",
             "dutyScheduleData",
             "interactions",
             "scheduleSnapshots",
             "subscriptions"
         ]
     });
+    if (syncChatDirectoryFromLegacyStores() > 0) await flushPersistenceWrites();
     // Chỉ bật scheduler sau khi state Firestore đã được hydrate vào bộ nhớ.
     schedule.scheduleJob({ rule: "*/15 * * * *", tz: TIME_ZONE }, asyncCommand(async () => {
         await checkAndNotifyScheduleChanges();
@@ -1510,6 +1695,13 @@ bot.on("message", asyncCommand(async (msg) => {
     const from = msg.from?.display_name || context.userId || "unknown";
     console.log("Tin nhắn mới:", from, "→", text);
     const interaction = recordInteraction(context, msg);
+    upsertChat({
+        chatId: context.chatId,
+        chatType: interaction.chatType,
+        displayName: interaction.chatTitle || context.userDisplayName,
+        firstInteractionAt: interaction.firstInteractionAt,
+        lastInboundInteractionAt: interaction.lastInteractionAt
+    });
 
     logDiscord("INFO", `Tin nhắn từ: ${from}\n> User ID: ${context.userId}\n> Chat ID: ${context.chatId}\n> Chat Title: ${interaction.chatTitle || "Private"}\n> Chat Type: ${interaction.chatType}\n> Nội dung: ${text}`);
 

@@ -63,6 +63,10 @@ Các bản ghi `subscriptions.json` theo schema cũ chỉ có `chat.id` sẽ kh�
 - `/traloi [ID] [câu trả lời]`: chủ BOT ghi hoặc cập nhật câu trả lời; phần trả lời có thể xuống dòng.
 - `/congbo [năm]`: gửi toàn bộ câu đã trả lời tới mọi user/nhóm từng tương tác với bot.
 - `/thongbao [nội dung]`: chủ BOT gửi thông báo cập nhật tới mọi user/nhóm từng tương tác với bot.
+- `/quanlychat [bộ lọc] [trang]`: chủ BOT xem trạng thái user/nhóm (`active`, `inactive`, `disabled`, `removed`).
+- `/thongtinch [Chat ID]`: xem lần tương tác, lần gửi thành công và lỗi gần nhất của chat.
+- `/vohieuchat`, `/kichhoatchat`, `/thuchatchat`, `/xoachat`: tắt, kích hoạt, gửi thử hoặc xóa mềm một chat.
+- `/chatfeature [Chat ID] [schedule|duty|birthday|broadcast] [on|off|auto]`: quản lý quyền nhận theo từng loại thông báo.
 - `/help`: xem các lệnh thông thường và ví dụ.
 - `/helpadmin`: chủ BOT xem toàn bộ lệnh, gồm cả lệnh quản trị.
 
@@ -88,7 +92,9 @@ Ngày lịch được xác định bằng policy theo cửa sổ thời gian: th
 
 ## Firestore
 
-Bot dùng Firebase Admin SDK để đọc/ghi state trong Firestore collection `bot_state`, với mỗi file JSON cũ tương ứng một document: `subscriptions`, `interactions`, `scheduleSnapshots`, `dutyScheduleData`, `birthdayData`, `accessControl`.
+Bot dùng Firebase Admin SDK để đọc/ghi state trong Firestore collection `bot_state`, với mỗi file JSON cũ tương ứng một document: `subscriptions`, `interactions`, `scheduleSnapshots`, `dutyScheduleData`, `birthdayData`, `accessControl`, `chatDirectory`.
+
+`chatDirectory` là cổng kiểm soát chung cho mọi tác vụ gửi. Lỗi vĩnh viễn `EZALO 410 The chat_id is invalid` làm chat chuyển ngay sang `inactive`; lỗi tạm thời chỉ chuyển trạng thái sau số lần liên tiếp cấu hình bởi `CHAT_MAX_CONSECUTIVE_FAILURES` (mặc định `3`). Dữ liệu cũ được giữ để admin xem và kích hoạt lại.
 
 Trên VPS, cấu hình `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL` và `FIREBASE_PRIVATE_KEY` trong `.env`. Trong `FIREBASE_PRIVATE_KEY`, các dòng PEM được nối bằng chuỗi `\n`. `FIREBASE_SERVICE_ACCOUNT_PATH` chỉ là phương án dự phòng tùy chọn. Chạy migration một lần:
 
