@@ -3,56 +3,56 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-test("lệnh /help phản hồi động tùy theo quyền owner", async (t) => {
+process.env.BOT_TOKEN ||= "test-token";
+
+test("ba nhóm help tách đúng lệnh thường, trực nhật và admin", async () => {
     const mainPath = path.join(__dirname, "../main.js");
     const code = fs.readFileSync(mainPath, "utf8");
+    const { formatAdminHelp, formatBirthdayInvitation, formatBirthdayResults, formatDutyHelp, formatGeneralHelp, parseCommand, suggestCommandCorrection } = require("../main.js");
+    const general = formatGeneralHelp();
+    const duty = formatDutyHelp();
+    const admin = formatAdminHelp();
 
-    const helpMatch = code.match(/else if \s*\(command === "help"\)\s*\{([\s\S]*?)\n\s*\} else if/);
-    assert.ok(helpMatch, "Tìm thấy khai báo xử lý lệnh help trong handleCommand");
+    assert.match(code, /command === "help411"/);
+    assert.match(code, /command === "helpadmin"/);
+    assert.match(code, /command === "helpadmin"[\s\S]*?requireOwner\(context\)/);
+    assert.match(general, /\/start/);
+    assert.match(general, /\/find 123456789/);
+    assert.doesNotMatch(general, /blockbot|themlichtruc|helpadmin/);
+    assert.doesNotMatch(general, /help411/);
+    assert.match(duty, /\/lichtruc/);
+    assert.match(duty, /\/dangkylich/);
+    assert.doesNotMatch(duty, /help411/);
+    assert.doesNotMatch(duty, /blockbot|themlichtruc|helpadmin/);
+    assert.match(admin, /\/blockbot/);
+    assert.match(admin, /\/themlichtruc/);
+    assert.match(admin, /\/thongbao/);
+    assert.match(admin, /\/helpadmin/);
+    assert.match(formatBirthdayInvitation(2026), /21 tuổi/);
+    assert.match(formatBirthdayInvitation(2026), /bạn muốn/);
+    assert.match(formatBirthdayResults(2026, [{ id: 1, text: "Bạn hỏi gì?", answer: "Câu trả lời" }]), /21 tuổi/);
+    assert.match(general, /_\(Ví dụ:/);
+    assert.deepEqual(parseCommand("/help411"), { command: "help411", argument: "" });
+    assert.deepEqual(parseCommand("/helpadmin"), { command: "helpadmin", argument: "" });
+    assert.equal(suggestCommandCorrection("dangky0800"), "/dangky 08:00");
+    assert.equal(suggestCommandCorrection("find123456789"), "/find 123456789");
+});
 
-    const originalOwner = process.env.OWNER_USER_ID;
-    const originalOwnerChat = process.env.OWNER_CHAT_ID;
-    process.env.OWNER_USER_ID = "owner123";
-    process.env.OWNER_CHAT_ID = "private_owner_chat";
+test("parse giờ đăng ký lịch học tùy chọn", () => {
+    const { parseDangKyArgument } = require("../main.js");
 
-    t.after(() => {
-        if (originalOwner === undefined) {
-            delete process.env.OWNER_USER_ID;
-        } else {
-            process.env.OWNER_USER_ID = originalOwner;
-        }
-        if (originalOwnerChat === undefined) {
-            delete process.env.OWNER_CHAT_ID;
-        } else {
-            process.env.OWNER_CHAT_ID = originalOwnerChat;
-        }
+    assert.deepEqual(parseDangKyArgument("05:30", "123456789"), {
+        studentId: "123456789",
+        notificationTime: "05:30"
     });
-
-    const handlerBody = helpMatch[1];
-    const { isOwner } = require("../main.js");
-
-    const AsyncFunction = Object.getPrototypeOf(async function () { }).constructor;
-    const fn = new AsyncFunction("chatId", "sendMessage", "context", "isOwner", handlerBody);
-
-    // Người dùng thường (không phải owner) -> Không được hiện lệnh Admin [CHỦ BOT]
-    let normalMessage = null;
-    await fn("group_chat_1", (chatId, messageText) => { normalMessage = messageText; return Promise.resolve(); }, { userId: "user456", chatId: "group_chat_1" }, isOwner);
-    assert.ok(normalMessage, "Tin nhắn /help cho người dùng thường đã được tạo");
-    assert.match(normalMessage, /HƯỚNG DẪN ZALOBOT/);
-    assert.doesNotMatch(normalMessage, /\[CHỦ BOT\]/);
-
-    // Chủ BOT dùng /help trong bất kỳ đâu (nhóm hay chat riêng) -> Đều hiển thị đầy đủ bộ lệnh ADMIN
-    let groupOwnerMessage = null;
-    await fn("group_chat_1", (chatId, messageText) => { groupOwnerMessage = messageText; return Promise.resolve(); }, { userId: "owner123", chatId: "group_chat_1" }, isOwner);
-    assert.ok(groupOwnerMessage, "Tin nhắn /help cho owner trong nhóm đã được tạo");
-    assert.match(groupOwnerMessage, /HƯỚNG DẪN ZALOBOT/);
-    assert.match(groupOwnerMessage, /\[CHỦ BOT\]/);
-
-    let ownerMessage = null;
-    await fn("private_owner_chat", (chatId, messageText) => { ownerMessage = messageText; return Promise.resolve(); }, { userId: "owner123", chatId: "private_owner_chat" }, isOwner);
-    assert.ok(ownerMessage, "Tin nhắn /help cho chủ BOT trong chat riêng đã được tạo");
-    assert.match(ownerMessage, /HƯỚNG DẪN ZALOBOT/);
-    assert.match(ownerMessage, /\[CHỦ BOT\]/);
+    assert.deepEqual(parseDangKyArgument("123456789 23:59", null), {
+        studentId: "123456789",
+        notificationTime: "23:59"
+    });
+    assert.deepEqual(parseDangKyArgument("24:00", "123456789"), {
+        studentId: "123456789",
+        notificationTime: null
+    });
 });
 
 test("parseCommand bóc tách lệnh chính xác với mọi định dạng mention Zalo trong nhóm", () => {

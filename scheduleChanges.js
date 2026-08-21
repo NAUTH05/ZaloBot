@@ -1,8 +1,8 @@
 const crypto = require("crypto");
-const fs = require("fs");
 const path = require("path");
-const { getApiDateTimeInfo, getVietnamDateInfo } = require("./timezone");
+const { getApiDateTimeInfo, getVietnamDateInfo, getVietnamWeekdayForDateKey } = require("./timezone");
 const { escapeMarkdown } = require("./richText");
+const { readJsonStore, writeJsonStore } = require("./firestorePersistence");
 
 const FILE_PATH = path.join(__dirname, "scheduleSnapshots.json");
 const SNAPSHOT_SCHEMA_VERSION = 2;
@@ -203,9 +203,8 @@ function confirmChangeState(state, currentSnapshot, observedAt = new Date().toIS
 }
 
 function readStates() {
-    if (!fs.existsSync(FILE_PATH)) return {};
     try {
-        const data = JSON.parse(fs.readFileSync(FILE_PATH, "utf8"));
+        const data = readJsonStore(FILE_PATH, FILE_PATH, {});
         return data && typeof data === "object" && !Array.isArray(data) ? data : {};
     } catch (error) {
         console.error("Không đọc được scheduleSnapshots.json:", error.message);
@@ -214,9 +213,7 @@ function readStates() {
 }
 
 function writeStates(states) {
-    const temporaryPath = `${FILE_PATH}.tmp`;
-    fs.writeFileSync(temporaryPath, JSON.stringify(states, null, 2), "utf8");
-    fs.renameSync(temporaryPath, FILE_PATH);
+    writeJsonStore(FILE_PATH, FILE_PATH, states);
 }
 
 function initializeScheduleSnapshot(scheduleData, date = new Date(), force = false) {
@@ -257,6 +254,12 @@ function formatDateKey(dateKey) {
     return day ? `${day}/${month}/${year}` : "Chưa rõ ngày";
 }
 
+function formatDateKeyWithWeekday(dateKey) {
+    const formattedDate = formatDateKey(dateKey);
+    const weekday = getVietnamWeekdayForDateKey(dateKey);
+    return weekday ? `${weekday}, ${formattedDate}` : formattedDate;
+}
+
 function formatLocation(lesson) {
     return [lesson.room, lesson.campus].filter(Boolean).join(" - ") || "Chưa xác định";
 }
@@ -264,7 +267,7 @@ function formatLocation(lesson) {
 function formatCompactLesson(lesson, index) {
     return [
         `**${index + 1}. ${escapeMarkdown(lesson.subject || "Chưa rõ môn")}**`,
-        `> **Ngày:** ${formatDateKey(lesson.dateKey)}`,
+        `> **Ngày:** ${formatDateKeyWithWeekday(lesson.dateKey)}`,
         `> **Giờ:** ${escapeMarkdown(lesson.start || "?")} – ${escapeMarkdown(lesson.end || "?")}`,
         `> **Phòng:** ${escapeMarkdown(formatLocation(lesson))}`,
         lesson.teacher ? `> **Giảng viên:** ${escapeMarkdown(lesson.teacher)}` : "",
@@ -283,10 +286,17 @@ function formatModifiedLesson(change, index) {
     const title = before.subject === after.subject
         ? after.subject
         : "Thay đổi môn học";
-    const details = [`**${index + 1}. ${escapeMarkdown(title || "Buổi học")}**`];
+    const currentSchedule = [
+        formatDateKeyWithWeekday(after.dateKey),
+        after.start && after.end ? `${after.start} – ${after.end}` : after.start || after.end
+    ].filter(Boolean).join(" · ");
+    const details = [
+        `**${index + 1}. ${escapeMarkdown(title || "Buổi học")}**`,
+        `> **Lịch hiện tại:** ${escapeMarkdown(currentSchedule)}`
+    ];
 
     if (before.dateKey !== after.dateKey) {
-        details.push(changedLine("Ngày", formatDateKey(before.dateKey), formatDateKey(after.dateKey)));
+        details.push(changedLine("Ngày", formatDateKeyWithWeekday(before.dateKey), formatDateKeyWithWeekday(after.dateKey)));
     }
     if (before.start !== after.start || before.end !== after.end) {
         details.push(changedLine(
@@ -330,7 +340,7 @@ function formatScheduleChangeMessage(scheduleData, changes, date = new Date()) {
     const sections = [
         "# {orange}[!] LỊCH HỌC CÓ THAY ĐỔI{/orange}",
         `**Sinh viên:** ${escapeMarkdown(scheduleData.studentName || "Sinh viên")}  •  **MSSV:** ${escapeMarkdown(scheduleData.studentId)}`,
-        `**Xác nhận:** ${now.formattedDate} lúc ${now.hour}:${now.minute}`,
+        `**Xác nhận:** ${now.weekday}, ${now.formattedDate} lúc ${now.hour}:${now.minute}`,
         `{orange}Tổng cộng ${totalChanges} thay đổi đã được xác nhận{/orange}`
     ];
 

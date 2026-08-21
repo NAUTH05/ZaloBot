@@ -1,7 +1,7 @@
-const fs = require("fs");
 const path = require("path");
 const { getVietnamDateInfo } = require("./timezone");
 const { escapeMarkdown } = require("./richText");
+const { readJsonStore, writeJsonStore } = require("./firestorePersistence");
 
 const FILE_PATH = path.join(__dirname, "dutyScheduleData.json");
 const DUTY_SCHEMA_VERSION = 1;
@@ -11,15 +11,13 @@ function pad2(num) {
 }
 
 function readDutyData(filePath = FILE_PATH) {
-    if (!fs.existsSync(filePath)) {
-        return {
+    const empty = {
             schemaVersion: DUTY_SCHEMA_VERSION,
             schedules: [],
             subscriptions: {}
         };
-    }
     try {
-        const data = JSON.parse(fs.readFileSync(filePath, "utf8"));
+        const data = readJsonStore(filePath, FILE_PATH, empty);
         return {
             schemaVersion: DUTY_SCHEMA_VERSION,
             schedules: Array.isArray(data.schedules) ? data.schedules : [],
@@ -41,11 +39,15 @@ function enableDutyNotifications(context, filePath = FILE_PATH) {
 
     const data = readDutyData(filePath);
     const title = context.chatTitle || context.userDisplayName || `Chat ${chatId}`;
+    const existing = data.subscriptions[chatId] || {};
     const entry = {
+        ...existing,
         chatId,
         chatTitle: title,
         enabled: true,
-        registeredAt: new Date().toISOString()
+        registeredAt: existing.registeredAt || new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        disabledAt: null
     };
 
     data.subscriptions[chatId] = entry;
@@ -58,9 +60,11 @@ function disableDutyNotifications(context, filePath = FILE_PATH) {
     if (!chatId) return false;
 
     const data = readDutyData(filePath);
-    if (!data.subscriptions[chatId]) return false;
+    if (!data.subscriptions[chatId]?.enabled) return false;
 
-    delete data.subscriptions[chatId];
+    data.subscriptions[chatId].enabled = false;
+    data.subscriptions[chatId].disabledAt = new Date().toISOString();
+    data.subscriptions[chatId].updatedAt = new Date().toISOString();
     writeDutyData(data, filePath);
     return true;
 }
@@ -72,9 +76,7 @@ function getDutySubscriptions(filePath = FILE_PATH) {
 
 
 function writeDutyData(data, filePath = FILE_PATH) {
-    const temporaryPath = `${filePath}.tmp`;
-    fs.writeFileSync(temporaryPath, JSON.stringify(data, null, 2), "utf8");
-    fs.renameSync(temporaryPath, filePath);
+    writeJsonStore(filePath, FILE_PATH, data);
 }
 
 /**
@@ -285,9 +287,9 @@ function formatDutyNotification(dutyItems, date = new Date()) {
     const lines = dutyItems.map((item) => `> **[${escapeMarkdown(item.dateStr)}]** **[${escapeMarkdown(item.assigned)}]**`);
 
     return [
-        `# {green}[LỊCH TRỰC] HÔM NAY ${headerDate}{/green}`,
+        `# {green}[LỊCH TRỰC NHẬT PHÒNG 411] HÔM NAY ${headerDate}{/green}`,
         "",
-        "📋 **Phân công trực ban hôm nay:**",
+        "📋 **Phân công trực nhật phòng 411 hôm nay:**",
         lines.join("\n"),
         "",
         "{orange}Chúc các bạn một ngày làm việc và học tập vui vẻ!{/orange}"
@@ -297,9 +299,9 @@ function formatDutyNotification(dutyItems, date = new Date()) {
 function formatDutyList(dutyItems) {
     if (!dutyItems || dutyItems.length === 0) {
         return (
-            "# {orange}[LỊCH TRỰC] DANH SÁCH TRỐNG{/orange}\n\n" +
-            "> Hiện tại chưa có lịch trực nào được phân công.\n\n" +
-            "**Thêm lịch trực mới:**\n" +
+            "# {orange}[LỊCH TRỰC NHẬT PHÒNG 411] DANH SÁCH TRỐNG{/orange}\n\n" +
+            "> Hiện tại chưa có lịch trực nhật phòng 411 nào được phân công.\n\n" +
+            "**Thêm lịch trực nhật mới:**\n" +
             "- `/themlichtruc [dd/mm] [Name 1 - Name 2]`"
         );
     }
@@ -309,7 +311,7 @@ function formatDutyList(dutyItems) {
     });
 
     return [
-        `# {green}[LỊCH TRỰC] DANH SÁCH PHÂN CÔNG (${dutyItems.length}){/green}`,
+        `# {green}[LỊCH TRỰC NHẬT PHÒNG 411] DANH SÁCH PHÂN CÔNG (${dutyItems.length}){/green}`,
         "",
         rows.join("\n\n"),
         "",

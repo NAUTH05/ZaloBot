@@ -168,8 +168,9 @@ test("format thông báo dùng rich text, ngày dd/mm/yyyy và chỉ hiện trư
 
     assert.match(message, /^# \{orange\}\[!\] LỊCH HỌC CÓ THAY ĐỔI\{\/orange\}/);
     assert.match(message, /\{orange\}\[\*\] ĐIỀU CHỈNH · 1\{\/orange\}/);
-    assert.match(message, /10\/08\/2026 lúc 10:35/);
-    assert.match(message, /~~10\/08\/2026~~ → \*\*11\/08\/2026\*\*/);
+    assert.match(message, /Thứ Hai, 10\/08\/2026 lúc 10:35/);
+    assert.match(message, /Lịch hiện tại:\*\* Thứ Ba, 11\/08\/2026 · 07:00 – 09:15/);
+    assert.match(message, /~~Thứ Hai, 10\/08\/2026~~ → \*\*Thứ Ba, 11\/08\/2026\*\*/);
     assert.match(message, /Phòng:/);
     assert.doesNotMatch(message, /2026-08-11/);
     assert.doesNotMatch(message, /Giảng viên:/);

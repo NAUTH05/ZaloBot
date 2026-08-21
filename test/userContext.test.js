@@ -1,6 +1,11 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { createSubscriptionKey, isCurrentSubscription } = require("../subscriptions");
+const {
+    createSubscriptionKey,
+    isCurrentSubscription,
+    normalizeNotificationTime,
+    normalizeNotificationTimes
+} = require("../subscriptions");
 const { getMessageContext } = require("../userContext");
 
 test("hai user trong cùng chat có khóa đăng ký khác nhau", () => {
@@ -16,6 +21,20 @@ test("hai user trong cùng chat có khóa đăng ký khác nhau", () => {
     assert.notEqual(createSubscriptionKey(first), createSubscriptionKey(second));
     assert.equal(first.chatId, second.chatId);
     assert.notEqual(first.userId, second.userId);
+});
+
+test("chuẩn hóa giờ thông báo theo định dạng 24 giờ", () => {
+    assert.equal(normalizeNotificationTime("00:00"), "00:00");
+    assert.equal(normalizeNotificationTime("23:59"), "23:59");
+    assert.equal(normalizeNotificationTime("6:00"), null);
+    assert.equal(normalizeNotificationTime("24:00"), null);
+});
+
+test("tương thích bản ghi một giờ và chuẩn hóa danh sách giờ", () => {
+    assert.deepEqual(normalizeNotificationTimes({ notificationTime: "06:00" }).map((item) => item.time), ["06:00"]);
+    assert.deepEqual(normalizeNotificationTimes({
+        notificationTimes: [{ id: 1, time: "06:00" }, { id: 2, time: "20:00" }, { id: 3, time: "06:00" }]
+    }).map((item) => item.time), ["06:00", "20:00"]);
 });
 
 test("cùng user ở hai chat khác nhau có dữ liệu độc lập", () => {

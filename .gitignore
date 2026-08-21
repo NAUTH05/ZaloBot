@@ -13,4 +13,9 @@ birthdayData.json
 birthdayData.json.tmp
 dutyScheduleData.json
 dutyScheduleData.json.tmp
+thongtinfirebase.txt
+firebase-service-account.json
+*firebase-adminsdk*.json
+recent_json/
+.npm-cache/
 *.log

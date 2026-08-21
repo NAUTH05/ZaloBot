@@ -199,20 +199,22 @@ function formatLesson(lesson, index) {
     return lines.join("\n");
 }
 
-function formatDailySchedule(scheduleData, date = new Date()) {
+function formatDailySchedule(scheduleData, date = new Date(), options = {}) {
     const dateInfo = getVietnamDateInfo(date);
+    const referenceDateInfo = getVietnamDateInfo(options.referenceDate || date);
+    const dayLabel = dateInfo.dateKey === referenceDateInfo.dateKey ? "HÔM NAY" : "NGÀY MAI";
     const lessons = lessonsForDate(scheduleData.lessons || [], date);
     const studentName = escapeMarkdown(scheduleData.studentName || "Sinh viên");
     const studentId = escapeMarkdown(scheduleData.studentId);
     const header = [
-        "# {green}[LỊCH] HÔM NAY{/green}",
+        `# {green}[LỊCH] ${dayLabel}{/green}`,
         `**Sinh viên:** ${studentName}`,
         `> **MSSV:** ${studentId}`,
         `> **Ngày:** ${escapeMarkdown(dateInfo.weekday)}, ${dateInfo.formattedDate}`
     ].join("\n");
 
     if (lessons.length === 0) {
-        return `${header}\n\n{green}[i] Hôm nay không có lịch học.{/green}`;
+        return `${header}\n\n{green}[i] ${dayLabel === "HÔM NAY" ? "Hôm nay" : "Ngày mai"} không có lịch học.{/green}`;
     }
     return `${header}\n\n## {orange}[${lessons.length} BUỔI HỌC]{/orange}\n${lessons.map(formatLesson).join("\n\n────────────\n\n")}`;
 }
@@ -322,7 +324,9 @@ function formatExamSchedule(examData) {
     const items = exams.map((lesson, index) => {
         const start = getApiDateTimeInfo(lesson.ThoiGianBD);
         const end = getApiDateTimeInfo(lesson.ThoiGianKT);
-        const dateStr = start ? start.formattedDate : "Chưa rõ ngày";
+        const dateStr = start
+            ? `${start.weekday ? `${start.weekday}, ` : ""}${start.formattedDate}`
+            : "Chưa rõ ngày";
         const timeStr = start && end ? `${start.hour}:${start.minute} - ${end.hour}:${end.minute}` : "Chưa rõ giờ";
         const location = [lesson.TenPhong, lesson.TenCoSo].filter(Boolean).join(" - ") || "Chưa xếp phòng";
 

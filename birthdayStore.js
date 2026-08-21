@@ -1,5 +1,5 @@
-const fs = require("fs");
 const path = require("path");
+const { readJsonStore, writeJsonStore } = require("./firestorePersistence");
 
 const FILE_PATH = path.join(__dirname, "birthdayData.json");
 
@@ -13,9 +13,8 @@ function createEmptyState() {
 }
 
 function readState(filePath = FILE_PATH) {
-    if (!fs.existsSync(filePath)) return createEmptyState();
     try {
-        const data = JSON.parse(fs.readFileSync(filePath, "utf8"));
+        const data = readJsonStore(filePath, FILE_PATH, createEmptyState());
         const empty = createEmptyState();
         return {
             ...empty,
@@ -33,9 +32,7 @@ function readState(filePath = FILE_PATH) {
 }
 
 function writeState(state, filePath = FILE_PATH) {
-    const temporaryPath = `${filePath}.tmp`;
-    fs.writeFileSync(temporaryPath, JSON.stringify(state, null, 2), "utf8");
-    fs.renameSync(temporaryPath, filePath);
+    writeJsonStore(filePath, FILE_PATH, state);
 }
 
 function normalizeYear(year) {

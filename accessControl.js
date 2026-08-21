@@ -1,13 +1,13 @@
 const fs = require("fs");
 const path = require("path");
 const { getInteractionTargets } = require("./interactionRegistry");
+const { readJsonStore, writeJsonStore } = require("./firestorePersistence");
 
 const FILE_PATH = path.join(__dirname, "accessControl.json");
 const ACCESS_SCHEMA_VERSION = 1;
 
 function readAccessData(filePath = FILE_PATH) {
-    if (!fs.existsSync(filePath)) {
-        return {
+    const empty = {
             schemaVersion: ACCESS_SCHEMA_VERSION,
             botMode: "all", // "all" | "allowlist"
             aiMode: "all",  // "all" | "allowlist"
@@ -16,9 +16,8 @@ function readAccessData(filePath = FILE_PATH) {
             botAllowlist: {},
             aiAllowlist: {}
         };
-    }
     try {
-        const data = JSON.parse(fs.readFileSync(filePath, "utf8"));
+        const data = readJsonStore(filePath, FILE_PATH, empty);
         return {
             schemaVersion: ACCESS_SCHEMA_VERSION,
             botMode: data.botMode || "all",
@@ -43,9 +42,7 @@ function readAccessData(filePath = FILE_PATH) {
 }
 
 function writeAccessData(data, filePath = FILE_PATH) {
-    const temporaryPath = `${filePath}.tmp`;
-    fs.writeFileSync(temporaryPath, JSON.stringify(data, null, 2), "utf8");
-    fs.renameSync(temporaryPath, filePath);
+    writeJsonStore(filePath, FILE_PATH, data);
 }
 
 function resolveTarget(input) {
