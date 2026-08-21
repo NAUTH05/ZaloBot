@@ -6,8 +6,10 @@ const path = require("node:path");
 const {
     getChat,
     isChatEligible,
+    normalizeChatType,
     recordDeliveryFailure,
     recordDeliverySuccess,
+    removeChat,
     setChatStatus,
     setFeatureOverride,
     upsertChat
@@ -56,4 +58,16 @@ test("admin status and feature overrides preserve chat history", (t) => {
     assert.equal(record.status, "removed");
     assert.equal(record.displayName, "Class Group");
     assert.equal(record.lastInboundInteractionAt, "2026-08-21T00:00:00.000Z");
+});
+
+test("normalizes chat type and keeps hard-delete tombstones until explicit restore", (t) => {
+    const filePath = temporaryFile(t);
+    assert.equal(normalizeChatType("group_chat"), "group");
+    assert.equal(normalizeChatType("user"), "private");
+    upsertChat({ chatId: "tombstone", chatType: "group" }, filePath);
+    const removed = removeChat("tombstone", true, filePath);
+    assert.equal(removed.chatType, "group");
+    assert.equal(upsertChat({ chatId: "tombstone", chatType: "private" }, filePath), null);
+    const restored = upsertChat({ chatId: "tombstone", chatType: "private", restoreDeleted: true }, filePath);
+    assert.equal(restored.chatType, "private");
 });

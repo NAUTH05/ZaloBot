@@ -1,0 +1,18 @@
+.command-form .error {
+  max-height: 320px;
+  overflow: auto;
+  padding: 12px;
+  border-radius: 6px;
+  background: #f6f8fa;
+  color: #344252;
+  white-space: pre-wrap;
+}
+
+.action-wrap {
+  flex-wrap: wrap;
+}
+
+.danger {
+  color: #b33f31;
+  border-color: #e5b9b3;
+}
