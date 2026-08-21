@@ -4,6 +4,7 @@ require("dotenv").config();
 
 const https = require("https");
 const crypto = require("crypto");
+const { AsyncLocalStorage } = require("async_hooks");
 const schedule = require("node-schedule");
 const ZaloBot = require("node-zalo-bot");
 const {
@@ -67,6 +68,7 @@ const { askScheduleAi } = require("./aiAssistant");
 const { flushPersistenceWrites, initializeFirestorePersistence } = require("./firestorePersistence");
 const { createAdminServer } = require("./adminServer");
 const { recordSystemLog } = require("./operationalLog");
+const { getConfiguredAdminIds, isConfiguredAdmin } = require("./adminSettings");
 const {
     addQuestion,
     answerQuestion,
@@ -102,6 +104,7 @@ if (!process.env.BOT_TOKEN) {
 }
 
 const bot = new ZaloBot(process.env.BOT_TOKEN, { polling: false });
+const dashboardCommandContext = new AsyncLocalStorage();
 
 function logDiscord(level, message) {
     if (level === "ERROR" || level === "WARN") {
@@ -177,6 +180,10 @@ async function sendMessage(chatId, text, options = {}) {
     for (let index = 0; index < chunks.length; index += 1) {
         const prefix = index > 0 && continuationHeader ? `${continuationHeader}\n\n` : "";
         const payload = `${prefix}${chunks[index]}`;
+        const commandContext = dashboardCommandContext.getStore();
+        if (commandContext && String(commandContext.chatId) === String(chatId)) {
+            commandContext.messages.push({ chatId: String(chatId), text: payload });
+        }
         try {
             await Promise.resolve(bot.sendMessage(chatId, payload, messageOptions));
         } catch (error) {
@@ -247,21 +254,9 @@ function parseCommand(rawText) {
 }
 
 function isOwner(context) {
-    const ownerUserIds = String(process.env.OWNER_USER_ID || "")
-        .split(",")
-        .map((value) => value.trim())
-        .filter(Boolean);
-    const ownerChatIds = String(process.env.OWNER_CHAT_ID || "")
-        .split(",")
-        .map((value) => value.trim())
-        .filter(Boolean);
-
-    if (ownerUserIds.length === 0 && ownerChatIds.length === 0) return false;
-
-    const userMatch = ownerUserIds.length > 0 && ownerUserIds.includes(String(context?.userId));
-    const chatMatch = ownerChatIds.length > 0 && ownerChatIds.includes(String(context?.chatId));
-
-    return userMatch || chatMatch;
+    const configured = getConfiguredAdminIds();
+    if (configured.userIds.length === 0 && configured.chatIds.length === 0) return false;
+    return isConfiguredAdmin(context);
 }
 
 async function requireOwner(context) {
@@ -293,6 +288,8 @@ function getBroadcastTargets(feature = "broadcast") {
             chatId: target.chatId,
             chatType: target.chatType,
             displayName: target.chatTitle || target.lastUserDisplayName,
+            userId: target.lastUserId,
+            chatTitle: target.chatTitle,
             lastInboundInteractionAt: target.lastInteractionAt,
             firstInteractionAt: target.firstInteractionAt
         });
@@ -689,6 +686,8 @@ function syncChatDirectoryFromLegacyStores() {
             chatId: target.chatId,
             chatType: target.chatType,
             displayName: target.chatTitle || target.lastUserDisplayName,
+            userId: target.lastUserId,
+            chatTitle: target.chatTitle,
             firstInteractionAt: target.firstInteractionAt,
             lastInboundInteractionAt: target.lastInteractionAt
         });
@@ -1667,6 +1666,7 @@ async function startRuntime() {
             "accessControl",
             "adminAudit",
             "adminLogs",
+            "adminSettings",
             "birthdayData",
             "chatDirectory",
             "dutyScheduleData",
@@ -1677,6 +1677,15 @@ async function startRuntime() {
     });
     if (syncChatDirectoryFromLegacyStores() > 0) await flushPersistenceWrites();
     const adminRuntime = createAdminServer({
+        executeCommand: async ({ command, userId, chatId, displayName }) => {
+            const parsed = parseCommand(command);
+            if (!parsed) throw new Error("Lệnh phải bắt đầu bằng /");
+            const context = { userId: String(userId), chatId: String(chatId), userDisplayName: String(displayName || "Dashboard Admin") };
+            if (!isOwner(context)) throw new Error("Admin context chưa được cấp quyền");
+            const capture = { chatId: context.chatId, messages: [] };
+            await dashboardCommandContext.run(capture, () => handleCommand({ text: command, chat: { id: context.chatId, type: "private" }, from: { id: context.userId, display_name: context.userDisplayName } }, parsed));
+            return { command, deliveredToChatId: context.chatId, messages: capture.messages };
+        },
         retryChat: async (chatId) => sendNotification(
             chatId,
             "[ADMIN TEST] ZaloBot đang kiểm tra khả năng gửi thông báo tới cuộc trò chuyện này.",
@@ -1715,9 +1724,12 @@ bot.on("message", asyncCommand(async (msg) => {
     console.log("Tin nhắn mới:", from, "→", text);
     const interaction = recordInteraction(context, msg);
     upsertChat({
+        restoreDeleted: true,
         chatId: context.chatId,
         chatType: interaction.chatType,
         displayName: interaction.chatTitle || context.userDisplayName,
+        userId: interaction.lastUserId,
+        chatTitle: interaction.chatTitle,
         firstInteractionAt: interaction.firstInteractionAt,
         lastInboundInteractionAt: interaction.lastInteractionAt
     });

@@ -21,3 +21,4 @@ recent_json/
 *.log
 adminAudit.json
 adminLogs.json
+adminSettings.json

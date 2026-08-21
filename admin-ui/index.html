@@ -6,6 +6,7 @@
   <base href="/zalobot/" />
   <title>ZaloBot Admin</title>
   <link rel="stylesheet" href="./styles.css" />
+  <link rel="stylesheet" href="./admin-controls.css" />
 </head>
 <body>
   <div id="app">
@@ -22,6 +23,9 @@
         <div id="metricGrid" class="metric-grid"></div>
         <div class="content-grid">
           <section class="panel wide"><div class="panel-heading"><div><h2>Chat directory</h2><p class="muted">Review active, invalid, disabled, and removed destinations.</p></div><div class="filters"><select id="statusFilter"><option value="all">All statuses</option><option value="active">Active</option><option value="inactive">Inactive</option><option value="disabled">Disabled</option><option value="removed">Removed</option></select><select id="typeFilter"><option value="all">All types</option><option value="private">Users</option><option value="group">Groups</option></select></div></div><div class="table-wrap"><table><thead><tr><th>Chat</th><th>Type</th><th>Status</th><th>Last success</th><th>Latest error</th><th></th></tr></thead><tbody id="chatRows"></tbody></table></div></section>
+          <section class="panel"><div class="panel-heading"><div><h2>Add or update chat</h2><p class="muted">Keep chat IDs in the directory with the correct user/group type.</p></div></div><form id="chatForm"><label>Chat ID<input name="chatId" required /></label><label>User ID (optional)<input name="userId" /></label><label>Display name<input name="displayName" /></label><label>Type<select name="chatType"><option value="private">User</option><option value="group">Group</option></select></label><button class="primary" type="submit">Save chat</button><p id="chatFormMessage" class="error"></p></form></section>
+          <section class="panel"><div class="panel-heading"><div><h2>Admin identities</h2><p class="muted">User/chat IDs used when executing bot admin commands.</p></div></div><div id="adminSettingsList" class="stack"></div><form id="adminForm"><label>User ID<input name="userId" /></label><label>Chat ID<input name="chatId" /></label><label>Display name<input name="displayName" /></label><button class="primary" type="submit">Add admin identity</button><p id="adminFormMessage" class="error"></p></form></section>
+          <section class="panel wide"><div class="panel-heading"><div><h2>Command console</h2><p class="muted">Execute existing bot commands through the backend handler.</p></div></div><form id="commandForm" class="command-form"><label>Command<input name="command" placeholder="/quanlychat inactive 1" required /></label><label>Admin user ID<input name="userId" required /></label><label>Admin chat ID<input name="chatId" required /></label><button class="primary" type="submit">Run command</button><p id="commandResult" class="error"></p></form></section>
           <section class="panel"><div class="panel-heading"><div><h2>Recent errors</h2><p class="muted">The latest delivery failures recorded by the bot.</p></div></div><div id="errorList" class="stack"></div></section>
           <section class="panel"><div class="panel-heading"><div><h2>Admin activity</h2><p class="muted">Recent authentication and management actions.</p></div></div><div id="auditList" class="stack"></div></section>
           <section class="panel wide"><div class="panel-heading"><div><h2>Notification schedule</h2><p class="muted">Enabled study and duty notification destinations.</p></div></div><div id="notificationList" class="stack"></div></section>

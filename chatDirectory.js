@@ -2,9 +2,16 @@ const path = require("path");
 const { readJsonStore, writeJsonStore } = require("./firestorePersistence");
 
 const FILE_PATH = path.join(__dirname, "chatDirectory.json");
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const STATUSES = new Set(["active", "inactive", "disabled", "removed"]);
 const FEATURES = ["schedule", "duty", "birthday", "broadcast"];
+
+function normalizeChatType(value, fallback = "unknown") {
+    const raw = String(value == null ? "" : value).trim().toLowerCase();
+    if (["group", "group_chat", "room", "nhom", "nhóm"].includes(raw)) return "group";
+    if (["private", "user", "direct", "personal", "individual"].includes(raw)) return "private";
+    return fallback;
+}
 
 function nowIso() {
     return new Date().toISOString();
@@ -14,12 +21,16 @@ function readDirectory(filePath = FILE_PATH) {
     try {
         const data = readJsonStore(filePath, FILE_PATH, { schemaVersion: SCHEMA_VERSION, chats: {} });
         if (data && typeof data === "object" && !Array.isArray(data)) {
-            return { schemaVersion: SCHEMA_VERSION, chats: data.chats && typeof data.chats === "object" ? data.chats : {} };
+            return {
+                schemaVersion: SCHEMA_VERSION,
+                chats: data.chats && typeof data.chats === "object" ? data.chats : {},
+                deletedChatIds: data.deletedChatIds && typeof data.deletedChatIds === "object" ? data.deletedChatIds : {}
+            };
         }
     } catch (error) {
         console.error(`Không đọc được ${path.basename(filePath)}:`, error.message);
     }
-    return { schemaVersion: SCHEMA_VERSION, chats: {} };
+    return { schemaVersion: SCHEMA_VERSION, chats: {}, deletedChatIds: {} };
 }
 
 function writeDirectory(data, filePath = FILE_PATH) {
@@ -40,12 +51,15 @@ function normalizeRecord(chatId, input = {}, existing = {}) {
         if (overrides[feature] !== true && overrides[feature] !== false) overrides[feature] = null;
     }
     const status = STATUSES.has(input.status) ? input.status : (STATUSES.has(existing.status) ? existing.status : "active");
+    const { restoreDeleted, ...safeInput } = input;
     return {
         ...existing,
-        ...input,
+        ...safeInput,
         chatId: id,
-        chatType: input.chatType || existing.chatType || "unknown",
+        chatType: normalizeChatType(input.chatType, normalizeChatType(existing.chatType)),
         displayName: input.displayName || existing.displayName || input.chatTitle || existing.chatTitle || "",
+        userId: String(input.userId || existing.userId || "").trim() || null,
+        chatTitle: String(input.chatTitle || existing.chatTitle || "").trim(),
         notificationOverrides: overrides,
         status,
         consecutiveFailureCount: Number.isInteger(input.consecutiveFailureCount)
@@ -60,6 +74,8 @@ function upsertChat(input = {}, filePath = FILE_PATH) {
     const chatId = normalizeChatId(input.chatId);
     if (!chatId) return null;
     const data = readDirectory(filePath);
+    if (data.deletedChatIds[chatId] && input.restoreDeleted !== true) return null;
+    if (input.restoreDeleted === true) delete data.deletedChatIds[chatId];
     const record = normalizeRecord(chatId, input, data.chats[chatId]);
     data.chats[chatId] = record;
     writeDirectory(data, filePath);
@@ -76,6 +92,8 @@ function getAllChats(filePath = FILE_PATH) {
 }
 
 function isChatEligible(chatId, feature = null, filePath = FILE_PATH) {
+    const id = normalizeChatId(chatId);
+    if (id && readDirectory(filePath).deletedChatIds[id]) return false;
     const record = getChat(chatId, filePath);
     if (!record) return true;
     if (record.status !== "active") return false;
@@ -87,11 +105,26 @@ function updateChat(chatId, changes = {}, filePath = FILE_PATH) {
     const id = normalizeChatId(chatId);
     if (!id) return null;
     const data = readDirectory(filePath);
+    if (data.deletedChatIds[id] && changes.restoreDeleted !== true) return null;
+    if (changes.restoreDeleted === true) delete data.deletedChatIds[id];
     const existing = data.chats[id] || normalizeRecord(id, {}, {});
     const record = normalizeRecord(id, changes, existing);
     data.chats[id] = record;
     writeDirectory(data, filePath);
     return record;
+}
+
+function removeChat(chatId, hard = false, filePath = FILE_PATH) {
+    const id = normalizeChatId(chatId);
+    if (!id) return null;
+    if (!hard) return setChatStatus(id, "removed", "admin", "admin_removed", filePath);
+    const data = readDirectory(filePath);
+    const existing = data.chats[id] || null;
+    if (!existing) return null;
+    delete data.chats[id];
+    data.deletedChatIds[id] = { deletedAt: nowIso(), deletedBy: "admin" };
+    writeDirectory(data, filePath);
+    return existing;
 }
 
 function classifyChatError(error) {
@@ -174,6 +207,8 @@ module.exports = {
     classifyChatError,
     getAllChats,
     getChat,
+    normalizeChatType,
+    removeChat,
     isChatEligible,
     readDirectory,
     recordDeliveryFailure,

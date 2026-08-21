@@ -37,6 +37,12 @@ All endpoints below require the HttpOnly `zalobot_admin` session cookie except l
 | `GET /zalobot/api/admin/notifications` | Active schedule/duty registrations and duty schedule data |
 | `GET /zalobot/api/admin/audit` | Recent administrative and authentication events |
 | `GET /zalobot/api/admin/logs` | Bot warnings/errors, delivery errors, and audit events |
+| `POST /zalobot/api/admin/chats` | Add or update a chat-directory record |
+| `DELETE /zalobot/api/admin/chats/:chatId` | Soft-remove by default; `?hard=1` permanently deletes the record |
+| `GET /zalobot/api/admin/settings` | List configured admin user/chat identities |
+| `POST /zalobot/api/admin/settings/admins` | Add or update an admin identity |
+| `DELETE /zalobot/api/admin/settings/admins?id=...` | Remove an admin identity |
+| `POST /zalobot/api/admin/commands` | Execute an existing bot command with a configured admin context |
 
 State-changing requests require same-origin `Origin` headers when a browser supplies one. The server also applies security headers, request-size limits, and a basic IP rate limit.
 
@@ -64,6 +70,8 @@ location /zalobot/ {
 ```
 
 The trailing slash on both `location /zalobot/` and `proxy_pass .../zalobot/` preserves the application base path and prevents `/zalobot/zalobot` or missing-prefix requests. The dashboard currently uses HTTP polling and does not require WebSocket proxy headers.
+
+Older `unknown` chat types are enriched from the existing interaction registry. New inbound messages persist `private`/`group`, latest `userId`, chat title, and display name in `chatDirectory`. Command execution remains protected by the existing owner check and requires a user/chat identity from `adminSettings` or `OWNER_USER_ID`/`OWNER_CHAT_ID`.
 
 ## Deployment checklist
 

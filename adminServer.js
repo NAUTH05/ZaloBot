@@ -6,9 +6,14 @@ const { URL } = require("url");
 const {
     getAllChats,
     getChat,
+    isChatEligible,
+    removeChat,
     setChatStatus,
-    setFeatureOverride
+    setFeatureOverride,
+    upsertChat
 } = require("./chatDirectory");
+const { getInteractionTargets } = require("./interactionRegistry");
+const { getAdminSettings, removeAdmin, upsertAdmin } = require("./adminSettings");
 const { getAllSubscriptions, getEnabledSubscriptions } = require("./subscriptions");
 const { getDutySubscriptions, readDutyData } = require("./dutyScheduleStore");
 const { readJsonStore, writeJsonStore } = require("./firestorePersistence");
@@ -162,8 +167,27 @@ function publicChat(chat) {
     return safeChat;
 }
 
+function enrichedChats() {
+    const interactions = getInteractionTargets();
+    const byChat = new Map(interactions.map((item) => [String(item.chatId), item]));
+    return getAllChats().map((chat) => {
+        const interaction = byChat.get(String(chat.chatId));
+        if (!interaction) return chat;
+        const changes = {
+            chatType: chat.chatType === "unknown" ? interaction.chatType : chat.chatType,
+            displayName: chat.displayName || interaction.chatTitle || interaction.lastUserDisplayName,
+            chatTitle: chat.chatTitle || interaction.chatTitle,
+            userId: chat.userId || interaction.lastUserId,
+            firstInteractionAt: chat.firstInteractionAt || interaction.firstInteractionAt,
+            lastInboundInteractionAt: chat.lastInboundInteractionAt || interaction.lastInteractionAt
+        };
+        const changed = Object.entries(changes).some(([key, value]) => value != null && value !== "" && chat[key] !== value);
+        return changed ? upsertChat({ chatId: chat.chatId, ...changes }) : chat;
+    });
+}
+
 function dashboardSummary() {
-    const chats = getAllChats();
+    const chats = enrichedChats();
     const subscriptions = Object.values(getEnabledSubscriptions());
     const duty = getDutySubscriptions();
     return {
@@ -199,7 +223,7 @@ function subscriptionsForChat(chatId) {
 }
 
 function detailForChat(chatId) {
-    const chat = getChat(chatId);
+    const chat = enrichedChats().find((item) => String(item.chatId) === String(chatId)) || getChat(chatId);
     if (!chat) return null;
     return {
         chat: publicChat(chat),
@@ -247,14 +271,24 @@ async function handleApi(request, response, url, options = {}) {
     if (url.pathname === `${BASE_PATH}/api/admin/chats` && request.method === "GET") {
         const filter = String(url.searchParams.get("status") || "all");
         const type = String(url.searchParams.get("type") || "all");
-        const chats = getAllChats().filter((chat) => (filter === "all" || chat.status === filter) && (type === "all" || chat.chatType === type)).map(publicChat);
+        const chats = enrichedChats().filter((chat) => (filter === "all" || chat.status === filter) && (type === "all" || chat.chatType === type)).map(publicChat);
         return json(response, 200, { chats });
     }
+    if (url.pathname === `${BASE_PATH}/api/admin/chats` && request.method === "POST") {
+        let body;
+        try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
+        try {
+            const result = upsertChat({ restoreDeleted: true, chatId: body.chatId, chatType: body.chatType, displayName: body.displayName, chatTitle: body.chatTitle, userId: body.userId, status: body.status || "active" });
+            if (!result) return json(response, 400, { error: "chatId is required" });
+            audit("chat.create", request, { chatId: result.chatId, result: "success" });
+            return json(response, 201, { chat: publicChat(result) });
+        } catch (error) { return json(response, 400, { error: error.message }); }
+    }
     if (url.pathname === `${BASE_PATH}/api/admin/users` && request.method === "GET") {
-        return json(response, 200, { users: getAllChats().filter((chat) => chat.chatType === "private").map(publicChat) });
+        return json(response, 200, { users: enrichedChats().filter((chat) => chat.chatType === "private").map(publicChat) });
     }
     if (url.pathname === `${BASE_PATH}/api/admin/groups` && request.method === "GET") {
-        return json(response, 200, { groups: getAllChats().filter((chat) => chat.chatType === "group").map(publicChat) });
+        return json(response, 200, { groups: enrichedChats().filter((chat) => chat.chatType === "group").map(publicChat) });
     }
     const chatMatch = url.pathname.match(new RegExp(`^${BASE_PATH.replace("/", "\\/")}/api/admin/chats/([^/]+)$`));
     if (chatMatch && request.method === "GET") {
@@ -269,13 +303,24 @@ async function handleApi(request, response, url, options = {}) {
             let result;
             if (body.action === "status") result = setChatStatus(chatId, body.status, request.admin.username, body.reason || "admin_action");
             else if (body.action === "feature") result = setFeatureOverride(chatId, body.feature, body.enabled == null ? null : body.enabled);
+            else if (body.action === "metadata") result = upsertChat({ chatId, chatType: body.chatType, displayName: body.displayName, chatTitle: body.chatTitle, userId: body.userId });
             else return json(response, 400, { error: "Unsupported action" });
+            if (!result) return json(response, 404, { error: "Chat not found or permanently deleted" });
             audit(`chat.${body.action}`, request, { chatId, result: "success", metadata: body });
             return json(response, 200, { chat: publicChat(result) });
         } catch (error) {
             audit(`chat.${body.action || "update"}`, request, { chatId, result: "failed", error: error.message });
             return json(response, 400, { error: error.message });
         }
+    }
+    if (chatMatch && request.method === "DELETE") {
+        let body = {};
+        try { body = await readBody(request); } catch (_) {}
+        const chatId = decodeURIComponent(chatMatch[1]);
+        const result = removeChat(chatId, body.hard === true || url.searchParams.get("hard") === "1");
+        if (!result) return json(response, 404, { error: "Chat not found" });
+        audit("chat.delete", request, { chatId, hard: body.hard === true || url.searchParams.get("hard") === "1", result: "success" });
+        return json(response, 200, { ok: true, chat: publicChat(result) });
     }
     const retryMatch = url.pathname.match(new RegExp(`^${BASE_PATH.replace("/", "\\/")}/api/admin/chats/([^/]+)/retry$`));
     if (retryMatch && request.method === "POST") {
@@ -288,10 +333,37 @@ async function handleApi(request, response, url, options = {}) {
     }
     if (url.pathname === `${BASE_PATH}/api/admin/notifications` && request.method === "GET") {
         return json(response, 200, {
-            schedule: Object.values(getEnabledSubscriptions()),
-            duty: getDutySubscriptions(),
+            schedule: Object.values(getEnabledSubscriptions()).filter((item) => isChatEligible(item.chatId, "schedule")),
+            duty: getDutySubscriptions().filter((item) => isChatEligible(item.chatId, "duty")),
             dutySchedules: readDutyData().schedules || []
         });
+    }
+    if (url.pathname === `${BASE_PATH}/api/admin/settings` && request.method === "GET") return json(response, 200, getAdminSettings());
+    if (url.pathname === `${BASE_PATH}/api/admin/settings/admins` && ["POST", "PATCH"].includes(request.method)) {
+        let body;
+        try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
+        try { const admin = upsertAdmin(body); audit("settings.admin_upsert", request, { result: "success", userId: admin.userId, chatId: admin.chatId }); return json(response, 200, { admin }); }
+        catch (error) { return json(response, 400, { error: error.message }); }
+    }
+    if (url.pathname === `${BASE_PATH}/api/admin/settings/admins` && request.method === "DELETE") {
+        const id = String(url.searchParams.get("id") || "");
+        const admin = removeAdmin(id);
+        if (!admin) return json(response, 404, { error: "Admin setting not found" });
+        audit("settings.admin_remove", request, { result: "success", id });
+        return json(response, 200, { ok: true, admin });
+    }
+    if (url.pathname === `${BASE_PATH}/api/admin/commands` && request.method === "POST") {
+        if (typeof options.executeCommand !== "function") return json(response, 503, { error: "Command service unavailable" });
+        let body;
+        try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
+        try {
+            const result = await options.executeCommand({ command: body.command, userId: body.userId, chatId: body.chatId, displayName: body.displayName });
+            audit("command.execute", request, { result: "success", command: body.command, userId: body.userId, chatId: body.chatId });
+            return json(response, 200, result);
+        } catch (error) {
+            audit("command.execute", request, { result: "failed", command: body.command, error: error.message });
+            return json(response, 400, { error: error.message });
+        }
     }
     if (url.pathname === `${BASE_PATH}/api/admin/audit` && request.method === "GET") return json(response, 200, { events: recentAudit(100) });
     if (url.pathname === `${BASE_PATH}/api/admin/logs` && request.method === "GET") {

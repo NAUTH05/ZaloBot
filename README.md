@@ -92,7 +92,7 @@ Ngày lịch được xác định bằng policy theo cửa sổ thời gian: th
 
 ## Firestore
 
-Bot dùng Firebase Admin SDK để đọc/ghi state trong Firestore collection `bot_state`, với mỗi file JSON cũ tương ứng một document: `subscriptions`, `interactions`, `scheduleSnapshots`, `dutyScheduleData`, `birthdayData`, `accessControl`, `chatDirectory`, `adminAudit`, `adminLogs`.
+Bot dùng Firebase Admin SDK để đọc/ghi state trong Firestore collection `bot_state`, với mỗi file JSON cũ tương ứng một document: `subscriptions`, `interactions`, `scheduleSnapshots`, `dutyScheduleData`, `birthdayData`, `accessControl`, `chatDirectory`, `adminAudit`, `adminLogs`, `adminSettings`.
 
 `chatDirectory` là cổng kiểm soát chung cho mọi tác vụ gửi. Lỗi vĩnh viễn `EZALO 410 The chat_id is invalid` làm chat chuyển ngay sang `inactive`; lỗi tạm thời chỉ chuyển trạng thái sau số lần liên tiếp cấu hình bởi `CHAT_MAX_CONSECUTIVE_FAILURES` (mặc định `3`). Dữ liệu cũ được giữ để admin xem và kích hoạt lại.
 
@@ -115,6 +115,10 @@ location /zalobot/ {
 ```
 
 Keep the existing `location /lythuyet` block unchanged. The dashboard does not use WebSockets; if live push is added later, preserve the existing Upgrade and Connection headers.
+
+Dashboard có phần **Add or update chat** để bổ sung/sửa `chatId`, `userId`, tên và loại `private`/`group`. Bản ghi cũ có type `unknown` được tự bổ sung từ sổ tương tác nếu bot đã từng nhận tin từ chat đó. Xóa thông thường là xóa mềm; xóa vĩnh viễn cần xác nhận riêng.
+
+Phần **Admin identities** lưu `userId`/`chatId` quản trị trong Firestore store `adminSettings` và gộp chúng với `OWNER_USER_ID`/`OWNER_CHAT_ID`. **Command console** gọi trực tiếp `handleCommand` hiện có, nên có thể thực thi các lệnh bot bằng một admin context đã được cấp quyền mà không nhân đôi business logic.
 
 Trên VPS, cấu hình `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL` và `FIREBASE_PRIVATE_KEY` trong `.env`. Trong `FIREBASE_PRIVATE_KEY`, các dòng PEM được nối bằng chuỗi `\n`. `FIREBASE_SERVICE_ACCOUNT_PATH` chỉ là phương án dự phòng tùy chọn. Chạy migration một lần:
 
