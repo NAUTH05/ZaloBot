@@ -1,6 +1,6 @@
 const crypto = require("crypto");
 const path = require("path");
-const { getApiDateTimeInfo, getVietnamDateInfo } = require("./timezone");
+const { getApiDateTimeInfo, getVietnamDateInfo, getVietnamWeekdayForDateKey } = require("./timezone");
 const { escapeMarkdown } = require("./richText");
 const { readJsonStore, writeJsonStore } = require("./firestorePersistence");
 
@@ -254,6 +254,12 @@ function formatDateKey(dateKey) {
     return day ? `${day}/${month}/${year}` : "Chưa rõ ngày";
 }
 
+function formatDateKeyWithWeekday(dateKey) {
+    const formattedDate = formatDateKey(dateKey);
+    const weekday = getVietnamWeekdayForDateKey(dateKey);
+    return weekday ? `${weekday}, ${formattedDate}` : formattedDate;
+}
+
 function formatLocation(lesson) {
     return [lesson.room, lesson.campus].filter(Boolean).join(" - ") || "Chưa xác định";
 }
@@ -261,7 +267,7 @@ function formatLocation(lesson) {
 function formatCompactLesson(lesson, index) {
     return [
         `**${index + 1}. ${escapeMarkdown(lesson.subject || "Chưa rõ môn")}**`,
-        `> **Ngày:** ${formatDateKey(lesson.dateKey)}`,
+        `> **Ngày:** ${formatDateKeyWithWeekday(lesson.dateKey)}`,
         `> **Giờ:** ${escapeMarkdown(lesson.start || "?")} – ${escapeMarkdown(lesson.end || "?")}`,
         `> **Phòng:** ${escapeMarkdown(formatLocation(lesson))}`,
         lesson.teacher ? `> **Giảng viên:** ${escapeMarkdown(lesson.teacher)}` : "",
@@ -280,10 +286,17 @@ function formatModifiedLesson(change, index) {
     const title = before.subject === after.subject
         ? after.subject
         : "Thay đổi môn học";
-    const details = [`**${index + 1}. ${escapeMarkdown(title || "Buổi học")}**`];
+    const currentSchedule = [
+        formatDateKeyWithWeekday(after.dateKey),
+        after.start && after.end ? `${after.start} – ${after.end}` : after.start || after.end
+    ].filter(Boolean).join(" · ");
+    const details = [
+        `**${index + 1}. ${escapeMarkdown(title || "Buổi học")}**`,
+        `> **Lịch hiện tại:** ${escapeMarkdown(currentSchedule)}`
+    ];
 
     if (before.dateKey !== after.dateKey) {
-        details.push(changedLine("Ngày", formatDateKey(before.dateKey), formatDateKey(after.dateKey)));
+        details.push(changedLine("Ngày", formatDateKeyWithWeekday(before.dateKey), formatDateKeyWithWeekday(after.dateKey)));
     }
     if (before.start !== after.start || before.end !== after.end) {
         details.push(changedLine(
@@ -327,7 +340,7 @@ function formatScheduleChangeMessage(scheduleData, changes, date = new Date()) {
     const sections = [
         "# {orange}[!] LỊCH HỌC CÓ THAY ĐỔI{/orange}",
         `**Sinh viên:** ${escapeMarkdown(scheduleData.studentName || "Sinh viên")}  •  **MSSV:** ${escapeMarkdown(scheduleData.studentId)}`,
-        `**Xác nhận:** ${now.formattedDate} lúc ${now.hour}:${now.minute}`,
+        `**Xác nhận:** ${now.weekday}, ${now.formattedDate} lúc ${now.hour}:${now.minute}`,
         `{orange}Tổng cộng ${totalChanges} thay đổi đã được xác nhận{/orange}`
     ];
 

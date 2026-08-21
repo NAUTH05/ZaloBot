@@ -45,6 +45,14 @@ function formatDateKey(dateKey) {
     return `${day}/${month}/${year}`;
 }
 
+function getVietnamWeekdayForDateKey(dateKey) {
+    const normalized = String(dateKey || "").trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) return "";
+    const date = new Date(`${normalized}T00:00:00.000Z`);
+    if (Number.isNaN(date.getTime())) return "";
+    return new Intl.DateTimeFormat("vi-VN", { timeZone: "UTC", weekday: "long" }).format(date);
+}
+
 function getVietnamWeekInfo(date = new Date()) {
     const current = getVietnamDateInfo(date);
     const calendarDate = new Date(`${current.dateKey}T00:00:00.000Z`);
@@ -102,6 +110,7 @@ function getApiDateTimeInfo(value) {
         minute,
         second,
         dateKey: `${year}-${month}-${day}`,
+        weekday: getVietnamWeekdayForDateKey(`${year}-${month}-${day}`),
         formattedDate: `${day}/${month}/${year}`,
         formattedDateTime: `${hour}:${minute}:${second} ${day}/${month}/${year}`
     };
@@ -117,6 +126,7 @@ module.exports = {
     TIME_ZONE,
     getApiDateTimeInfo,
     getVietnamDateInfo,
+    getVietnamWeekdayForDateKey,
     getVietnamWeekInfo,
     toLhuQueryDate
 };

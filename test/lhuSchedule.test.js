@@ -186,6 +186,7 @@ test("định dạng lịch thi và danh sách phòng trống", () => {
 
     const examMsg = formatExamSchedule(examData);
     assert.match(examMsg, /\[LỊCH THI\] DANH SÁCH MÔN THI/);
+    assert.match(examMsg, /Thứ Năm, 20\/08\/2026/);
     assert.match(examMsg, /Cơ sở dữ liệu/);
 
     const emptyRoomsMsg = findEmptyRooms("Cơ sở I", { lessons: [] }, new Date("2026-08-17T00:00:00Z"));

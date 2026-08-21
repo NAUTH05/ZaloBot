@@ -324,7 +324,9 @@ function formatExamSchedule(examData) {
     const items = exams.map((lesson, index) => {
         const start = getApiDateTimeInfo(lesson.ThoiGianBD);
         const end = getApiDateTimeInfo(lesson.ThoiGianKT);
-        const dateStr = start ? start.formattedDate : "Chưa rõ ngày";
+        const dateStr = start
+            ? `${start.weekday ? `${start.weekday}, ` : ""}${start.formattedDate}`
+            : "Chưa rõ ngày";
         const timeStr = start && end ? `${start.hour}:${start.minute} - ${end.hour}:${end.minute}` : "Chưa rõ giờ";
         const location = [lesson.TenPhong, lesson.TenCoSo].filter(Boolean).join(" - ") || "Chưa xếp phòng";
 
