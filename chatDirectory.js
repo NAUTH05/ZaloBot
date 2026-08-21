@@ -109,11 +109,14 @@ function classifyChatError(error) {
 
 function recordDeliverySuccess(chatId, filePath = FILE_PATH) {
     const current = getChat(chatId, filePath);
+    const history = Array.isArray(current?.deliveryHistory) ? current.deliveryHistory.slice(-49) : [];
+    history.push({ result: "success", at: nowIso() });
     return updateChat(chatId, {
         status: current?.status || "active",
         consecutiveFailureCount: 0,
         lastSuccessfulDeliveryAt: nowIso(),
-        lastRecoveredAt: current?.lastError ? nowIso() : current?.lastRecoveredAt
+        lastRecoveredAt: current?.lastError ? nowIso() : current?.lastRecoveredAt,
+        deliveryHistory: history
     }, filePath);
 }
 
@@ -123,20 +126,25 @@ function recordDeliveryFailure(chatId, error, metadata = {}, filePath = FILE_PAT
     const count = (Number(current?.consecutiveFailureCount) || 0) + 1;
     const shouldSuspend = classification.permanent || (classification.kind === "transient" && count >= (metadata.maxConsecutiveFailures || 3));
     const preserveManualStatus = current?.status === "disabled" || current?.status === "removed";
+    const at = nowIso();
+    const errorRecord = {
+        code: error?.code || null,
+        status: classification.status,
+        message: String(error?.message || error || "Unknown error"),
+        feature: metadata.feature || null,
+        operation: metadata.operation || null,
+        at
+    };
+    const history = Array.isArray(current?.deliveryHistory) ? current.deliveryHistory.slice(-49) : [];
+    history.push({ result: "failed", ...errorRecord });
     return updateChat(chatId, {
         status: shouldSuspend && !preserveManualStatus ? "inactive" : (current?.status || "active"),
         statusReason: shouldSuspend && !preserveManualStatus ? (classification.kind === "permanent_invalid" ? "chat_id_invalid" : classification.kind === "permanent_forbidden" ? "chat_forbidden" : "consecutive_failures") : current?.statusReason,
-        statusChangedAt: shouldSuspend && !preserveManualStatus ? nowIso() : current?.statusChangedAt,
+        statusChangedAt: shouldSuspend && !preserveManualStatus ? at : current?.statusChangedAt,
         statusChangedBy: shouldSuspend && !preserveManualStatus ? "system" : current?.statusChangedBy,
         consecutiveFailureCount: count,
-        lastError: {
-            code: error?.code || null,
-            status: classification.status,
-            message: String(error?.message || error || "Unknown error"),
-            feature: metadata.feature || null,
-            operation: metadata.operation || null,
-            at: nowIso()
-        }
+        lastError: errorRecord,
+        deliveryHistory: history
     }, filePath);
 }
 

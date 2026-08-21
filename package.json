@@ -6,6 +6,7 @@
   "main": "main.js",
   "scripts": {
     "start": "node main.js",
+    "admin:hash-password": "node hashAdminPassword.js",
     "migrate:firestore": "node migrateToFirestore.js recent_json",
     "test": "node --test --test-force-exit"
   },

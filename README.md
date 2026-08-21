@@ -92,9 +92,29 @@ Ngày lịch được xác định bằng policy theo cửa sổ thời gian: th
 
 ## Firestore
 
-Bot dùng Firebase Admin SDK để đọc/ghi state trong Firestore collection `bot_state`, với mỗi file JSON cũ tương ứng một document: `subscriptions`, `interactions`, `scheduleSnapshots`, `dutyScheduleData`, `birthdayData`, `accessControl`, `chatDirectory`.
+Bot dùng Firebase Admin SDK để đọc/ghi state trong Firestore collection `bot_state`, với mỗi file JSON cũ tương ứng một document: `subscriptions`, `interactions`, `scheduleSnapshots`, `dutyScheduleData`, `birthdayData`, `accessControl`, `chatDirectory`, `adminAudit`, `adminLogs`.
 
 `chatDirectory` là cổng kiểm soát chung cho mọi tác vụ gửi. Lỗi vĩnh viễn `EZALO 410 The chat_id is invalid` làm chat chuyển ngay sang `inactive`; lỗi tạm thời chỉ chuyển trạng thái sau số lần liên tiếp cấu hình bởi `CHAT_MAX_CONSECUTIVE_FAILURES` (mặc định `3`). Dữ liệu cũ được giữ để admin xem và kích hoạt lại.
+
+## Admin Dashboard
+
+The owner dashboard is served by the bot at `/zalobot` on `127.0.0.1:${ADMIN_PORT}` (default `6003`). Set `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `ADMIN_PORT`, and `ADMIN_BASE_PATH` in `.env`. It uses an HttpOnly Secure session cookie and exposes only authenticated `/zalobot/api/admin/*` endpoints.
+
+For CloudPanel/Nginx, proxy the subpath without adding it twice:
+
+```nginx
+location = /zalobot { return 301 /zalobot/; }
+location /zalobot/ {
+    proxy_pass http://127.0.0.1:6003/zalobot/;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+Keep the existing `location /lythuyet` block unchanged. The dashboard does not use WebSockets; if live push is added later, preserve the existing Upgrade and Connection headers.
 
 Trên VPS, cấu hình `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL` và `FIREBASE_PRIVATE_KEY` trong `.env`. Trong `FIREBASE_PRIVATE_KEY`, các dòng PEM được nối bằng chuỗi `\n`. `FIREBASE_SERVICE_ACCOUNT_PATH` chỉ là phương án dự phòng tùy chọn. Chạy migration một lần:
 

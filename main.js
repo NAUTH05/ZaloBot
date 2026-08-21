@@ -65,6 +65,8 @@ const {
 } = require("./accessControl");
 const { askScheduleAi } = require("./aiAssistant");
 const { flushPersistenceWrites, initializeFirestorePersistence } = require("./firestorePersistence");
+const { createAdminServer } = require("./adminServer");
+const { recordSystemLog } = require("./operationalLog");
 const {
     addQuestion,
     answerQuestion,
@@ -102,6 +104,9 @@ if (!process.env.BOT_TOKEN) {
 const bot = new ZaloBot(process.env.BOT_TOKEN, { polling: false });
 
 function logDiscord(level, message) {
+    if (level === "ERROR" || level === "WARN") {
+        try { recordSystemLog(level, message); } catch (_) { /* Logging must not interrupt bot work. */ }
+    }
     const webhookUrl = process.env.DISCORD_WEBHOOK;
     if (!webhookUrl) return;
 
@@ -1660,6 +1665,8 @@ async function startRuntime() {
     await initializeFirestorePersistence({
         storeIds: [
             "accessControl",
+            "adminAudit",
+            "adminLogs",
             "birthdayData",
             "chatDirectory",
             "dutyScheduleData",
@@ -1669,6 +1676,18 @@ async function startRuntime() {
         ]
     });
     if (syncChatDirectoryFromLegacyStores() > 0) await flushPersistenceWrites();
+    const adminRuntime = createAdminServer({
+        retryChat: async (chatId) => sendNotification(
+            chatId,
+            "[ADMIN TEST] ZaloBot đang kiểm tra khả năng gửi thông báo tới cuộc trò chuyện này.",
+            { feature: "broadcast", operation: "admin_dashboard_retry", bypassEligibility: true }
+        )
+    });
+    await new Promise((resolve, reject) => {
+        adminRuntime.server.once("error", reject);
+        adminRuntime.server.listen(adminRuntime.port, "127.0.0.1", resolve);
+    });
+    console.log(`Admin dashboard listening on http://127.0.0.1:${adminRuntime.port}${adminRuntime.basePath}`);
     // Chỉ bật scheduler sau khi state Firestore đã được hydrate vào bộ nhớ.
     schedule.scheduleJob({ rule: "*/15 * * * *", tz: TIME_ZONE }, asyncCommand(async () => {
         await checkAndNotifyScheduleChanges();

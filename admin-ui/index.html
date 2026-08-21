@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <base href="/zalobot/" />
+  <title>ZaloBot Admin</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">Z</span><div><strong>ZaloBot</strong><small>Operations console</small></div></div>
+      <div class="top-actions"><span id="healthPill" class="pill">Checking health</span><button id="logoutButton" class="ghost">Sign out</button></div>
+    </header>
+    <main class="shell">
+      <section id="loginView" class="login-view hidden">
+        <div class="login-panel"><p class="eyebrow">Private administration</p><h1>Sign in to ZaloBot</h1><p class="muted">Manage delivery health, users, groups, and operational history.</p><form id="loginForm"><label>Username<input name="username" autocomplete="username" required /></label><label>Password<input name="password" type="password" autocomplete="current-password" required /></label><button class="primary" type="submit">Continue</button><p id="loginError" class="error"></p></form></div>
+      </section>
+      <section id="dashboardView" class="hidden">
+        <div class="page-heading"><div><p class="eyebrow">System overview</p><h1>Delivery control center</h1><p class="muted">A live view of the chats and notifications your bot can reach.</p></div><button id="refreshButton" class="secondary">Refresh data</button></div>
+        <div id="metricGrid" class="metric-grid"></div>
+        <div class="content-grid">
+          <section class="panel wide"><div class="panel-heading"><div><h2>Chat directory</h2><p class="muted">Review active, invalid, disabled, and removed destinations.</p></div><div class="filters"><select id="statusFilter"><option value="all">All statuses</option><option value="active">Active</option><option value="inactive">Inactive</option><option value="disabled">Disabled</option><option value="removed">Removed</option></select><select id="typeFilter"><option value="all">All types</option><option value="private">Users</option><option value="group">Groups</option></select></div></div><div class="table-wrap"><table><thead><tr><th>Chat</th><th>Type</th><th>Status</th><th>Last success</th><th>Latest error</th><th></th></tr></thead><tbody id="chatRows"></tbody></table></div></section>
+          <section class="panel"><div class="panel-heading"><div><h2>Recent errors</h2><p class="muted">The latest delivery failures recorded by the bot.</p></div></div><div id="errorList" class="stack"></div></section>
+          <section class="panel"><div class="panel-heading"><div><h2>Admin activity</h2><p class="muted">Recent authentication and management actions.</p></div></div><div id="auditList" class="stack"></div></section>
+          <section class="panel wide"><div class="panel-heading"><div><h2>Notification schedule</h2><p class="muted">Enabled study and duty notification destinations.</p></div></div><div id="notificationList" class="stack"></div></section>
+        </div>
+      </section>
+    </main>
+  </div>
+  <dialog id="detailDialog"><div class="dialog-head"><div><p class="eyebrow">Chat record</p><h2 id="dialogTitle">Details</h2></div><button id="closeDialog" class="icon-button" aria-label="Close">×</button></div><div id="dialogBody"></div></dialog>
+  <script src="./app.js"></script>
+</body>
+</html>

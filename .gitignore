@@ -19,3 +19,5 @@ firebase-service-account.json
 recent_json/
 .npm-cache/
 *.log
+adminAudit.json
+adminLogs.json
