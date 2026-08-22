@@ -1660,6 +1660,26 @@ async function sendDailyDutyNotificationAtSix(date = new Date()) {
     return result;
 }
 
+function registerRuntimeJobs(scheduler = schedule) {
+    scheduler.scheduleJob({ rule: "*/15 * * * *", tz: TIME_ZONE }, asyncCommand(async () => {
+        await checkAndNotifyScheduleChanges();
+        await flushPersistenceWrites();
+    }));
+    scheduler.scheduleJob({ rule: "* * * * *", tz: TIME_ZONE }, asyncCommand(async () => {
+        const result = await sendScheduledDailySchedules();
+        if (result.processed) await flushPersistenceWrites();
+    }));
+    // Lịch trực phòng 411 có mốc cố định 06:00, độc lập với các giờ nhận lịch học.
+    scheduler.scheduleJob({ rule: "0 6 * * *", tz: TIME_ZONE }, asyncCommand(async () => {
+        await sendDailyDutyNotificationAtSix();
+        await flushPersistenceWrites();
+    }));
+    scheduler.scheduleJob({ rule: "5 0 27 8 *", tz: TIME_ZONE }, asyncCommand(async () => {
+        await sendBirthdayInvitations();
+        await flushPersistenceWrites();
+    }));
+}
+
 async function startRuntime() {
     await initializeFirestorePersistence({
         storeIds: [
@@ -1698,18 +1718,7 @@ async function startRuntime() {
     });
     console.log(`Admin dashboard listening on http://127.0.0.1:${adminRuntime.port}${adminRuntime.basePath}`);
     // Chỉ bật scheduler sau khi state Firestore đã được hydrate vào bộ nhớ.
-    schedule.scheduleJob({ rule: "*/15 * * * *", tz: TIME_ZONE }, asyncCommand(async () => {
-        await checkAndNotifyScheduleChanges();
-        await flushPersistenceWrites();
-    }));
-    schedule.scheduleJob({ rule: "* * * * *", tz: TIME_ZONE }, asyncCommand(async () => {
-        const result = await sendScheduledDailySchedules();
-        if (result.processed) await flushPersistenceWrites();
-    }));
-    schedule.scheduleJob({ rule: "5 0 27 8 *", tz: TIME_ZONE }, asyncCommand(async () => {
-        await sendBirthdayInvitations();
-        await flushPersistenceWrites();
-    }));
+    registerRuntimeJobs();
     await bot.startPolling();
     console.log(`Bot đã khởi động. Tự động kiểm tra thay đổi lịch mỗi 15 phút và gửi lịch theo giờ đăng ký (${TIME_ZONE}).`);
     logDiscord("INFO", `Bot đã khởi động - timezone ${TIME_ZONE}`);
@@ -1814,6 +1823,7 @@ module.exports = {
     parseCommand,
     parseQuestionIdAndText,
     publishBirthdayResults,
+    registerRuntimeJobs,
     sendBirthdayInvitations,
     sendBotAnnouncement,
     sendDailyDutyNotificationAtSix,
