@@ -152,11 +152,11 @@ test("định dạng tin nhắn thông báo 06:00 và danh sách lịch trực r
 
     const notifMsg = formatDutyNotification(items, new Date("2026-08-18T06:00:00+07:00"));
     assert.match(notifMsg, /LỊCH TRỰC/);
-    assert.match(notifMsg, /HÔM NAY 18\/08/);
+    assert.match(notifMsg, /HÔM NAY · 18\/08/);
     assert.match(notifMsg, /Nguyễn Văn A - Trần Thị B/);
 
     const listMsg = formatDutyList(items);
-    assert.match(listMsg, /DANH SÁCH PHÂN CÔNG/);
+    assert.match(listMsg, /1 PHÂN CÔNG/);
     assert.match(listMsg, /#1/);
     assert.match(listMsg, /Nguyễn Văn A - Trần Thị B/);
 });

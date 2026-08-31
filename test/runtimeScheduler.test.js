@@ -19,4 +19,9 @@ test("scheduler đăng ký gửi lịch trực phòng 411 lúc 06:00 giờ Việ
     assert.ok(dutyJob, "thiếu job gửi lịch trực 411 lúc 06:00");
     assert.equal(dutyJob.config.tz, "Asia/Ho_Chi_Minh");
     assert.equal(typeof dutyJob.handler, "function");
+
+    const minuteJob = jobs.find(({ config }) => config.rule === "* * * * *");
+    assert.ok(minuteJob, "thiếu scheduler trung tâm chạy mỗi phút");
+    assert.equal(minuteJob.config.tz, "Asia/Ho_Chi_Minh");
+    assert.equal(typeof minuteJob.handler, "function");
 });

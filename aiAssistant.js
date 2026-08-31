@@ -48,9 +48,9 @@ function formatScheduleContextForAi(scheduleData, date = new Date(), numWeeks = 
         if (Number(lesson.CalenType) === 2) statusStr = "Lịch thi";
 
         daysMap.get(info.dateKey).lessons.push({
-            subject: lesson.TenMonHoc || "Chưa rõ môn",
+            subject: lesson.TenMonHoc || "Môn học chưa cập nhật",
             time: `${info.hour}:${info.minute} - ${endInfo?.hour || "?"}:${endInfo?.minute || "?"}`,
-            room: [lesson.TenPhong, lesson.TenCoSo].filter(Boolean).join(" - ") || "Chưa xếp phòng",
+            room: [lesson.TenPhong, lesson.TenCoSo].filter(Boolean).join(" - ") || "Chưa có thông tin phòng học",
             teacher: lesson.GiaoVien || "",
             status: statusStr
         });

@@ -287,22 +287,20 @@ function formatDutyNotification(dutyItems, date = new Date()) {
     const lines = dutyItems.map((item) => `> **[${escapeMarkdown(item.dateStr)}]** **[${escapeMarkdown(item.assigned)}]**`);
 
     return [
-        `# {green}[LỊCH TRỰC NHẬT PHÒNG 411] HÔM NAY ${headerDate}{/green}`,
+        `# {green}[LỊCH TRỰC PHÒNG 411] HÔM NAY · ${headerDate}{/green}`,
         "",
-        "📋 **Phân công trực nhật phòng 411 hôm nay:**",
+        "**Phân công:**",
         lines.join("\n"),
         "",
-        "{orange}Chúc các bạn một ngày làm việc và học tập vui vẻ!{/orange}"
+        "Chúc bạn một ngày học tập hiệu quả!"
     ].join("\n");
 }
 
 function formatDutyList(dutyItems) {
     if (!dutyItems || dutyItems.length === 0) {
         return (
-            "# {orange}[LỊCH TRỰC NHẬT PHÒNG 411] DANH SÁCH TRỐNG{/orange}\n\n" +
-            "> Hiện tại chưa có lịch trực nhật phòng 411 nào được phân công.\n\n" +
-            "**Thêm lịch trực nhật mới:**\n" +
-            "- `/themlichtruc [dd/mm] [Name 1 - Name 2]`"
+            "# {orange}[LỊCH TRỰC PHÒNG 411]{/orange}\n\n" +
+            "Chưa có phân công trực nhật nào."
         );
     }
 
@@ -311,14 +309,9 @@ function formatDutyList(dutyItems) {
     });
 
     return [
-        `# {green}[LỊCH TRỰC NHẬT PHÒNG 411] DANH SÁCH PHÂN CÔNG (${dutyItems.length}){/green}`,
+        `# {green}[LỊCH TRỰC PHÒNG 411] ${dutyItems.length} PHÂN CÔNG{/green}`,
         "",
-        rows.join("\n\n"),
-        "",
-        "**Thao tác Admin:**",
-        "- `/themlichtruc [dd/mm] [Name 1 - Name 2]`",
-        "- `/sualichtruc [ID/Ngày] [Nội dung mới]`",
-        "- `/xoalichtruc [ID/Ngày]`"
+        rows.join("\n\n")
     ].join("\n");
 }
 

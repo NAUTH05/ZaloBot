@@ -10,9 +10,14 @@ const { escapeMarkdown } = require("./richText");
 const API_URL = "https://tapi.lhu.edu.vn/calen/auth/XemLich_LichSinhVien";
 const PAGE_SIZE = 100;
 const MAX_PAGES = 50;
+const ACTIVE_LESSON_STATUSES = new Set([0, 4, 5, 10]);
+
+function text(value) {
+    return value == null ? "" : String(value).trim();
+}
 
 class LhuApiError extends Error {
-    constructor(message, userMessage = message, statusCode = null) {
+    constructor(message, userMessage = null, statusCode = null) {
         super(message);
         this.name = "LhuApiError";
         this.userMessage = userMessage;
@@ -73,7 +78,7 @@ function postJson(urlString, body) {
                     const apiMessage = parsed.Message || parsed.message;
                     reject(new LhuApiError(
                         apiMessage || `API LHU trả mã ${response.statusCode}`,
-                        apiMessage || "Không thể truy vấn lịch từ LHU.",
+                        "Không thể lấy lịch học lúc này. Hệ thống LHU có thể đang tạm thời không phản hồi. Bạn thử lại sau ít phút nhé.",
                         response.statusCode
                     ));
                     return;
@@ -86,7 +91,10 @@ function postJson(urlString, body) {
         request.on("error", (error) => {
             reject(error instanceof LhuApiError
                 ? error
-                : new LhuApiError(error.message, "Không kết nối được tới hệ thống lịch LHU."));
+                : new LhuApiError(
+                    error.message,
+                    "Không thể kết nối với hệ thống lịch LHU lúc này. Bạn thử lại sau ít phút nhé."
+                ));
         });
         request.write(payload);
         request.end();
@@ -168,12 +176,64 @@ function lessonsForWeek(lessons, date = new Date()) {
         });
 }
 
+function normalizeLesson(lesson = {}) {
+    const start = getApiDateTimeInfo(lesson.ThoiGianBD);
+    const end = getApiDateTimeInfo(lesson.ThoiGianKT);
+    const statusCode = Number(lesson.TinhTrang || 0);
+    const calendarType = Number(lesson.CalenType || 1);
+    const groupId = text(lesson.NhomID);
+    const id = text(lesson.ID);
+    const subject = text(lesson.TenMonHoc);
+    const group = text(lesson.TenNhom);
+    const isExam = calendarType === 2;
+    const isHoliday = statusCode === 6;
+    const isCancelled = !ACTIVE_LESSON_STATUSES.has(statusCode);
+    const statusLabel = isHoliday
+        ? "NGHỈ LỄ"
+        : isCancelled
+            ? "BÁO NGHỈ"
+            : isExam
+                ? "LỊCH THI"
+                : "";
+    const lessonTypeCode = lesson.Type == null ? null : Number(lesson.Type);
+    const type = isExam
+        ? "Thi"
+        : lessonTypeCode === 0
+            ? "Lý thuyết"
+            : lessonTypeCode === 1
+                ? "Thực hành"
+                : "";
+
+    return {
+        raw: lesson,
+        id,
+        groupId,
+        identity: groupId || [subject, group].filter(Boolean).join("|") || id,
+        subject,
+        start,
+        end,
+        dateKey: start?.dateKey || "",
+        startTime: start ? `${start.hour}:${start.minute}` : "",
+        endTime: end ? `${end.hour}:${end.minute}` : "",
+        room: text(lesson.TenPhong),
+        campus: text(lesson.TenCoSo),
+        teacher: text(lesson.GiaoVien),
+        group,
+        type,
+        lessonTypeCode,
+        statusCode,
+        statusLabel,
+        calendarType,
+        isExam,
+        isHoliday,
+        isCancelled,
+        isNormal: !isExam && !isCancelled,
+        onlineLink: text(lesson.OnlineLink)
+    };
+}
+
 function lessonStatus(lesson) {
-    const status = Number(lesson.TinhTrang || 0);
-    if (status === 6) return "NGHỈ LỄ";
-    if (![0, 4, 5, 10].includes(status)) return "BÁO NGHỈ";
-    if (Number(lesson.CalenType) === 2) return "LỊCH THI";
-    return "";
+    return normalizeLesson(lesson).statusLabel;
 }
 
 function vietnamDateTimeKey(info) {
@@ -181,9 +241,10 @@ function vietnamDateTimeKey(info) {
 }
 
 function isLessonActive(lesson, referenceDate = new Date()) {
-    if (lessonStatus(lesson) || Number(lesson.CalenType) === 2) return false;
-    const start = getApiDateTimeInfo(lesson.ThoiGianBD);
-    const end = getApiDateTimeInfo(lesson.ThoiGianKT);
+    const normalized = normalizeLesson(lesson);
+    if (!normalized.isNormal) return false;
+    const start = normalized.start;
+    const end = normalized.end;
     const current = getVietnamDateInfo(referenceDate);
     const currentKey = vietnamDateTimeKey(current);
     const startKey = vietnamDateTimeKey(start);
@@ -191,27 +252,59 @@ function isLessonActive(lesson, referenceDate = new Date()) {
     return Boolean(startKey && endKey && startKey <= currentKey && currentKey < endKey);
 }
 
-function formatLesson(lesson, index, options = {}) {
-    const start = getApiDateTimeInfo(lesson.ThoiGianBD);
-    const end = getApiDateTimeInfo(lesson.ThoiGianKT);
-    const time = start && end ? `${start.hour}:${start.minute} - ${end.hour}:${end.minute}` : "Chưa rõ giờ";
-    const status = lessonStatus(lesson);
-    const activeMarker = isLessonActive(lesson, options.referenceDate || new Date()) ? "[ĐANG HỌC] " : "";
-    const type = Number(lesson.Type) === 0 ? "Lý thuyết" : "Thực hành";
-    const location = [lesson.TenPhong, lesson.TenCoSo].filter(Boolean).join(" - ");
-
-    const statusColor = status === "BÁO NGHỈ" ? "orange" : status === "LỊCH THI" ? "orange" : "green";
-    const lines = [
-        `**${index + 1}. ${activeMarker}${escapeMarkdown(time)} · ${escapeMarkdown(lesson.TenMonHoc || "Chưa rõ môn")}**`
-    ];
-    if (status) lines.push(`> **Trạng thái:** {${statusColor}}[${escapeMarkdown(status)}]{/${statusColor}}`);
-    if (location) lines.push(`> **Phòng:** ${escapeMarkdown(location)}`);
-    if (lesson.GiaoVien) lines.push(`> **Giảng viên:** ${escapeMarkdown(lesson.GiaoVien)}`);
-    if (lesson.TenNhom) lines.push(`> **Nhóm:** ${escapeMarkdown(lesson.TenNhom)}`);
-    if (Number(lesson.CalenType) !== 2) lines.push(`> **Hình thức:** ${escapeMarkdown(type)}`);
-    if (lesson.OnlineLink && [0, 4, 5, 10].includes(Number(lesson.TinhTrang || 0))) {
-        lines.push(`> **Online:** ${escapeMarkdown(lesson.OnlineLink)}`);
+function formatLessonDetails(lesson, options = {}) {
+    const normalized = lesson?.raw ? lesson : normalizeLesson(lesson);
+    const lines = [];
+    if (options.includeTime) {
+        const time = normalized.startTime && normalized.endTime
+            ? `${normalized.startTime} - ${normalized.endTime}`
+            : normalized.startTime;
+        if (time) lines.push(`> **Thời gian:** ${escapeMarkdown(time)}`);
     }
+    if (options.showStatus !== false && normalized.statusLabel) {
+        lines.push(`> **Trạng thái:** {orange}[${escapeMarkdown(normalized.statusLabel)}]{/orange}`);
+    }
+    if (normalized.room) {
+        const location = [normalized.room, normalized.campus].filter(Boolean).join(" - ");
+        lines.push(`> **Phòng:** ${escapeMarkdown(location)}`);
+    } else if (normalized.campus) {
+        lines.push(`> **Cơ sở:** ${escapeMarkdown(normalized.campus)}`);
+    }
+    if (options.showTeacher !== false && normalized.teacher) {
+        lines.push(`> **Giảng viên:** ${escapeMarkdown(normalized.teacher)}`);
+    }
+    if (options.showGroup !== false && normalized.group) {
+        lines.push(`> **Nhóm:** ${escapeMarkdown(normalized.group)}`);
+    }
+    if (options.showType !== false && normalized.type) {
+        lines.push(`> **Hình thức:** ${escapeMarkdown(normalized.type)}`);
+    }
+    if (options.showOnlineLink !== false && normalized.onlineLink) {
+        lines.push(`> **Trực tuyến:** ${escapeMarkdown(normalized.onlineLink)}`);
+    }
+    return lines;
+}
+
+function formatLesson(lesson, index, options = {}) {
+    const normalized = lesson?.raw ? lesson : normalizeLesson(lesson);
+    const numericIndex = Number.isInteger(index) ? index : 0;
+    const subject = normalized.subject || (normalized.isExam ? "Môn thi" : "Buổi học");
+    if (options.layout === "notification") {
+        const prefix = options.numbered ? `${numericIndex + 1}. ` : "";
+        return [
+            `**${prefix}${escapeMarkdown(subject)}**`,
+            ...formatLessonDetails(normalized, { ...options, includeTime: true, showStatus: false })
+        ].join("\n");
+    }
+
+    const time = normalized.startTime && normalized.endTime
+        ? `${normalized.startTime} - ${normalized.endTime}`
+        : normalized.startTime || "Thời gian chưa cập nhật";
+    const activeMarker = isLessonActive(normalized.raw, options.referenceDate || new Date()) ? "[ĐANG HỌC] " : "";
+    const lines = [
+        `**${numericIndex + 1}. ${activeMarker}${escapeMarkdown(time)} · ${escapeMarkdown(subject)}**`,
+        ...formatLessonDetails(normalized, options)
+    ];
     return lines.join("\n");
 }
 
@@ -219,21 +312,24 @@ function formatDailySchedule(scheduleData, date = new Date(), options = {}) {
     const dateInfo = getVietnamDateInfo(date);
     const referenceDateInfo = getVietnamDateInfo(options.referenceDate || date);
     const referenceDate = options.referenceDate || date;
-    const dayLabel = dateInfo.dateKey === referenceDateInfo.dateKey ? "HÔM NAY" : "NGÀY MAI";
+    const isToday = dateInfo.dateKey === referenceDateInfo.dateKey;
+    const targetSerial = Date.parse(`${dateInfo.dateKey}T00:00:00.000Z`);
+    const referenceSerial = Date.parse(`${referenceDateInfo.dateKey}T00:00:00.000Z`);
+    const isTomorrow = targetSerial - referenceSerial === 24 * 60 * 60 * 1000;
+    const dayMarker = isToday ? " · [HÔM NAY]" : isTomorrow ? " · [NGÀY MAI]" : "";
     const lessons = lessonsForDate(scheduleData.lessons || [], date);
     const studentName = escapeMarkdown(scheduleData.studentName || "Sinh viên");
     const studentId = escapeMarkdown(scheduleData.studentId);
     const header = [
-        `# {green}[LỊCH] ${dayLabel}{/green}`,
-        `**Sinh viên:** ${studentName}`,
-        `> **MSSV:** ${studentId}`,
-        `> **Ngày:** ${escapeMarkdown(dateInfo.weekday)}, ${dateInfo.formattedDate}`
+        `# {green}[NGÀY] ${escapeMarkdown(dateInfo.weekday.toUpperCase())} · ${dateInfo.formattedDate}${dayMarker}{/green}`,
+        `**Lịch học của ${studentName}**`,
+        `> **MSSV:** ${studentId}`
     ].join("\n");
 
     if (lessons.length === 0) {
-        return `${header}\n\n{green}[i] ${dayLabel === "HÔM NAY" ? "Hôm nay" : "Ngày mai"} không có lịch học.{/green}`;
+        return `${header}\n\n## {green}${isToday ? "HÔM NAY" : isTomorrow ? "NGÀY MAI" : "NGÀY NÀY"} KHÔNG CÓ LỊCH HỌC{/green}`;
     }
-    return `${header}\n\n## {orange}[${lessons.length} BUỔI HỌC]{/orange}\n${lessons.map((lesson, index) => formatLesson(lesson, index, { referenceDate })).join("\n\n────────────\n\n")}`;
+    return `${header}\n\n## {orange}${lessons.length} BUỔI HỌC{/orange}\n${lessons.map((lesson, index) => formatLesson(lesson, index, { referenceDate })).join("\n\n────────────\n\n")}`;
 }
 
 function formatWeeklySchedule(scheduleData, date = new Date(), options = {}) {
@@ -244,7 +340,7 @@ function formatWeeklySchedule(scheduleData, date = new Date(), options = {}) {
     const studentName = escapeMarkdown(scheduleData.studentName || "Sinh viên");
     const studentId = escapeMarkdown(scheduleData.studentId);
     const header = [
-        "# {green}[LỊCH] TUẦN NÀY{/green}",
+        "# {green}[LỊCH HỌC] TUẦN NÀY{/green}",
         `**Sinh viên:** ${studentName}`,
         `> **MSSV:** ${studentId}`,
         `> **Tuần:** ${week.formattedStartDate} – ${week.formattedEndDate}`,
@@ -252,7 +348,7 @@ function formatWeeklySchedule(scheduleData, date = new Date(), options = {}) {
     ].join("\n");
 
     if (lessons.length === 0) {
-        return `${header}\n\n{green}[i] Tuần này không có lịch học.{/green}`;
+        return `${header}\n\n## {green}TUẦN NÀY KHÔNG CÓ LỊCH HỌC{/green}`;
     }
 
     const sections = week.days.map((day) => {
@@ -331,32 +427,33 @@ function formatExamSchedule(examData) {
     const studentId = escapeMarkdown(examData.studentId);
 
     const header = [
-        "# {orange}[LỊCH THI] DANH SÁCH MÔN THI{/orange}",
+        "# {orange}[LỊCH THI]{/orange}",
         `**Sinh viên:** ${studentName}`,
         `> **MSSV:** ${studentId}`,
-        `{green}Tổng cộng ${exams.length} ca thi{/green}`
+        `> **Tổng cộng:** ${exams.length} ca thi`
     ].join("\n");
 
     if (exams.length === 0) {
-        return `${header}\n\n{green}[i] Không có lịch thi trong học kỳ này.{/green}`;
+        return `${header}\n\n## {green}CHƯA CÓ LỊCH THI TRONG HỌC KỲ NÀY{/green}`;
     }
 
     const items = exams.map((lesson, index) => {
-        const start = getApiDateTimeInfo(lesson.ThoiGianBD);
-        const end = getApiDateTimeInfo(lesson.ThoiGianKT);
-        const dateStr = start
-            ? `${start.weekday ? `${start.weekday}, ` : ""}${start.formattedDate}`
-            : "Chưa rõ ngày";
-        const timeStr = start && end ? `${start.hour}:${start.minute} - ${end.hour}:${end.minute}` : "Chưa rõ giờ";
-        const location = [lesson.TenPhong, lesson.TenCoSo].filter(Boolean).join(" - ") || "Chưa xếp phòng";
+        const normalized = normalizeLesson(lesson);
+        const dateStr = normalized.start
+            ? `${normalized.start.weekday ? `${normalized.start.weekday}, ` : ""}${normalized.start.formattedDate}`
+            : "Ngày chưa cập nhật";
+        const timeStr = normalized.startTime && normalized.endTime
+            ? `${normalized.startTime} - ${normalized.endTime}`
+            : normalized.startTime || "Chưa cập nhật";
+        const location = [normalized.room, normalized.campus].filter(Boolean).join(" - ");
 
         return [
-            `**${index + 1}. ${escapeMarkdown(lesson.TenMonHoc || "Môn thi")}**`,
+            `**${index + 1}. ${escapeMarkdown(normalized.subject || "Môn thi")}**`,
             `> **Ngày thi:** ${escapeMarkdown(dateStr)}`,
-            `> **Giờ thi:** ${escapeMarkdown(timeStr)}`,
-            `> **Phòng thi:** ${escapeMarkdown(location)}`,
-            lesson.TenNhom ? `> **Nhóm/Lớp:** ${escapeMarkdown(lesson.TenNhom)}` : "",
-            `> **Hình thức:** {orange}[LỊCH THI]{/orange}`
+            `> **Thời gian:** ${escapeMarkdown(timeStr)}`,
+            location ? `> **Phòng:** ${escapeMarkdown(location)}` : "",
+            normalized.group ? `> **Nhóm:** ${escapeMarkdown(normalized.group)}` : "",
+            `> **Hình thức:** Thi`
         ].filter(Boolean).join("\n");
     });
 
@@ -376,7 +473,7 @@ function formatTeacherSchedule(scheduleData, date = new Date()) {
     ].join("\n");
 
     if (lessons.length === 0) {
-        return `${header}\n\n{green}[i] Tuần này giảng viên không có lịch dạy.{/green}`;
+        return `${header}\n\n## {green}TUẦN NÀY KHÔNG CÓ LỊCH DẠY{/green}`;
     }
 
     const sections = week.days.map((day) => {
@@ -386,16 +483,17 @@ function formatTeacherSchedule(scheduleData, date = new Date()) {
         if (dayLessons.length === 0) return null;
 
         const formatted = dayLessons.map((lesson, idx) => {
-            const start = getApiDateTimeInfo(lesson.ThoiGianBD);
-            const end = getApiDateTimeInfo(lesson.ThoiGianKT);
-            const time = start && end ? `${start.hour}:${start.minute} - ${end.hour}:${end.minute}` : "Chưa rõ giờ";
-            const location = [lesson.TenPhong, lesson.TenCoSo].filter(Boolean).join(" - ");
+            const normalized = normalizeLesson(lesson);
+            const time = normalized.startTime && normalized.endTime
+                ? `${normalized.startTime} - ${normalized.endTime}`
+                : normalized.startTime || "Thời gian chưa cập nhật";
+            const location = [normalized.room, normalized.campus].filter(Boolean).join(" - ");
 
             return [
-                `**${idx + 1}. ${escapeMarkdown(time)} · ${escapeMarkdown(lesson.TenMonHoc || "Lớp học")}**`,
-                `> **Nhóm/Lớp:** ${escapeMarkdown(lesson.TenNhom || "Chưa rõ")}`,
-                `> **Phòng:** ${escapeMarkdown(location || "Chưa rõ")}`
-            ].join("\n");
+                `**${idx + 1}. ${escapeMarkdown(time)} · ${escapeMarkdown(normalized.subject || "Buổi dạy")}**`,
+                normalized.group ? `> **Nhóm:** ${escapeMarkdown(normalized.group)}` : "",
+                location ? `> **Phòng:** ${escapeMarkdown(location)}` : ""
+            ].filter(Boolean).join("\n");
         }).join("\n\n────────────\n\n");
 
         return `# {orange}[NGÀY] ${escapeMarkdown(day.weekday.toUpperCase())} · ${day.formattedDate}{/orange}\n${formatted}`;
@@ -426,8 +524,8 @@ function findEmptyRooms(campusInput, scheduleData, date = new Date()) {
 > **Ngày:** ${dateInfo.weekday}, ${dateInfo.formattedDate}
 > **Các phòng đang sử dụng ca học (${occupiedRooms.size}):** ${[...occupiedRooms].map(escapeMarkdown).join(", ") || "Không có"}
 
-## {orange}DANH SÁCH PHÒNG TRỐNG GỢI Ý CÓ THỂ TỰ HỌC / HỌP NHÓM:{/orange}
-${freeRooms.length > 0 ? freeRooms.map((r) => `- **Phòng ${escapeMarkdown(r)}**`).join("\n") : "_Không tìm thấy phòng trống khả dụng_"}`;
+## {orange}PHÒNG TRỐNG GỢI Ý{/orange}
+${freeRooms.length > 0 ? freeRooms.map((r) => `- **Phòng ${escapeMarkdown(r)}**`).join("\n") : "Chưa tìm thấy phòng trống phù hợp."}`;
 }
 
 module.exports = {
@@ -440,11 +538,14 @@ module.exports = {
     formatDailySchedule,
     formatExamSchedule,
     formatLesson,
+    formatLessonDetails,
     formatTeacherSchedule,
     formatWeeklySchedule,
     isLessonActive,
+    lessonStatus,
     lessonsForDate,
     lessonsForWeek,
+    normalizeLesson,
     normalizeStudentId,
     resolveStudentIdForCommand,
     searchTeacherByName

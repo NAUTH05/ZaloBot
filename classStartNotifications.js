@@ -1,7 +1,7 @@
 const crypto = require("crypto");
 const path = require("path");
 const { getApiDateTimeInfo, getVietnamDateInfo } = require("./timezone");
-const { escapeMarkdown } = require("./richText");
+const { formatLesson, normalizeLesson } = require("./lhuSchedule");
 const { readJsonStore, writeJsonStore } = require("./firestorePersistence");
 
 const FILE_PATH = path.join(__dirname, "classStartNotifications.json");
@@ -9,14 +9,13 @@ const STATE_SCHEMA_VERSION = 1;
 const DEFAULT_GRACE_PERIOD_MS = 2 * 60 * 1000;
 const DEFAULT_CACHE_TTL_MS = 5 * 60 * 1000;
 const EVENT_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
-const ACTIVE_CLASS_STATUSES = new Set([0, 4, 5, 10]);
 
 function text(value) {
     return value == null ? "" : String(value).trim();
 }
 
 function isClassStartReminderLesson(lesson) {
-    return Number(lesson?.CalenType || 1) !== 2 && ACTIVE_CLASS_STATUSES.has(Number(lesson?.TinhTrang || 0));
+    return normalizeLesson(lesson).isNormal;
 }
 
 function vietnamSerial(info) {
@@ -43,13 +42,16 @@ function findDueClassStartLessons(lessons, evaluationAt = new Date(), gracePerio
 }
 
 function createLessonEventKey(studentId, lesson) {
-    const start = getApiDateTimeInfo(lesson?.ThoiGianBD);
+    const normalized = normalizeLesson(lesson);
+    const start = normalized.start;
     if (!start) return null;
-    const stableLessonIdentity = text(lesson?.NhomID) || [
-        text(lesson?.TenMonHoc),
-        text(lesson?.TenPhong),
-        text(lesson?.TenNhom)
-    ].join("|");
+    const stableLessonIdentity = normalized.id || normalized.groupId || [
+        normalized.subject,
+        normalized.room,
+        normalized.group,
+        normalized.teacher
+    ].filter(Boolean).join("|");
+    if (!stableLessonIdentity) return null;
     return [text(studentId), start.dateKey, `${start.hour}:${start.minute}`, stableLessonIdentity].join("|");
 }
 
@@ -59,13 +61,31 @@ function createDeliveryEventId(subscriptionKey, studentId, lesson) {
     return crypto.createHash("sha256").update(`${subscriptionKey}|${lessonEventKey}`).digest("hex");
 }
 
-function formatClassStartNotification(lesson) {
-    const location = [lesson?.TenPhong, lesson?.TenCoSo].filter(Boolean).join(" - ");
+function formatClassStartNotification(lessonsInput) {
+    const lessons = (Array.isArray(lessonsInput) ? lessonsInput : [lessonsInput]).filter(Boolean);
+    const numbered = lessons.length > 1;
+    const lessonBlocks = lessons.map((lesson, index) => formatLesson(lesson, index, {
+        layout: "notification",
+        numbered
+    }));
     return [
-        "# {green}[NHẮC GIỜ] ĐẾN GIỜ HỌC RỒI BẠN ƠI{/green}",
-        lesson?.TenMonHoc ? `**${escapeMarkdown(lesson.TenMonHoc)}**` : "",
-        location ? `> **Phòng:** ${escapeMarkdown(location)}` : ""
+        "# {green}[ĐẾN GIỜ HỌC]{/green}",
+        lessonBlocks.join("\n\n────────────\n\n"),
+        "Chúc bạn học tốt!"
     ].filter(Boolean).join("\n\n");
+}
+
+function groupDueLessonsByStart(lessons) {
+    const groups = new Map();
+    for (const lesson of lessons || []) {
+        const normalized = normalizeLesson(lesson);
+        if (!normalized.start) continue;
+        const key = `${normalized.start.dateKey}T${normalized.startTime}`;
+        const group = groups.get(key) || [];
+        group.push(lesson);
+        groups.set(key, group);
+    }
+    return [...groups.values()];
 }
 
 function emptyState() {
@@ -163,10 +183,11 @@ function createClassStartReminderService(options) {
     }
 
     const cache = new Map();
+    const effectiveCacheTtlMs = Math.min(cacheTtlMs, Math.max(1000, Math.floor(gracePeriodMs / 2)), 60 * 1000);
     let running = false;
 
     async function fetchForBucket(studentId, evaluationAt) {
-        const bucket = Math.floor(evaluationAt.getTime() / cacheTtlMs);
+        const bucket = Math.floor(evaluationAt.getTime() / effectiveCacheTtlMs);
         const cached = cache.get(studentId);
         if (cached?.bucket === bucket) return cached.scheduleData;
         const scheduleData = await fetchSchedule(studentId, evaluationAt);
@@ -176,11 +197,11 @@ function createClassStartReminderService(options) {
 
     async function run(evaluationAt = new Date()) {
         const grouped = groupSubscriptionsByStudent(getSubscriptions(), isEligible);
-        if (grouped.size === 0) return { processed: false, students: 0, sent: 0, failed: 0, duplicates: 0 };
-        if (running) return { processed: false, students: grouped.size, sent: 0, failed: 0, duplicates: 0 };
+        if (grouped.size === 0) return { processed: false, students: 0, sent: 0, lessons: 0, failed: 0, duplicates: 0 };
+        if (running) return { processed: false, students: grouped.size, sent: 0, lessons: 0, failed: 0, duplicates: 0 };
 
         running = true;
-        const result = { processed: true, students: grouped.size, sent: 0, failed: 0, duplicates: 0 };
+        const result = { processed: true, students: grouped.size, sent: 0, lessons: 0, failed: 0, duplicates: 0 };
         try {
             for (const [studentId, targets] of grouped.entries()) {
                 try {
@@ -191,42 +212,55 @@ function createClassStartReminderService(options) {
                     // Confirm once more at delivery time so a moved or cancelled lesson is never sent from stale cache.
                     const confirmedSchedule = await fetchSchedule(studentId, evaluationAt);
                     cache.set(studentId, {
-                        bucket: Math.floor(evaluationAt.getTime() / cacheTtlMs),
+                        bucket: Math.floor(evaluationAt.getTime() / effectiveCacheTtlMs),
                         scheduleData: confirmedSchedule
                     });
-                    const dueLessons = findDueClassStartLessons(confirmedSchedule.lessons, evaluationAt, gracePeriodMs);
+                    const dueLessonGroups = groupDueLessonsByStart(
+                        findDueClassStartLessons(confirmedSchedule.lessons, evaluationAt, gracePeriodMs)
+                    );
 
                     for (const { subscriptionKey, subscription } of targets) {
                         const currentSubscription = getSubscriptions()[subscriptionKey];
                         if (!currentSubscription || currentSubscription.studentId !== subscription.studentId ||
                             !isEligible(currentSubscription)) continue;
-                        for (const lesson of dueLessons) {
-                            const eventId = claimDelivery({
-                                subscriptionKey,
-                                subscription: currentSubscription,
-                                lesson,
-                                now: evaluationAt,
-                                filePath: stateFilePath
-                            });
-                            if (!eventId) {
-                                result.duplicates += 1;
-                                continue;
+                        for (const dueLessons of dueLessonGroups) {
+                            const claimed = [];
+                            for (const lesson of dueLessons) {
+                                const eventId = claimDelivery({
+                                    subscriptionKey,
+                                    subscription: currentSubscription,
+                                    lesson,
+                                    now: evaluationAt,
+                                    filePath: stateFilePath
+                                });
+                                if (!eventId) {
+                                    result.duplicates += 1;
+                                    continue;
+                                }
+                                claimed.push({ eventId, lesson });
                             }
+                            if (claimed.length === 0) continue;
 
                             await flushPersistence();
                             let delivery;
                             try {
-                                delivery = await sendReminder(currentSubscription, formatClassStartNotification(lesson), lesson);
+                                const claimedLessons = claimed.map((item) => item.lesson);
+                                delivery = await sendReminder(
+                                    currentSubscription,
+                                    formatClassStartNotification(claimedLessons),
+                                    claimedLessons
+                                );
                             } catch (error) {
                                 delivery = { failed: true, error };
                             }
 
                             if (delivery == null || delivery === true || delivery.sent === true) {
-                                markDelivered(eventId, new Date(), stateFilePath);
+                                for (const item of claimed) markDelivered(item.eventId, new Date(), stateFilePath);
                                 result.sent += 1;
+                                result.lessons += claimed.length;
                             } else {
                                 onError({ stage: "delivery", error: delivery.error || new Error("Reminder delivery failed") });
-                                releaseDelivery(eventId, stateFilePath);
+                                for (const item of claimed) releaseDelivery(item.eventId, stateFilePath);
                                 result.failed += 1;
                             }
                             await flushPersistence();
@@ -256,6 +290,7 @@ module.exports = {
     createLessonEventKey,
     findDueClassStartLessons,
     formatClassStartNotification,
+    groupDueLessonsByStart,
     isClassStartReminderLesson,
     readState
 };

@@ -17,12 +17,17 @@ test("ba nhóm help tách đúng lệnh thường, trực nhật và admin", asy
     assert.match(code, /command === "helpadmin"/);
     assert.match(code, /command === "helpadmin"[\s\S]*?requireOwner\(context\)/);
     assert.match(general, /\/start/);
-    assert.match(general, /\/find 123456789/);
+    const publicCommands = [
+        "start", "find", "lich", "lichtuan", "lichthi", "lichgv", "phongtrong", "ai",
+        "dangky", "danhsachdangky", "suadangky", "xoadangky", "huythongbao",
+        "batnhaclich", "tatnhaclich", "trangthainhaclich", "sinhnhat", "lichtruc",
+        "danhsachlichtruc", "dangkylich", "huydangkylich", "time", "myid", "help411", "help"
+    ];
+    for (const command of publicCommands) assert.match(general, new RegExp(`\\/${command}\\b`));
     assert.match(general, /\/batnhaclich/);
     assert.match(general, /\/tatnhaclich/);
     assert.match(general, /\/trangthainhaclich/);
     assert.doesNotMatch(general, /blockbot|themlichtruc|helpadmin/);
-    assert.doesNotMatch(general, /help411/);
     assert.match(duty, /\/lichtruc/);
     assert.match(duty, /\/dangkylich/);
     assert.doesNotMatch(duty, /help411/);
@@ -34,7 +39,8 @@ test("ba nhóm help tách đúng lệnh thường, trực nhật và admin", asy
     assert.match(formatBirthdayInvitation(2026), /21 tuổi/);
     assert.match(formatBirthdayInvitation(2026), /bạn muốn/);
     assert.match(formatBirthdayResults(2026, [{ id: 1, text: "Bạn hỏi gì?", answer: "Câu trả lời" }]), /21 tuổi/);
-    assert.match(general, /_\(Ví dụ:/);
+    assert.match(formatBirthdayResults(2026, [{ id: 1, text: "Bạn hỏi gì?", answer: "Dòng một\nDòng hai" }]), /Dòng một\nDòng hai/);
+    assert.doesNotMatch(general, /_\(Ví dụ:|implementation|scheduler|Firestore/i);
     assert.deepEqual(parseCommand("/help411"), { command: "help411", argument: "" });
     assert.deepEqual(parseCommand("/helpadmin"), { command: "helpadmin", argument: "" });
     assert.equal(suggestCommandCorrection("dangky0800"), "/dangky 08:00");

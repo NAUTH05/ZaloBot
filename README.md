@@ -35,43 +35,30 @@ Các bản ghi `subscriptions.json` theo schema cũ chỉ có `chat.id` sẽ kh�
 
 ## Lệnh bot
 
-- `/find [MSSV]`: kiểm tra và lưu MSSV, không tự bật thông báo.
-- `/dangky [MSSV]`: bật thông báo bằng MSSV truyền trực tiếp; mặc định nhận lịch lúc 06:00.
-- `/dangky`: đăng ký bằng MSSV đã lưu qua `/find`, giữ nguyên giờ đã chọn.
-- `/dangky hh:mm`: thêm một giờ nhận lịch theo giờ Việt Nam (ví dụ `/dangky 05:30`).
-- `/dangky [MSSV] hh:mm`: lưu MSSV và thêm một giờ tùy chọn trong cùng lệnh.
-- `/danhsachdangky`: xem danh sách giờ đã đăng ký (ví dụ `/danhsachdangky`).
-- `/suadangky #ID hh:mm`: sửa giờ theo ID (ví dụ `/suadangky #1 20:00`).
-- `/xoadangky #ID`: xóa giờ theo ID (ví dụ `/xoadangky #1`).
-- `/lich [MSSV]`: xem lịch học hôm nay.
-- `/lich`: xem lịch của MSSV đã lưu.
-- `/lichtuan [MSSV]`: xem lịch từ Thứ Hai đến Chủ nhật của tuần hiện tại.
-- `/lichtuan`: xem lịch tuần của MSSV đã lưu.
-- `/huythongbao`: tắt thông báo lịch học và cảnh báo thay đổi, vẫn giữ MSSV.
-- `/batnhaclich`: bật thông báo ngắn ngay khi từng buổi học LHU bắt đầu; dùng MSSV đã lưu.
-- `/tatnhaclich`: tắt riêng nhắc giờ bắt đầu buổi học, không ảnh hưởng `/dangky`.
-- `/trangthainhaclich`: xem trạng thái nhắc giờ bắt đầu buổi học của user trong chat hiện tại.
-- `/time`: kiểm tra giờ Việt Nam mà bot đang dùng.
-- `/myid`: xem User ID và Chat ID của người gửi.
+- `/find [MSSV]`: kiểm tra và lưu MSSV cho người dùng trong cuộc trò chuyện hiện tại; không tự bật thông báo.
+- `/lich [MSSV]`: xem lịch học hôm nay. Bỏ MSSV để dùng mã đã lưu.
+- `/lichtuan [MSSV]`: xem lịch học từ Thứ Hai đến Chủ nhật. Bỏ MSSV để dùng mã đã lưu.
+- `/lichthi [MSSV]`: xem lịch thi trong học kỳ.
+- `/lichgv [Tên giảng viên]`: xem lịch dạy của giảng viên.
+- `/phongtrong [Cơ sở]`: xem gợi ý phòng trống hôm nay.
+- `/ai [Câu hỏi]`: hỏi trợ lý AI về lịch học đã lưu.
+- `/dangky [hh:mm]`: bật nhận lịch học tự động vào giờ Việt Nam đã chọn; mặc định `06:00`.
+- `/dangky [MSSV] [hh:mm]`: lưu MSSV và bật giờ nhận lịch trong cùng lệnh.
+- `/danhsachdangky`: xem các giờ nhận lịch hiện có.
+- `/suadangky #ID hh:mm`: sửa một giờ nhận lịch.
+- `/xoadangky #ID`: xóa một giờ nhận lịch; nếu hết giờ, nhận lịch tự động sẽ tắt.
+- `/huythongbao`: tắt nhận lịch học tự động và cảnh báo thay đổi, vẫn giữ MSSV.
+- `/batnhaclich`: bật nhắc giờ học kèm đầy đủ môn, thời gian, phòng/cơ sở, giảng viên, nhóm, hình thức và link trực tuyến nếu có.
+- `/tatnhaclich`: tắt riêng nhắc giờ học, không ảnh hưởng `/dangky`.
+- `/trangthainhaclich`: xem trạng thái nhắc giờ học của người dùng trong cuộc trò chuyện hiện tại.
+- `/lichtruc`, `/danhsachlichtruc`: xem lịch trực nhật phòng 411.
+- `/dangkylich`, `/huydangkylich`: bật hoặc tắt thông báo lịch trực lúc `06:00`.
 - `/sinhnhat [câu hỏi]`: gửi câu hỏi trong ngày 27/08.
-- `/lichtruc`: xem phân công lịch trực nhật phòng 411 hôm nay.
-- `/themlichtruc [dd/mm] [Name 1 - Name 2]`: chủ BOT thêm một hoặc nhiều phân công lịch trực nhật phòng 411 (mỗi lịch một dòng).
-- `/sualichtruc [ID/Ngày] [Nội dung mới]`: chủ BOT sửa phân công lịch trực nhật phòng 411.
-- `/xoalichtruc [ID/Ngày]`: chủ BOT xóa phân công lịch trực nhật phòng 411.
-- `/danhsachlichtruc`: chủ BOT xem danh sách lịch trực nhật phòng 411 đã phân công.
-- `/danhsach [năm]`: chủ BOT xem danh sách câu hỏi; mặc định là năm hiện tại.
-- `/them [câu hỏi]`: chủ BOT thêm câu hỏi thủ công.
-- `/sua [ID] [câu hỏi mới]`: chủ BOT sửa nội dung câu hỏi.
-- `/xoa [ID]`: chủ BOT xóa câu hỏi không phù hợp.
-- `/traloi [ID] [câu trả lời]`: chủ BOT ghi hoặc cập nhật câu trả lời; phần trả lời có thể xuống dòng.
-- `/congbo [năm]`: gửi toàn bộ câu đã trả lời tới mọi user/nhóm từng tương tác với bot.
-- `/thongbao [nội dung]`: chủ BOT gửi thông báo cập nhật tới mọi user/nhóm từng tương tác với bot.
-- `/quanlychat [bộ lọc] [trang]`: chủ BOT xem trạng thái user/nhóm (`active`, `inactive`, `disabled`, `removed`).
-- `/thongtinch [Chat ID]`: xem lần tương tác, lần gửi thành công và lỗi gần nhất của chat.
-- `/vohieuchat`, `/kichhoatchat`, `/thuchatchat`, `/xoachat`: tắt, kích hoạt, gửi thử hoặc xóa mềm một chat.
-- `/chatfeature [Chat ID] [schedule|duty|birthday|broadcast] [on|off|auto]`: quản lý quyền nhận theo từng loại thông báo.
-- `/help`: xem các lệnh thông thường và ví dụ.
-- `/helpadmin`: chủ BOT xem toàn bộ lệnh, gồm cả lệnh quản trị.
+- `/time`, `/myid`: xem giờ Việt Nam hoặc ID của tài khoản/chat.
+- `/help`, `/help411`: xem hướng dẫn lệnh thường hoặc lịch trực.
+- `/helpadmin`: chủ bot xem các lệnh quản trị.
+
+Các lệnh quản trị hiện có vẫn được giữ nguyên: quản lý phân quyền, chat, lịch trực, hỏi đáp sinh nhật, thông báo chung và kiểm tra gửi. Xem `/helpadmin` để có danh sách theo nhóm.
 
 
 Chạy kiểm thử bằng `npm test`.
@@ -87,11 +74,13 @@ Quy trình dành cho chủ BOT:
 3. Dùng `/sua`, `/xoa` hoặc `/them` nếu cần làm sạch danh sách.
 4. Dùng `/congbo` sau khi hoàn tất. Chỉ các câu đã có đáp án được gửi đi.
 
-Bot ghi nhận dấu gửi theo nội dung. Chạy lại `/congbo` mà không thay đổi dữ liệu sẽ không gửi trùng; nếu câu hỏi hoặc đáp án đã thay đổi, bot sẽ gửi bản cập nhật.
+Dấu gửi được ghi nhận theo nội dung. Chạy lại `/congbo` mà không thay đổi dữ liệu sẽ không gửi trùng; nếu câu hỏi hoặc đáp án thay đổi, bản cập nhật mới sẽ được gửi.
 
 Bot kiểm tra thay đổi lịch mỗi 15 phút theo `Asia/Ho_Chi_Minh`. Lịch học hằng ngày được gửi theo từng giờ trong danh sách đăng ký (mặc định `06:00`); scheduler đối chiếu mốc `hh:mm` mỗi phút nhưng bỏ qua im lặng nếu không có đăng ký khớp giờ, không tạo log hay flush dữ liệu thừa.
 
-Nhắc giờ bắt đầu buổi học là tính năng độc lập và mặc định tắt với mọi subscription hiện có. Scheduler trung tâm chạy mỗi phút, nhóm subscription theo MSSV, dùng cache lịch theo các bucket 5 phút và tải lại lịch ngay trước khi gửi một sự kiện đến hạn. Mỗi lần gửi được ghi vào store `classStartNotifications` bằng khóa ổn định gồm subscription, MSSV, ngày, giờ bắt đầu và định danh buổi học; vì vậy restart bot/VPS hoặc tick lặp không gửi trùng. Mặc định bot chấp nhận độ trễ tối đa 2 phút (`CLASS_START_GRACE_MS=120000`) và không gửi bù các buổi đã bắt đầu quá lâu. Chu kỳ cache có thể chỉnh bằng `CLASS_START_CACHE_TTL_MS` (mặc định `300000`).
+Nhắc giờ học là tính năng độc lập và mặc định tắt với mọi subscription hiện có. Người dùng có thể bật nhận lịch hằng ngày, nhắc giờ học, cả hai hoặc không bật tính năng nào. Scheduler trung tâm chạy mỗi phút, nhóm subscription theo MSSV và tải lại lịch ngay trước khi gửi để tránh nhắc một buổi đã hủy hoặc đổi giờ. Các buổi có cùng thời điểm bắt đầu được gộp trong một tin; các thời điểm khác nhau vẫn tách riêng.
+
+Mỗi buổi được ghi vào store `classStartNotifications` bằng khóa ổn định gồm subscription, MSSV, ngày, giờ bắt đầu và định danh buổi học; vì vậy restart bot/VPS hoặc tick lặp không gửi trùng. Mặc định bot chấp nhận độ trễ tối đa 2 phút (`CLASS_START_GRACE_MS=120000`) và không gửi bù các buổi đã bắt đầu quá lâu. `CLASS_START_CACHE_TTL_MS` là giới hạn cache cấu hình, nhưng runtime tự giới hạn bucket hiệu lực tối đa 60 giây và không quá nửa grace window để không bỏ lỡ lịch vừa đổi giờ.
 
 Ngày lịch được xác định bằng policy theo cửa sổ thời gian: thông báo từ `00:00` đến trước `20:00` gửi lịch hôm nay, còn từ `20:00` đến `23:59` gửi lịch ngày mai. Policy nằm riêng trong `scheduleDatePolicy.js` để có thể thêm loại thông báo hoặc khung giờ mới mà không phải thêm điều kiện đặc biệt vào scheduler. Ngày không có lớp và cuối tuần vẫn được gửi với trạng thái không có lịch học.
 
@@ -135,4 +124,4 @@ npm run migrate:firestore
 
 Sau khi khởi động, bot hydrate state từ Firestore trước khi bật polling/scheduler và không ghi các file JSON local nữa. Thư mục `recent_json/` chỉ là nguồn migration, không phải nơi runtime ghi dữ liệu.
 
-Mọi phản hồi của bot đều dùng rich text Markdown của Zalo Bot: có tiêu đề, phân cấp nội dung và màu theo trạng thái. Bot dùng bộ icon dạng text thống nhất (`[OK]`, `[!]`, `[X]`, `[+]`, `[-]`, `[*]`) thay cho emoji màu để hiển thị gọn và đồng nhất trên các thiết bị. Ngày trong lịch và thông báo thay đổi dùng định dạng `dd/mm/yyyy`. Bot đối chiếu buổi học bằng `NhomID` thay vì `ID` thứ tự để tránh báo nhầm hàng loạt khi nhà trường chèn hoặc xóa lịch.
+Phản hồi dùng rich text Markdown của Zalo Bot với tiêu đề, nhấn mạnh và màu trạng thái nhất quán. Thành công dùng `✓`, cảnh báo dùng `⚠`, lỗi dùng `✕`; tiêu đề lịch và nhắc giờ dùng nhãn chức năng thay vì các tiền tố kỹ thuật. Dữ liệu từ LHU và hồ sơ Zalo được escape trước khi chèn vào rich text. Ngày dùng định dạng `dd/mm/yyyy`. Bot đối chiếu buổi học bằng `NhomID` thay vì `ID` thứ tự để tránh báo nhầm hàng loạt khi nhà trường chèn hoặc xóa lịch.
