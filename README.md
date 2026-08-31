@@ -48,6 +48,9 @@ Các bản ghi `subscriptions.json` theo schema cũ chỉ có `chat.id` sẽ kh�
 - `/lichtuan [MSSV]`: xem lịch từ Thứ Hai đến Chủ nhật của tuần hiện tại.
 - `/lichtuan`: xem lịch tuần của MSSV đã lưu.
 - `/huythongbao`: tắt thông báo lịch học và cảnh báo thay đổi, vẫn giữ MSSV.
+- `/batnhaclich`: bật thông báo ngắn ngay khi từng buổi học LHU bắt đầu; dùng MSSV đã lưu.
+- `/tatnhaclich`: tắt riêng nhắc giờ bắt đầu buổi học, không ảnh hưởng `/dangky`.
+- `/trangthainhaclich`: xem trạng thái nhắc giờ bắt đầu buổi học của user trong chat hiện tại.
 - `/time`: kiểm tra giờ Việt Nam mà bot đang dùng.
 - `/myid`: xem User ID và Chat ID của người gửi.
 - `/sinhnhat [câu hỏi]`: gửi câu hỏi trong ngày 27/08.
@@ -88,11 +91,13 @@ Bot ghi nhận dấu gửi theo nội dung. Chạy lại `/congbo` mà không th
 
 Bot kiểm tra thay đổi lịch mỗi 15 phút theo `Asia/Ho_Chi_Minh`. Lịch học hằng ngày được gửi theo từng giờ trong danh sách đăng ký (mặc định `06:00`); scheduler đối chiếu mốc `hh:mm` mỗi phút nhưng bỏ qua im lặng nếu không có đăng ký khớp giờ, không tạo log hay flush dữ liệu thừa.
 
+Nhắc giờ bắt đầu buổi học là tính năng độc lập và mặc định tắt với mọi subscription hiện có. Scheduler trung tâm chạy mỗi phút, nhóm subscription theo MSSV, dùng cache lịch theo các bucket 5 phút và tải lại lịch ngay trước khi gửi một sự kiện đến hạn. Mỗi lần gửi được ghi vào store `classStartNotifications` bằng khóa ổn định gồm subscription, MSSV, ngày, giờ bắt đầu và định danh buổi học; vì vậy restart bot/VPS hoặc tick lặp không gửi trùng. Mặc định bot chấp nhận độ trễ tối đa 2 phút (`CLASS_START_GRACE_MS=120000`) và không gửi bù các buổi đã bắt đầu quá lâu. Chu kỳ cache có thể chỉnh bằng `CLASS_START_CACHE_TTL_MS` (mặc định `300000`).
+
 Ngày lịch được xác định bằng policy theo cửa sổ thời gian: thông báo từ `00:00` đến trước `20:00` gửi lịch hôm nay, còn từ `20:00` đến `23:59` gửi lịch ngày mai. Policy nằm riêng trong `scheduleDatePolicy.js` để có thể thêm loại thông báo hoặc khung giờ mới mà không phải thêm điều kiện đặc biệt vào scheduler. Ngày không có lớp và cuối tuần vẫn được gửi với trạng thái không có lịch học.
 
 ## Firestore
 
-Bot dùng Firebase Admin SDK để đọc/ghi state trong Firestore collection `bot_state`, với mỗi file JSON cũ tương ứng một document: `subscriptions`, `interactions`, `scheduleSnapshots`, `dutyScheduleData`, `birthdayData`, `accessControl`, `chatDirectory`, `adminAudit`, `adminLogs`, `adminSettings`.
+Bot dùng Firebase Admin SDK để đọc/ghi state trong Firestore collection `bot_state`, với mỗi file JSON cũ tương ứng một document: `subscriptions`, `classStartNotifications`, `interactions`, `scheduleSnapshots`, `dutyScheduleData`, `birthdayData`, `accessControl`, `chatDirectory`, `adminAudit`, `adminLogs`, `adminSettings`.
 
 `chatDirectory` là cổng kiểm soát chung cho mọi tác vụ gửi. Lỗi vĩnh viễn `EZALO 410 The chat_id is invalid` làm chat chuyển ngay sang `inactive`; lỗi tạm thời chỉ chuyển trạng thái sau số lần liên tiếp cấu hình bởi `CHAT_MAX_CONSECUTIVE_FAILURES` (mặc định `3`). Dữ liệu cũ được giữ để admin xem và kích hoạt lại.
 

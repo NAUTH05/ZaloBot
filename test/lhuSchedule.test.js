@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const {
     formatDailySchedule,
     formatWeeklySchedule,
+    isLessonActive,
     lessonsForDate,
     lessonsForWeek,
     normalizeStudentId,
@@ -121,6 +122,93 @@ test("định dạng và nhóm lịch học cả tuần", () => {
     assert.match(message, /Lập trình Web/);
     assert.match(message, /Cơ sở dữ liệu/);
     assert.doesNotMatch(message, EMOJI_PATTERN);
+});
+
+test("lịch tuần chỉ đánh dấu đúng ngày hôm nay theo giờ Việt Nam qua ranh giới năm", () => {
+    const data = {
+        studentId: "123456789",
+        studentName: "Nguyễn Văn A",
+        lessons: [
+            {
+                ThoiGianBD: "2026-12-31T07:00:00",
+                ThoiGianKT: "2026-12-31T09:00:00",
+                TenMonHoc: "Môn cuối năm",
+                TinhTrang: 0
+            },
+            {
+                ThoiGianBD: "2027-01-01T07:00:00",
+                ThoiGianKT: "2027-01-01T09:00:00",
+                TenMonHoc: "Môn đầu năm",
+                TinhTrang: 0
+            }
+        ]
+    };
+    const referenceDate = new Date("2026-12-31T17:30:00.000Z");
+    const message = formatWeeklySchedule(data, referenceDate, { referenceDate });
+
+    assert.match(message, /28\/12\/2026 – 03\/01\/2027/);
+    assert.match(message, /01\/01\/2027 · \[HÔM NAY\]/);
+    assert.doesNotMatch(message, /31\/12\/2026 · \[HÔM NAY\]/);
+    assert.equal((message.match(/\[HÔM NAY\]/g) || []).length, 1);
+});
+
+test("xác định lớp đang học đúng các mốc bắt đầu và kết thúc", () => {
+    const lesson = {
+        ThoiGianBD: "2026-09-01T12:50:00",
+        ThoiGianKT: "2026-09-01T16:45:00",
+        TenMonHoc: "Phát triển ứng dụng",
+        TinhTrang: 0,
+        CalenType: 1
+    };
+
+    assert.equal(isLessonActive(lesson, new Date("2026-09-01T05:49:59.000Z")), false);
+    assert.equal(isLessonActive(lesson, new Date("2026-09-01T05:50:00.000Z")), true);
+    assert.equal(isLessonActive(lesson, new Date("2026-09-01T07:00:00.000Z")), true);
+    assert.equal(isLessonActive(lesson, new Date("2026-09-01T09:45:00.000Z")), false);
+    assert.equal(isLessonActive(lesson, new Date("2026-09-01T10:00:00.000Z")), false);
+    assert.equal(isLessonActive({ ...lesson, TinhTrang: 1 }, new Date("2026-09-01T07:00:00.000Z")), false);
+    assert.equal(isLessonActive({ ...lesson, CalenType: 2 }, new Date("2026-09-01T07:00:00.000Z")), false);
+});
+
+test("lịch sinh viên hiển thị ĐANG HỌC nhưng lịch ngoài giờ thì không", () => {
+    const data = {
+        studentId: "123456789",
+        studentName: "Nguyễn Văn A",
+        lessons: [{
+            ThoiGianBD: "2026-09-01T12:50:00",
+            ThoiGianKT: "2026-09-01T16:45:00",
+            TenMonHoc: "Phát triển ứng dụng",
+            TinhTrang: 0,
+            CalenType: 1
+        }]
+    };
+    const active = formatDailySchedule(data, new Date("2026-09-01T07:00:00.000Z"));
+    const ended = formatDailySchedule(data, new Date("2026-09-01T10:00:00.000Z"));
+    assert.match(active, /\[ĐANG HỌC\] 12:50 - 16:45/);
+    assert.doesNotMatch(ended, /\[ĐANG HỌC\]/);
+});
+
+test("các lớp trùng giờ đều được đánh dấu đang học nhất quán", () => {
+    const referenceDate = new Date("2026-09-01T07:00:00.000Z");
+    const message = formatDailySchedule({
+        studentId: "123456789",
+        studentName: "Nguyễn Văn A",
+        lessons: [
+            {
+                ThoiGianBD: "2026-09-01T12:50:00",
+                ThoiGianKT: "2026-09-01T16:45:00",
+                TenMonHoc: "Môn A",
+                TinhTrang: 0
+            },
+            {
+                ThoiGianBD: "2026-09-01T13:30:00",
+                ThoiGianKT: "2026-09-01T15:00:00",
+                TenMonHoc: "Môn B",
+                TinhTrang: 0
+            }
+        ]
+    }, referenceDate);
+    assert.equal((message.match(/\[ĐANG HỌC\]/g) || []).length, 2);
 });
 
 test("escape dữ liệu động để không làm vỡ Markdown của Zalo", () => {

@@ -102,6 +102,7 @@ function saveStudent(contextInput, { studentId, studentName }, filePath = FILE_P
         studentName: studentName || "",
         notificationTimes: normalizeNotificationTimes(existing),
         notificationsEnabled: existing?.studentId === studentId && existing.notificationsEnabled === true,
+        classStartNotificationsEnabled: existing?.studentId === studentId && existing.classStartNotificationsEnabled === true,
         updatedAt: new Date().toISOString()
     };
     writeJsonStore(filePath, FILE_PATH, subscriptions);
@@ -132,6 +133,7 @@ function enableNotifications(contextInput, { studentId, studentName, notificatio
         studentName: studentName || "",
         notificationTimes,
         notificationsEnabled: true,
+        classStartNotificationsEnabled: existing.studentId === studentId && existing.classStartNotificationsEnabled === true,
         updatedAt: new Date().toISOString()
     };
     writeJsonStore(filePath, FILE_PATH, subscriptions);
@@ -144,6 +146,28 @@ function disableNotifications(context, filePath = FILE_PATH) {
     if (!subscriptions[key]?.notificationsEnabled) return false;
     subscriptions[key].notificationsEnabled = false;
     subscriptions[key].updatedAt = new Date().toISOString();
+    writeJsonStore(filePath, FILE_PATH, subscriptions);
+    return true;
+}
+
+function enableClassStartNotifications(contextInput, filePath = FILE_PATH) {
+    const subscriptions = readJsonStore(filePath, FILE_PATH, {});
+    const key = createSubscriptionKey(contextInput);
+    const subscription = subscriptions[key];
+    if (!isCurrentSubscription(subscription) || !subscription.studentId) return null;
+    subscription.classStartNotificationsEnabled = true;
+    subscription.updatedAt = new Date().toISOString();
+    writeJsonStore(filePath, FILE_PATH, subscriptions);
+    return subscription;
+}
+
+function disableClassStartNotifications(contextInput, filePath = FILE_PATH) {
+    const subscriptions = readJsonStore(filePath, FILE_PATH, {});
+    const key = createSubscriptionKey(contextInput);
+    const subscription = subscriptions[key];
+    if (!subscription?.classStartNotificationsEnabled) return false;
+    subscription.classStartNotificationsEnabled = false;
+    subscription.updatedAt = new Date().toISOString();
     writeJsonStore(filePath, FILE_PATH, subscriptions);
     return true;
 }
@@ -185,7 +209,11 @@ function updateSubscriptionMetadata(contextInput, changes = {}, filePath = FILE_
     const key = createSubscriptionKey(context);
     const subscription = subscriptions[key];
     if (!subscription) return null;
-    if (changes.studentId != null) subscription.studentId = String(changes.studentId).trim();
+    if (changes.studentId != null) {
+        const studentId = String(changes.studentId).trim();
+        if (studentId !== subscription.studentId) subscription.classStartNotificationsEnabled = false;
+        subscription.studentId = studentId;
+    }
     if (changes.studentName != null) subscription.studentName = String(changes.studentName).trim();
     if (changes.userDisplayName != null) subscription.userDisplayName = String(changes.userDisplayName).trim();
     subscription.updatedAt = new Date().toISOString();
@@ -214,15 +242,26 @@ function getEnabledSubscriptions() {
     );
 }
 
+function getClassStartNotificationSubscriptions() {
+    return Object.fromEntries(
+        Object.entries(getAllSubscriptions())
+            .filter(([, subscription]) => isCurrentSubscription(subscription) &&
+                subscription.classStartNotificationsEnabled === true && subscription.studentId)
+    );
+}
+
 module.exports = {
     CONTEXT_VERSION,
     DEFAULT_NOTIFICATION_TIME,
     FILE_PATH,
     createSubscriptionKey,
     deleteSubscription,
+    disableClassStartNotifications,
     disableNotifications,
+    enableClassStartNotifications,
     enableNotifications,
     getAllSubscriptions,
+    getClassStartNotificationSubscriptions,
     getEnabledSubscriptions,
     getSubscription,
     isCurrentSubscription,

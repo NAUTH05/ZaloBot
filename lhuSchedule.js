@@ -176,17 +176,33 @@ function lessonStatus(lesson) {
     return "";
 }
 
-function formatLesson(lesson, index) {
+function vietnamDateTimeKey(info) {
+    return info ? `${info.dateKey}T${info.hour}:${info.minute}:${info.second || "00"}` : "";
+}
+
+function isLessonActive(lesson, referenceDate = new Date()) {
+    if (lessonStatus(lesson) || Number(lesson.CalenType) === 2) return false;
+    const start = getApiDateTimeInfo(lesson.ThoiGianBD);
+    const end = getApiDateTimeInfo(lesson.ThoiGianKT);
+    const current = getVietnamDateInfo(referenceDate);
+    const currentKey = vietnamDateTimeKey(current);
+    const startKey = vietnamDateTimeKey(start);
+    const endKey = vietnamDateTimeKey(end);
+    return Boolean(startKey && endKey && startKey <= currentKey && currentKey < endKey);
+}
+
+function formatLesson(lesson, index, options = {}) {
     const start = getApiDateTimeInfo(lesson.ThoiGianBD);
     const end = getApiDateTimeInfo(lesson.ThoiGianKT);
     const time = start && end ? `${start.hour}:${start.minute} - ${end.hour}:${end.minute}` : "Chưa rõ giờ";
     const status = lessonStatus(lesson);
+    const activeMarker = isLessonActive(lesson, options.referenceDate || new Date()) ? "[ĐANG HỌC] " : "";
     const type = Number(lesson.Type) === 0 ? "Lý thuyết" : "Thực hành";
     const location = [lesson.TenPhong, lesson.TenCoSo].filter(Boolean).join(" - ");
 
     const statusColor = status === "BÁO NGHỈ" ? "orange" : status === "LỊCH THI" ? "orange" : "green";
     const lines = [
-        `**${index + 1}. ${escapeMarkdown(time)} · ${escapeMarkdown(lesson.TenMonHoc || "Chưa rõ môn")}**`
+        `**${index + 1}. ${activeMarker}${escapeMarkdown(time)} · ${escapeMarkdown(lesson.TenMonHoc || "Chưa rõ môn")}**`
     ];
     if (status) lines.push(`> **Trạng thái:** {${statusColor}}[${escapeMarkdown(status)}]{/${statusColor}}`);
     if (location) lines.push(`> **Phòng:** ${escapeMarkdown(location)}`);
@@ -202,6 +218,7 @@ function formatLesson(lesson, index) {
 function formatDailySchedule(scheduleData, date = new Date(), options = {}) {
     const dateInfo = getVietnamDateInfo(date);
     const referenceDateInfo = getVietnamDateInfo(options.referenceDate || date);
+    const referenceDate = options.referenceDate || date;
     const dayLabel = dateInfo.dateKey === referenceDateInfo.dateKey ? "HÔM NAY" : "NGÀY MAI";
     const lessons = lessonsForDate(scheduleData.lessons || [], date);
     const studentName = escapeMarkdown(scheduleData.studentName || "Sinh viên");
@@ -216,11 +233,13 @@ function formatDailySchedule(scheduleData, date = new Date(), options = {}) {
     if (lessons.length === 0) {
         return `${header}\n\n{green}[i] ${dayLabel === "HÔM NAY" ? "Hôm nay" : "Ngày mai"} không có lịch học.{/green}`;
     }
-    return `${header}\n\n## {orange}[${lessons.length} BUỔI HỌC]{/orange}\n${lessons.map(formatLesson).join("\n\n────────────\n\n")}`;
+    return `${header}\n\n## {orange}[${lessons.length} BUỔI HỌC]{/orange}\n${lessons.map((lesson, index) => formatLesson(lesson, index, { referenceDate })).join("\n\n────────────\n\n")}`;
 }
 
-function formatWeeklySchedule(scheduleData, date = new Date()) {
+function formatWeeklySchedule(scheduleData, date = new Date(), options = {}) {
     const week = getVietnamWeekInfo(date);
+    const referenceDate = options.referenceDate || date;
+    const todayDateKey = getVietnamDateInfo(referenceDate).dateKey;
     const lessons = lessonsForWeek(scheduleData.lessons || [], date);
     const studentName = escapeMarkdown(scheduleData.studentName || "Sinh viên");
     const studentId = escapeMarkdown(scheduleData.studentId);
@@ -241,8 +260,9 @@ function formatWeeklySchedule(scheduleData, date = new Date()) {
             (lesson) => getApiDateTimeInfo(lesson.ThoiGianBD)?.dateKey === day.dateKey
         );
         if (dayLessons.length === 0) return null;
-        return `# {orange}[NGÀY] ${escapeMarkdown(day.weekday.toUpperCase())} · ${day.formattedDate}{/orange}\n` +
-            dayLessons.map(formatLesson).join("\n\n────────────\n\n");
+        const todayMarker = day.dateKey === todayDateKey ? " · [HÔM NAY]" : "";
+        return `# {orange}[NGÀY] ${escapeMarkdown(day.weekday.toUpperCase())} · ${day.formattedDate}${todayMarker}{/orange}\n` +
+            dayLessons.map((lesson, index) => formatLesson(lesson, index, { referenceDate })).join("\n\n────────────\n\n");
     }).filter(Boolean);
 
     return `${header}\n\n${sections.join("\n\n════════════════\n\n")}`;
@@ -422,6 +442,7 @@ module.exports = {
     formatLesson,
     formatTeacherSchedule,
     formatWeeklySchedule,
+    isLessonActive,
     lessonsForDate,
     lessonsForWeek,
     normalizeStudentId,

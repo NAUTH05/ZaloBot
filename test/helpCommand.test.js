@@ -18,6 +18,9 @@ test("ba nhóm help tách đúng lệnh thường, trực nhật và admin", asy
     assert.match(code, /command === "helpadmin"[\s\S]*?requireOwner\(context\)/);
     assert.match(general, /\/start/);
     assert.match(general, /\/find 123456789/);
+    assert.match(general, /\/batnhaclich/);
+    assert.match(general, /\/tatnhaclich/);
+    assert.match(general, /\/trangthainhaclich/);
     assert.doesNotMatch(general, /blockbot|themlichtruc|helpadmin/);
     assert.doesNotMatch(general, /help411/);
     assert.match(duty, /\/lichtruc/);
@@ -36,6 +39,7 @@ test("ba nhóm help tách đúng lệnh thường, trực nhật và admin", asy
     assert.deepEqual(parseCommand("/helpadmin"), { command: "helpadmin", argument: "" });
     assert.equal(suggestCommandCorrection("dangky0800"), "/dangky 08:00");
     assert.equal(suggestCommandCorrection("find123456789"), "/find 123456789");
+    assert.equal(suggestCommandCorrection("batnhaclic"), "/batnhaclich");
 });
 
 test("parse giờ đăng ký lịch học tùy chọn", () => {

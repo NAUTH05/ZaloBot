@@ -49,6 +49,7 @@ function buildAdminData() {
             studentId: String(raw?.studentId || ""),
             studentName: String(raw?.studentName || ""),
             notificationsEnabled: raw?.notificationsEnabled === true,
+            classStartNotificationsEnabled: raw?.classStartNotificationsEnabled === true,
             notificationTimes: normalizeNotificationTimes(raw),
             updatedAt: raw?.updatedAt || null
         };

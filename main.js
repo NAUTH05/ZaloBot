@@ -21,9 +21,12 @@ const {
     searchTeacherByName
 } = require("./lhuSchedule");
 const {
+    disableClassStartNotifications,
     disableNotifications,
+    enableClassStartNotifications,
     enableNotifications,
     getAllSubscriptions,
+    getClassStartNotificationSubscriptions,
     getEnabledSubscriptions,
     getSubscription,
     DEFAULT_NOTIFICATION_TIME,
@@ -33,6 +36,11 @@ const {
     saveStudent,
     updateNotificationTime
 } = require("./subscriptions");
+const {
+    createClassStartReminderService,
+    DEFAULT_CACHE_TTL_MS,
+    DEFAULT_GRACE_PERIOD_MS
+} = require("./classStartNotifications");
 const { getMessageContext } = require("./userContext");
 const {
     captureScheduleChange,
@@ -464,6 +472,9 @@ const COMMAND_EXAMPLES = {
     lichgv: "/lichgv Nguyễn Văn A",
     phongtrong: "/phongtrong 1",
     ai: "/ai Hôm nay tôi học môn gì?",
+    batnhaclich: "/batnhaclich",
+    tatnhaclich: "/tatnhaclich",
+    trangthainhaclich: "/trangthainhaclich",
     huythongbao: "/huythongbao",
     sinhnhat: "/sinhnhat Bạn muốn hỏi tôi điều gì?",
     myid: "/myid",
@@ -572,6 +583,9 @@ function formatGeneralHelp() {
 - **/suadangky #ID [hh:mm]** — Sửa một giờ thông báo. _(Ví dụ: /suadangky #1 20:00)_
 - **/xoadangky #ID** — Xóa một giờ thông báo. _(Ví dụ: /xoadangky #1)_
 - **/huythongbao** — Tắt thông báo lịch học. _(Ví dụ: /huythongbao)_
+- **/batnhaclich** — Bật nhắc ngay khi từng buổi học bắt đầu. _(Ví dụ: /batnhaclich)_
+- **/tatnhaclich** — Tắt nhắc giờ bắt đầu buổi học. _(Ví dụ: /tatnhaclich)_
+- **/trangthainhaclich** — Xem trạng thái nhắc giờ học. _(Ví dụ: /trangthainhaclich)_
 
 ## {orange}[KHÁC] TIỆN ÍCH{/orange}
 - **/sinhnhat [Câu hỏi]** — Gửi câu hỏi sinh nhật ngày 27/08. _(Ví dụ: /sinhnhat Điều bạn mong chờ nhất ở tuổi mới là gì?)_
@@ -889,6 +903,36 @@ async function handleCommand(msg, parsedCommand) {
                 )
             );
         }
+    } else if (command === "batnhaclich") {
+        const saved = getSubscription(context);
+        if (!saved?.studentId) {
+            await sendMessage(chatId, formatWarningMessage("CHƯA LƯU MSSV", "> Hãy dùng **/find [MSSV]** trước."));
+            return;
+        }
+        enableClassStartNotifications(context);
+        await sendMessage(
+            chatId,
+            "# {green}[OK] ĐÃ BẬT NHẮC GIỜ HỌC{/green}\n\n" +
+            "Bot sẽ nhắn **Đến giờ học rồi bạn ơi** khi từng buổi học bắt đầu."
+        );
+    } else if (command === "tatnhaclich") {
+        if (disableClassStartNotifications(context)) {
+            await sendMessage(chatId, "# {orange}[OK] ĐÃ TẮT NHẮC GIỜ HỌC{/orange}");
+        } else {
+            await sendMessage(chatId, formatWarningMessage("NHẮC GIỜ HỌC ĐANG TẮT", "> Dùng **/batnhaclich** để bật."));
+        }
+    } else if (command === "trangthainhaclich") {
+        const saved = getSubscription(context);
+        if (!saved?.studentId) {
+            await sendMessage(chatId, formatWarningMessage("CHƯA LƯU MSSV", "> Hãy dùng **/find [MSSV]** trước."));
+            return;
+        }
+        const enabled = saved.classStartNotificationsEnabled === true;
+        await sendMessage(
+            chatId,
+            `# {${enabled ? "green" : "orange"}}[NHẮC GIỜ HỌC] ${enabled ? "ĐANG BẬT" : "ĐANG TẮT"}{/${enabled ? "green" : "orange"}}\n\n` +
+            `> **MSSV:** ${escapeMarkdown(saved.studentId)}`
+        );
     } else if (command === "sinhnhat") {
         const dateInfo = getVietnamDateInfo();
         if (!isBirthdayDate(dateInfo)) {
@@ -1502,6 +1546,36 @@ async function sendNotification(chatId, text, options = {}) {
     }
 }
 
+function positiveDuration(value, fallback) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+const classStartReminderService = createClassStartReminderService({
+    fetchSchedule: fetchStudentSchedule,
+    getSubscriptions: getClassStartNotificationSubscriptions,
+    isEligible: (subscription) => isChatEligible(subscription.chatId, "schedule"),
+    sendReminder: (subscription, message) => sendNotification(subscription.chatId, message, {
+        feature: "schedule",
+        operation: "class_start_reminder"
+    }),
+    onError: ({ stage, error }) => logDiscord("ERROR", `class_start_${stage}_error: ${error.message}`),
+    flushPersistence: flushPersistenceWrites,
+    gracePeriodMs: positiveDuration(process.env.CLASS_START_GRACE_MS, DEFAULT_GRACE_PERIOD_MS),
+    cacheTtlMs: positiveDuration(process.env.CLASS_START_CACHE_TTL_MS, DEFAULT_CACHE_TTL_MS)
+});
+
+async function sendClassStartNotifications(date = new Date()) {
+    const result = await classStartReminderService.run(date);
+    if (result.sent > 0) {
+        console.log(`[NHẮC GIỜ] Đã gửi ${result.sent} thông báo bắt đầu buổi học.`);
+    }
+    if (result.failed > 0) {
+        logDiscord("ERROR", `class_start_reminder_failed: ${result.failed} delivery or schedule check(s)`);
+    }
+    return result;
+}
+
 function groupSubscriptionsByStudent(subscriptions, notificationTime = null) {
     const grouped = new Map();
     for (const subscription of subscriptions) {
@@ -1666,8 +1740,9 @@ function registerRuntimeJobs(scheduler = schedule) {
         await flushPersistenceWrites();
     }));
     scheduler.scheduleJob({ rule: "* * * * *", tz: TIME_ZONE }, asyncCommand(async () => {
-        const result = await sendScheduledDailySchedules();
-        if (result.processed) await flushPersistenceWrites();
+        const dailyResult = await sendScheduledDailySchedules();
+        const classStartResult = await sendClassStartNotifications();
+        if (dailyResult.processed || classStartResult.processed) await flushPersistenceWrites();
     }));
     // Lịch trực phòng 411 có mốc cố định 06:00, độc lập với các giờ nhận lịch học.
     scheduler.scheduleJob({ rule: "0 6 * * *", tz: TIME_ZONE }, asyncCommand(async () => {
@@ -1691,6 +1766,7 @@ async function startRuntime() {
             "chatDirectory",
             "dutyScheduleData",
             "interactions",
+            "classStartNotifications",
             "scheduleSnapshots",
             "subscriptions"
         ]
@@ -1720,7 +1796,7 @@ async function startRuntime() {
     // Chỉ bật scheduler sau khi state Firestore đã được hydrate vào bộ nhớ.
     registerRuntimeJobs();
     await bot.startPolling();
-    console.log(`Bot đã khởi động. Tự động kiểm tra thay đổi lịch mỗi 15 phút và gửi lịch theo giờ đăng ký (${TIME_ZONE}).`);
+    console.log(`Bot đã khởi động. Tự động kiểm tra thay đổi lịch, gửi lịch theo giờ đăng ký và nhắc giờ bắt đầu buổi học (${TIME_ZONE}).`);
     logDiscord("INFO", `Bot đã khởi động - timezone ${TIME_ZONE}`);
     await sendBirthdayInvitations();
     await flushPersistenceWrites();
@@ -1826,6 +1902,7 @@ module.exports = {
     registerRuntimeJobs,
     sendBirthdayInvitations,
     sendBotAnnouncement,
+    sendClassStartNotifications,
     sendDailyDutyNotificationAtSix,
     sendDailySchedulesAtSix,
     sendDailySchedulesAtTime,
