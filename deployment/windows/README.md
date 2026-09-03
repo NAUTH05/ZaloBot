@@ -6,6 +6,14 @@ Target: Windows Server 2019+, production hostname `zalobot.mrnauthdev.dpdns.org`
 
 Run PowerShell as the deployment account. Install Node.js LTS 64-bit, Git for Windows, IIS, IIS URL Rewrite, ARR, and WebSocket Protocol when required.
 
+As Administrator, install the IIS features with:
+
+```powershell
+Install-WindowsFeature Web-Server,Web-WebSockets,Web-Mgmt-Console
+```
+
+Install the current IIS URL Rewrite package from `https://www.iis.net/downloads/microsoft/url-rewrite` and Application Request Routing from `https://www.iis.net/downloads/microsoft/application-request-routing`.
+
 ```powershell
 New-Item -ItemType Directory -Force C:\Apps\ZaloBot,C:\Secure\ZaloBot,C:\inetpub\zalobot-proxy | Out-Null
 Set-Location C:\Apps
