@@ -15,6 +15,14 @@ async function api(path, options = {}) {
 }
 
 function showAuthenticated(authenticated) { $("#loginView").classList.toggle("hidden", authenticated); $("#dashboardView").classList.toggle("hidden", !authenticated); }
+function setDataState(state, message = "") {
+  const banner = $("#appStatus");
+  if (!banner) return;
+  banner.hidden = !message;
+  banner.className = `app-status ${state}`;
+  banner.innerHTML = message ? `${escapeHtml(message)}${state === "error" ? ' <button type="button" id="retryData">Retry</button>' : ""}` : "";
+  if (state === "error") $("#retryData")?.addEventListener("click", loadData, { once: true });
+}
 function formatDate(value) { if (!value) return "-"; const date = new Date(value); return Number.isNaN(date.getTime()) ? value : date.toLocaleString("vi-VN"); }
 function badge(value, tone = "neutral") { return `<span class="badge badge-${tone}">${escapeHtml(value)}</span>`; }
 function statusTone(status) { return status === "active" ? "success" : status === "inactive" ? "danger" : status === "disabled" ? "warning" : "neutral"; }
@@ -115,7 +123,18 @@ function renderLogs() {
 
 function renderAll() { renderOverview(); renderDirectory(); renderUsers(); renderGroups(); renderNotifications(); renderDuty(); renderHealth(); renderSettings(); renderLogs(); $("#healthPill").textContent = `${dashboard.bot.status} · ${dashboard.bot.health}`; $("#generatedAt").textContent = formatDate(workspace.generatedAt); }
 
-async function loadData() { [workspace, dashboard, logs, settings] = await Promise.all([api("/api/admin/workspace"), api("/api/admin/dashboard"), api("/api/admin/logs"), api("/api/admin/settings")]); renderAll(); }
+async function loadData() {
+  setDataState("loading", "Loading admin data...");
+  try {
+    [workspace, dashboard, logs, settings] = await Promise.all([api("/api/admin/workspace"), api("/api/admin/dashboard"), api("/api/admin/logs"), api("/api/admin/settings")]);
+    renderAll();
+    setDataState("success", "Updated just now");
+    window.setTimeout(() => setDataState("success", ""), 1800);
+  } catch (error) {
+    setDataState("error", error.message || "Unable to load admin data");
+    throw error;
+  }
+}
 
 function showDialog(title, body) { $("#dialogTitle").textContent = title; $("#dialogBody").innerHTML = body; if (!$("#detailDialog").open) $("#detailDialog").showModal(); }
 

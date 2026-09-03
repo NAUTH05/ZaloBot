@@ -34,10 +34,13 @@ const {
     updateDutySchedule
 } = require("./dutyScheduleStore");
 const { buildAdminData } = require("./adminDataService");
-const { readJsonStore, writeJsonStore } = require("./firestorePersistence");
+const { getPersistenceStatus, readJsonStore, writeJsonStore } = require("./firestorePersistence");
 const { getSystemLogs } = require("./operationalLog");
 
-const BASE_PATH = String(process.env.ADMIN_BASE_PATH || "/zalobot").replace(/\/+$/, "") || "/zalobot";
+const configuredBasePath = String(process.env.ADMIN_BASE_PATH || "/zalobot").trim();
+const BASE_PATH = configuredBasePath === "/" ? "/" : `/${configuredBasePath.replace(/^\/+|\/+$/g, "")}`;
+const API_PREFIX = BASE_PATH === "/" ? "/api/admin" : `${BASE_PATH}/api/admin`;
+const UI_PREFIX = BASE_PATH === "/" ? "/" : `${BASE_PATH}/`;
 const STATIC_DIR = path.join(__dirname, "admin-ui");
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 const MAX_BODY_BYTES = 64 * 1024;
@@ -73,12 +76,18 @@ function adminEnabled() {
 }
 
 function parseCookies(request) {
-    return Object.fromEntries(String(request.headers.cookie || "").split(";").map((part) => part.trim().split("=")).filter(([key, value]) => key && value).map(([key, value]) => [key, decodeURIComponent(value)]));
+    const result = {};
+    for (const part of String(request.headers.cookie || "").split(";")) {
+        const [key, ...rest] = part.trim().split("=");
+        if (!key || !rest.length) continue;
+        try { result[key] = decodeURIComponent(rest.join("=")); } catch (_) { /* Ignore malformed cookies. */ }
+    }
+    return result;
 }
 
 function sessionCookie(request, token, maxAge) {
     const secure = process.env.ADMIN_COOKIE_SECURE === "true" || request.headers["x-forwarded-proto"] === "https" || process.env.NODE_ENV === "production";
-    return `zalobot_admin=${token}; Path=${BASE_PATH}; HttpOnly; SameSite=Strict;${secure ? " Secure;" : ""} Max-Age=${maxAge}`;
+    return `zalobot_admin=${token}; Path=${UI_PREFIX}; HttpOnly; SameSite=Strict;${secure ? " Secure;" : ""} Max-Age=${maxAge}`;
 }
 
 function json(res, status, payload, extraHeaders = {}) {
@@ -211,6 +220,7 @@ function dashboardSummary() {
     const duty = getDutySubscriptions();
     return {
         bot: { status: "online", health: "healthy", checkedAt: new Date().toISOString() },
+        persistence: getPersistenceStatus(),
         chats: {
             total: chats.length,
             users: workspace.users.length,
@@ -258,7 +268,7 @@ function detailForChat(chatId) {
 async function handleApi(request, response, url, options = {}) {
     if (!withinRateLimit(request)) return json(response, 429, { error: "Too many requests" });
     if (!["GET", "HEAD"].includes(request.method) && !sameOrigin(request)) return json(response, 403, { error: "Origin not allowed" });
-    if (url.pathname === `${BASE_PATH}/api/admin/auth/login` && request.method === "POST") {
+    if (url.pathname === `${API_PREFIX}/auth/login` && request.method === "POST") {
         if (!adminEnabled()) return json(response, 503, { error: "Set ADMIN_USERNAME and ADMIN_PASSWORD" });
         const ip = String(request.headers["x-forwarded-for"] || request.socket.remoteAddress || "unknown");
         const state = failedLogins.get(ip) || { count: 0, blockedUntil: 0 };
@@ -281,7 +291,7 @@ async function handleApi(request, response, url, options = {}) {
         audit("auth.login", request, { result: "success" });
         return json(response, 200, { ok: true }, { "Set-Cookie": sessionCookie(request, token, SESSION_TTL_MS / 1000) });
     }
-    if (url.pathname === `${BASE_PATH}/api/admin/auth/logout` && request.method === "POST") {
+    if (url.pathname === `${API_PREFIX}/auth/logout` && request.method === "POST") {
         sessionFor(request);
         const token = parseCookies(request).zalobot_admin;
         if (token) sessions.delete(token);
@@ -289,15 +299,15 @@ async function handleApi(request, response, url, options = {}) {
         return json(response, 200, { ok: true }, { "Set-Cookie": sessionCookie(request, "", 0) });
     }
     if (!requireAdmin(request, response)) return;
-    if (url.pathname === `${BASE_PATH}/api/admin/workspace` && request.method === "GET") return json(response, 200, buildAdminData());
-    if (url.pathname === `${BASE_PATH}/api/admin/dashboard` && request.method === "GET") return json(response, 200, dashboardSummary());
-    if (url.pathname === `${BASE_PATH}/api/admin/chats` && request.method === "GET") {
+    if (url.pathname === `${API_PREFIX}/workspace` && request.method === "GET") return json(response, 200, buildAdminData());
+    if (url.pathname === `${API_PREFIX}/dashboard` && request.method === "GET") return json(response, 200, dashboardSummary());
+    if (url.pathname === `${API_PREFIX}/chats` && request.method === "GET") {
         const filter = String(url.searchParams.get("status") || "all");
         const type = String(url.searchParams.get("type") || "all");
         const chats = buildAdminData().chats.filter((chat) => (filter === "all" || chat.status === filter) && (type === "all" || chat.chatType === type)).map(publicChat);
         return json(response, 200, { chats });
     }
-    if (url.pathname === `${BASE_PATH}/api/admin/chats` && request.method === "POST") {
+    if (url.pathname === `${API_PREFIX}/chats` && request.method === "POST") {
         let body;
         try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
         try {
@@ -307,10 +317,10 @@ async function handleApi(request, response, url, options = {}) {
             return json(response, 201, { chat: publicChat(result) });
         } catch (error) { return json(response, 400, { error: error.message }); }
     }
-    if (url.pathname === `${BASE_PATH}/api/admin/users` && request.method === "GET") {
+    if (url.pathname === `${API_PREFIX}/users` && request.method === "GET") {
         return json(response, 200, { users: buildAdminData().users });
     }
-    if (url.pathname === `${BASE_PATH}/api/admin/users` && request.method === "POST") {
+    if (url.pathname === `${API_PREFIX}/users` && request.method === "POST") {
         let body;
         try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
         try {
@@ -321,10 +331,10 @@ async function handleApi(request, response, url, options = {}) {
             return json(response, 201, { member });
         } catch (error) { return json(response, 400, { error: error.message }); }
     }
-    if (url.pathname === `${BASE_PATH}/api/admin/groups` && request.method === "GET") {
+    if (url.pathname === `${API_PREFIX}/groups` && request.method === "GET") {
         return json(response, 200, { groups: buildAdminData().groups.map(publicChat) });
     }
-    const userMatch = url.pathname.match(new RegExp(`^${BASE_PATH.replace("/", "\\/")}/api/admin/users/([^/]+)$`));
+    const userMatch = url.pathname.match(new RegExp(`^${API_PREFIX.replaceAll("/", "\\/")}/users/([^/]+)$`));
     if (userMatch && ["PATCH", "DELETE"].includes(request.method)) {
         let body = {};
         try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
@@ -348,7 +358,7 @@ async function handleApi(request, response, url, options = {}) {
             return json(response, 200, { ok: true, member: result });
         } catch (error) { return json(response, 400, { error: error.message }); }
     }
-    const chatMatch = url.pathname.match(new RegExp(`^${BASE_PATH.replace("/", "\\/")}/api/admin/chats/([^/]+)$`));
+    const chatMatch = url.pathname.match(new RegExp(`^${API_PREFIX.replaceAll("/", "\\/")}/chats/([^/]+)$`));
     if (chatMatch && request.method === "GET") {
         const detail = detailForChat(decodeURIComponent(chatMatch[1]));
         return detail ? json(response, 200, detail) : json(response, 404, { error: "Chat not found" });
@@ -380,7 +390,7 @@ async function handleApi(request, response, url, options = {}) {
         audit("chat.delete", request, { chatId, hard: body.hard === true || url.searchParams.get("hard") === "1", result: "success" });
         return json(response, 200, { ok: true, chat: publicChat(result) });
     }
-    const retryMatch = url.pathname.match(new RegExp(`^${BASE_PATH.replace("/", "\\/")}/api/admin/chats/([^/]+)/retry$`));
+    const retryMatch = url.pathname.match(new RegExp(`^${API_PREFIX.replaceAll("/", "\\/")}/chats/([^/]+)/retry$`));
     if (retryMatch && request.method === "POST") {
         if (typeof options.retryChat !== "function") return json(response, 503, { error: "Retry service unavailable" });
         const chatId = decodeURIComponent(retryMatch[1]);
@@ -389,14 +399,14 @@ async function handleApi(request, response, url, options = {}) {
         if (result.sent) return json(response, 200, { ok: true, chat: publicChat(getChat(chatId)) });
         return json(response, 400, { error: result.error?.message || result.reason || "Retry failed" });
     }
-    if (url.pathname === `${BASE_PATH}/api/admin/notifications` && request.method === "GET") {
+    if (url.pathname === `${API_PREFIX}/notifications` && request.method === "GET") {
         return json(response, 200, {
             schedule: Object.values(getEnabledSubscriptions()).filter((item) => isChatEligible(item.chatId, "schedule")),
             duty: getDutySubscriptions().filter((item) => isChatEligible(item.chatId, "duty")),
             dutySchedules: readDutyData().schedules || []
         });
     }
-    if (url.pathname === `${BASE_PATH}/api/admin/subscriptions` && request.method === "PATCH") {
+    if (url.pathname === `${API_PREFIX}/subscriptions` && request.method === "PATCH") {
         let body;
         try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
         const context = { chatId: body.chatId, userId: body.userId, userDisplayName: body.userDisplayName || "" };
@@ -418,7 +428,7 @@ async function handleApi(request, response, url, options = {}) {
             return json(response, 400, { error: error.message });
         }
     }
-    if (url.pathname === `${BASE_PATH}/api/admin/duty/schedules` && ["POST", "PATCH", "DELETE"].includes(request.method)) {
+    if (url.pathname === `${API_PREFIX}/duty/schedules` && ["POST", "PATCH", "DELETE"].includes(request.method)) {
         let body;
         try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
         try {
@@ -431,7 +441,7 @@ async function handleApi(request, response, url, options = {}) {
             return json(response, 200, { ok: true, result });
         } catch (error) { return json(response, 400, { error: error.message }); }
     }
-    if (url.pathname === `${BASE_PATH}/api/admin/duty/subscriptions` && request.method === "PATCH") {
+    if (url.pathname === `${API_PREFIX}/duty/subscriptions` && request.method === "PATCH") {
         let body;
         try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
         const context = { chatId: body.chatId, chatTitle: body.chatTitle, userDisplayName: body.chatTitle };
@@ -440,21 +450,21 @@ async function handleApi(request, response, url, options = {}) {
         audit("duty_subscription.update", request, { result: "success", chatId: body.chatId, enabled: body.enabled === true });
         return json(response, 200, { ok: true, result });
     }
-    if (url.pathname === `${BASE_PATH}/api/admin/settings` && request.method === "GET") return json(response, 200, getAdminSettings());
-    if (url.pathname === `${BASE_PATH}/api/admin/settings/admins` && ["POST", "PATCH"].includes(request.method)) {
+    if (url.pathname === `${API_PREFIX}/settings` && request.method === "GET") return json(response, 200, getAdminSettings());
+    if (url.pathname === `${API_PREFIX}/settings/admins` && ["POST", "PATCH"].includes(request.method)) {
         let body;
         try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
         try { const admin = upsertAdmin(body); audit("settings.admin_upsert", request, { result: "success", userId: admin.userId, chatId: admin.chatId }); return json(response, 200, { admin }); }
         catch (error) { return json(response, 400, { error: error.message }); }
     }
-    if (url.pathname === `${BASE_PATH}/api/admin/settings/admins` && request.method === "DELETE") {
+    if (url.pathname === `${API_PREFIX}/settings/admins` && request.method === "DELETE") {
         const id = String(url.searchParams.get("id") || "");
         const admin = removeAdmin(id);
         if (!admin) return json(response, 404, { error: "Admin setting not found" });
         audit("settings.admin_remove", request, { result: "success", id });
         return json(response, 200, { ok: true, admin });
     }
-    if (url.pathname === `${BASE_PATH}/api/admin/commands` && request.method === "POST") {
+    if (url.pathname === `${API_PREFIX}/commands` && request.method === "POST") {
         if (typeof options.executeCommand !== "function") return json(response, 503, { error: "Command service unavailable" });
         let body;
         try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
@@ -467,8 +477,8 @@ async function handleApi(request, response, url, options = {}) {
             return json(response, 400, { error: error.message });
         }
     }
-    if (url.pathname === `${BASE_PATH}/api/admin/audit` && request.method === "GET") return json(response, 200, { events: recentAudit(100) });
-    if (url.pathname === `${BASE_PATH}/api/admin/logs` && request.method === "GET") {
+    if (url.pathname === `${API_PREFIX}/audit` && request.method === "GET") return json(response, 200, { events: recentAudit(100) });
+    if (url.pathname === `${API_PREFIX}/logs` && request.method === "GET") {
         return json(response, 200, { system: getSystemLogs(100), deliveryErrors: dashboardSummary().recentErrors, audit: recentAudit(100) });
     }
     return json(response, 404, { error: "Not found" });
@@ -477,18 +487,18 @@ async function handleApi(request, response, url, options = {}) {
 function createAdminServer(options = {}) {
     const server = http.createServer(async (request, response) => {
         const url = new URL(request.url, `http://${request.headers.host || "localhost"}`);
-        if (url.pathname.startsWith(`${BASE_PATH}/api/admin/`)) {
+        if (url.pathname.startsWith(`${API_PREFIX}/`)) {
             try { await handleApi(request, response, url, options); } catch (error) { json(response, 500, { error: "Internal server error" }); }
             return;
         }
         if (request.method !== "GET" && request.method !== "HEAD") return json(response, 405, { error: "Method not allowed" });
-        if (url.pathname === BASE_PATH) {
+        if (BASE_PATH !== "/" && url.pathname === BASE_PATH) {
             response.writeHead(308, { Location: `${BASE_PATH}/`, ...securityHeaders() });
             response.end();
             return;
         }
-        if (!url.pathname.startsWith(`${BASE_PATH}/`)) return json(response, 404, { error: "Not found" });
-        const relative = url.pathname === `${BASE_PATH}/` ? "index.html" : url.pathname.slice(`${BASE_PATH}/`.length);
+        if (BASE_PATH !== "/" && !url.pathname.startsWith(`${BASE_PATH}/`)) return json(response, 404, { error: "Not found" });
+        const relative = url.pathname === UI_PREFIX ? "index.html" : url.pathname.slice(UI_PREFIX.length);
         if (relative.includes("..")) return json(response, 400, { error: "Invalid path" });
         const filePath = path.join(STATIC_DIR, relative || "index.html");
         const ext = path.extname(filePath).toLowerCase();
@@ -496,7 +506,7 @@ function createAdminServer(options = {}) {
         if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) return sendFile(response, filePath, types[ext] || "application/octet-stream");
         return sendFile(response, path.join(STATIC_DIR, "index.html"), types[".html"]);
     });
-    const port = Number(options.port || process.env.ADMIN_PORT || 6003);
+    const port = Number(options.port || process.env.ADMIN_PORT || process.env.PORT || 6003);
     return { server, port, basePath: BASE_PATH };
 }
 

@@ -127,6 +127,7 @@ if (!process.env.BOT_TOKEN) {
 
 const bot = new ZaloBot(process.env.BOT_TOKEN, { polling: false });
 const dashboardCommandContext = new AsyncLocalStorage();
+const registeredSchedulers = new WeakSet();
 
 function logDiscord(level, message) {
     if (level === "ERROR" || level === "WARN") {
@@ -1596,24 +1597,30 @@ async function sendDailyDutyNotificationAtSix(date = new Date()) {
 }
 
 function registerRuntimeJobs(scheduler = schedule) {
-    scheduler.scheduleJob({ rule: "*/15 * * * *", tz: TIME_ZONE }, asyncCommand(async () => {
+    if (scheduler && typeof scheduler === "object") {
+        if (registeredSchedulers.has(scheduler)) return [];
+        registeredSchedulers.add(scheduler);
+    }
+    const jobs = [];
+    jobs.push(scheduler.scheduleJob({ rule: "*/15 * * * *", tz: TIME_ZONE }, asyncCommand(async () => {
         await checkAndNotifyScheduleChanges();
         await flushPersistenceWrites();
-    }));
-    scheduler.scheduleJob({ rule: "* * * * *", tz: TIME_ZONE }, asyncCommand(async () => {
+    })));
+    jobs.push(scheduler.scheduleJob({ rule: "* * * * *", tz: TIME_ZONE }, asyncCommand(async () => {
         const dailyResult = await sendScheduledDailySchedules();
         const classStartResult = await sendClassStartNotifications();
         if (dailyResult.processed || classStartResult.processed) await flushPersistenceWrites();
-    }));
+    })));
     // Lịch trực phòng 411 có mốc cố định 06:00, độc lập với các giờ nhận lịch học.
-    scheduler.scheduleJob({ rule: "0 6 * * *", tz: TIME_ZONE }, asyncCommand(async () => {
+    jobs.push(scheduler.scheduleJob({ rule: "0 6 * * *", tz: TIME_ZONE }, asyncCommand(async () => {
         await sendDailyDutyNotificationAtSix();
         await flushPersistenceWrites();
-    }));
-    scheduler.scheduleJob({ rule: "5 0 27 8 *", tz: TIME_ZONE }, asyncCommand(async () => {
+    })));
+    jobs.push(scheduler.scheduleJob({ rule: "5 0 27 8 *", tz: TIME_ZONE }, asyncCommand(async () => {
         await sendBirthdayInvitations();
         await flushPersistenceWrites();
-    }));
+    })));
+    return jobs;
 }
 
 async function startRuntime() {

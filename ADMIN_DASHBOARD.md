@@ -87,3 +87,6 @@ The web UI is organized into tabs: Overview, Chat directory, Users, Groups, Noti
 4. Open `https://mrnauthdev.dpdns.org/zalobot/` and sign in.
 5. Confirm login, dashboard counts, chat filtering, reactivation, disable, soft removal, feature overrides, retry, and logout.
 6. Confirm `/lythuyet` and the root proxy still work.
+## Windows production
+
+The reproducible Windows Server deployment is documented in [deployment/windows/README.md](deployment/windows/README.md). It uses IIS + URL Rewrite + ARR at `https://zalobot.mrnauthdev.dpdns.org/`, with Node listening privately on `127.0.0.1:3000`, PM2 process `zalobot`, and Firebase credentials stored at `C:\Secure\ZaloBot`.

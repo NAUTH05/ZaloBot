@@ -27,6 +27,8 @@ let collectionName = DEFAULT_COLLECTION;
 let db = null;
 const cache = new Map();
 let writeQueue = Promise.resolve();
+let lastPersistenceError = null;
+let lastPersistenceWriteAt = null;
 
 function clone(value) {
     return value == null ? value : JSON.parse(JSON.stringify(value));
@@ -64,13 +66,18 @@ function writeJsonStore(filePath, defaultPath, value) {
     cache.set(storeId, clone(value));
     writeQueue = writeQueue
         .catch(() => {})
-        .then(() => writeFirestoreDocument(storeId, value))
+        .then(() => writeFirestoreDocumentWithRetry(storeId, clone(value)))
+        .then(() => {
+            lastPersistenceError = null;
+            lastPersistenceWriteAt = new Date().toISOString();
+        })
         .catch((error) => {
+            lastPersistenceError = { storeId, message: error.message, at: new Date().toISOString() };
             console.error(`Không thể ghi Firestore store ${storeId}:`, error.message);
         });
 }
 
-function loadCredentials(credentialsPath = process.env.FIREBASE_SERVICE_ACCOUNT_PATH || DEFAULT_CREDENTIAL_PATH) {
+function loadCredentials(credentialsPath = process.env.FIREBASE_SERVICE_ACCOUNT_FILE || process.env.FIREBASE_SERVICE_ACCOUNT_PATH || DEFAULT_CREDENTIAL_PATH) {
     const envProjectId = String(process.env.FIREBASE_PROJECT_ID || "").trim();
     const envClientEmail = String(process.env.FIREBASE_CLIENT_EMAIL || "").trim();
     const envPrivateKey = String(process.env.FIREBASE_PRIVATE_KEY || "")
@@ -117,6 +124,20 @@ async function writeFirestoreDocument(storeId, value) {
         payload: JSON.stringify(value),
         updatedAt: new Date().toISOString()
     }, { merge: true });
+}
+
+async function writeFirestoreDocumentWithRetry(storeId, value, attempts = 3) {
+    let lastError;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+        try {
+            await writeFirestoreDocument(storeId, value);
+            return;
+        } catch (error) {
+            lastError = error;
+            if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+        }
+    }
+    throw lastError;
 }
 
 async function initializeFirestorePersistence(options = {}) {
@@ -167,11 +188,23 @@ function flushPersistenceWrites() {
     return writeQueue;
 }
 
+function getPersistenceStatus() {
+    return {
+        backend,
+        projectId: credentials?.project_id || null,
+        databaseId,
+        collectionName,
+        lastWriteAt: lastPersistenceWriteAt,
+        lastError: lastPersistenceError
+    };
+}
+
 module.exports = {
     DEFAULT_CREDENTIAL_PATH,
     flushPersistenceWrites,
     importJsonDirectory,
     initializeFirestorePersistence,
+    getPersistenceStatus,
     readJsonStore,
     writeJsonStore
 };
