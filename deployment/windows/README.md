@@ -4,7 +4,7 @@ This runbook deploys the dev_windows branch on Windows Server 2019 or later. The
 
 ## Architecture
 
-    Cloudflare -> HTTPS :443 -> IIS -> URL Rewrite -> ARR -> http://127.0.0.1:3000 -> ZaloBot
+    Cloudflare -> HTTPS :443 -> IIS -> URL Rewrite -> ARR -> http://127.0.0.1:6003 -> ZaloBot
 
 IIS is the public TLS/reverse-proxy endpoint. PM2 owns the Node process. ZaloBot's admin server is a plain Node HTTP server and does not use Express, Socket.IO, or WebSockets; WebSocket Protocol is optional unless a future feature adds one.
 
@@ -49,7 +49,7 @@ Set the real BOT_TOKEN, owner IDs, and hashed admin password. The Windows root-m
 
     NODE_ENV=production
     PORT=3000
-    ADMIN_PORT=3000
+    ADMIN_PORT=6003
     ADMIN_BASE_PATH=/
     FIREBASE_SERVICE_ACCOUNT_FILE=C:\Secure\ZaloBot\firebase-service-account.json
     TZ=Asia/Ho_Chi_Minh
@@ -62,11 +62,11 @@ Verify before PM2:
 
 ## 3. Configure the Node listener
 
-main.js binds the admin server to 127.0.0.1 and uses ADMIN_PORT, then PORT, then 6003. Set both ports to 3000. IIS owns public port 443, so port 3000 needs no Internet firewall rule.
+main.js binds the admin server to 127.0.0.1 and uses ADMIN_PORT, then PORT, then 6003. For this Windows edition, ADMIN_PORT=6003 is the actual listener; PORT=3000 remains the generic fallback value. IIS owns public port 443, so port 6003 needs no Internet firewall rule.
 
     npm start
-    Test-NetConnection 127.0.0.1 -Port 3000
-    Invoke-WebRequest http://127.0.0.1:3000/ -UseBasicParsing
+    Test-NetConnection 127.0.0.1 -Port 6003
+    Invoke-WebRequest http://127.0.0.1:6003/ -UseBasicParsing
 
 Expect HTTP 200 and the ZaloBot admin page. Stop a foreground test with Ctrl+C; PM2 is used for production.
 
@@ -151,14 +151,14 @@ The complete XML is:
             </rule>
             <rule name="ZaloBot reverse proxy" stopProcessing="true">
               <match url="(.*)" />
-              <action type="Rewrite" url="http://127.0.0.1:3000/{R:0}" appendQueryString="true" />
+    <action type="Rewrite" url="http://127.0.0.1:6003/{R:0}" appendQueryString="true" />
             </rule>
           </rules>
         </rewrite>
       </system.webServer>
     </configuration>
 
-configuration is the XML root. system.webServer scopes settings to IIS. rewrite/rules evaluates rules in order. The first rule redirects only when HTTPS is OFF, preventing HTTPS loops. The second captures the entire relative URL as {R:0}; / becomes http://127.0.0.1:3000/ and /api/admin/dashboard remains the same path. appendQueryString preserves query parameters. stopProcessing prevents later rules from changing a request.
+configuration is the XML root. system.webServer scopes settings to IIS. rewrite/rules evaluates rules in order. The first rule redirects only when HTTPS is OFF, preventing HTTPS loops. The second captures the entire relative URL as {R:0}; / becomes http://127.0.0.1:6003/ and /api/admin/dashboard remains the same path. appendQueryString preserves query parameters. stopProcessing prevents later rules from changing a request.
 
 ARR performs the outbound proxy after Rewrite. IIS/ARR preserves Host by default and supplies forwarding metadata. ZaloBot is a Node HTTP server rather than Express, so app.set('trust proxy', 1) is not applicable. Production forces Secure cookies and the admin server recognizes X-Forwarded-Proto when present.
 
@@ -193,13 +193,13 @@ Check Task Scheduler Library -> win-acme for renewal.
 
 ## 9. Cloudflare and firewall
 
-Create an A or AAAA record for zalobot.mrnauthdev.dpdns.org pointing to the Windows Server and set it to Proxied. Set SSL/TLS to Full (strict). Cloudflare connects to IIS HTTPS, never directly to Node port 3000.
+Create an A or AAAA record for zalobot.mrnauthdev.dpdns.org pointing to the Windows Server and set it to Proxied. Set SSL/TLS to Full (strict). Cloudflare connects to IIS HTTPS, never directly to Node port 6003.
 
     New-NetFirewallRule -DisplayName 'IIS HTTPS 443' -Direction Inbound -Protocol TCP -LocalPort 443 -Action Allow
     New-NetFirewallRule -DisplayName 'IIS HTTP 80 for ACME' -Direction Inbound -Protocol TCP -LocalPort 80 -Action Allow
     Get-NetFirewallRule -Enabled True | Where-Object DisplayName -Match 'IIS|HTTP|HTTPS' | Select-Object DisplayName,Enabled,Direction,Action
 
-Remove port 80 after HTTP-01 if not needed. Do not create a public 3000 rule.
+Remove port 80 after HTTP-01 if not needed. Do not create a public 6003 or 3000 rule.
 
 ## 10. HTTP to HTTPS redirect
 
@@ -207,7 +207,7 @@ The first web.config rule redirects HTTP to https://zalobot.mrnauthdev.dpdns.org
 
 ## 11. End-to-end validation
 
-1. Node: Invoke-WebRequest http://127.0.0.1:3000/ -UseBasicParsing and Test-NetConnection 127.0.0.1 -Port 3000; expect 200.
+1. Node: Invoke-WebRequest http://127.0.0.1:6003/ -UseBasicParsing and Test-NetConnection 127.0.0.1 -Port 6003; expect 200.
 2. IIS HTTP: request http://zalobot.mrnauthdev.dpdns.org/ with port 80 enabled; expect redirect to HTTPS.
 3. IIS HTTPS: Invoke-WebRequest https://zalobot.mrnauthdev.dpdns.org/ -UseBasicParsing; expect 200.
 4. Browser: verify CSS, JavaScript, login, dashboard tabs, and API calls.
@@ -221,7 +221,7 @@ The first web.config rule redirects HTTP to https://zalobot.mrnauthdev.dpdns.org
 |---|---|---|---|
 | 500.19 | Invalid web.config or missing Rewrite | IIS log and Get-Content | Fix XML or install URL Rewrite |
 | 500.50 / 500.52 | Rewrite or ARR configuration | appcmd rewrite rules | Correct rule and enable ARR proxy |
-| 502.3 | Node stopped, wrong port, or unreachable | localhost request, Test-NetConnection, pm2 status | Restart PM2 and use 127.0.0.1:3000 |
+| 502.3 | Node stopped, wrong port, or unreachable | localhost request, Test-NetConnection, pm2 status | Restart PM2 and use 127.0.0.1:6003 |
 | 404 | Wrong binding or base path | Compare localhost/public URI | Keep ADMIN_BASE_PATH=/ and root binding |
 | 403 | NTFS permissions or request filtering | IIS log | Grant site read access and review filtering |
 | 525 / 526 | Cloudflare origin TLS failure | Certificate and Get-WebBinding | Bind matching certificate and use Full (strict) |
@@ -254,7 +254,7 @@ IIS logs are stored under C:\inetpub\logs\LogFiles. Focus on sc-status, sc-subst
 - [ ] URL Rewrite and ARR installed; ARR proxy enabled.
 - [ ] C:\Apps\ZaloBot, C:\Secure\ZaloBot, and C:\inetpub\zalobot-proxy exist.
 - [ ] npm ci, npm test, npm run build:admin, and Firebase verification pass.
-- [ ] Node listens on 127.0.0.1:3000 and port 3000 is not public.
+- [ ] Node listens on 127.0.0.1:6003 and port 6003 is not public.
 - [ ] PM2 process zalobot is online, saved, and resurrects after reboot.
 - [ ] IIS site/app pool, web.config, binding, certificate, and WACS renewal are correct.
 - [ ] Cloudflare is proxied with Full (strict); TCP 443 works and TCP 80 is limited.
@@ -273,7 +273,7 @@ IIS logs are stored under C:\inetpub\logs\LogFiles. Focus on sc-status, sc-subst
     URL Rewrite + ARR
         | HTTP
         v
-    127.0.0.1:3000
+    127.0.0.1:6003
         |
     ZaloBot Node.js
        / \
