@@ -94,7 +94,8 @@ function loadCredentials(credentialsPath = process.env.FIREBASE_SERVICE_ACCOUNT_
     const envProjectId = String(process.env.FIREBASE_PROJECT_ID || "").trim();
     const envClientEmail = String(process.env.FIREBASE_CLIENT_EMAIL || "").trim();
     const envPrivateKey = normalizePrivateKey(process.env.FIREBASE_PRIVATE_KEY);
-    if (envProjectId && envClientEmail && envPrivateKey) {
+    const externalFileConfigured = Boolean(String(process.env.FIREBASE_SERVICE_ACCOUNT_FILE || "").trim());
+    if (!externalFileConfigured && envProjectId && envClientEmail && envPrivateKey) {
         return {
             project_id: envProjectId,
             client_email: envClientEmail,
