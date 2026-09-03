@@ -35,6 +35,7 @@ async function main() {
     const { getFirestore } = require("firebase-admin/firestore");
     const account = loadServiceAccount();
     if (!account.project_id || !account.client_email || !account.private_key) throw new Error("Service-account is missing required fields");
+    if (!account.client_email.endsWith(".iam.gserviceaccount.com")) throw new Error("Service-account client_email is not a Google service-account identity");
     if (!account.private_key.includes("-----BEGIN PRIVATE KEY-----") || !account.private_key.includes("-----END PRIVATE KEY-----")) throw new Error("Firebase private key is not a complete PEM; use escaped \\n sequences or FIREBASE_SERVICE_ACCOUNT_FILE");
     try {
         if (!getApps().length) initializeApp({ credential: cert(account), projectId: account.project_id });
@@ -49,6 +50,11 @@ async function main() {
 }
 
 main().catch((error) => {
-    console.error(`Firebase Admin verification failed: ${error.message}`);
+    const message = error.code === 16 || error.code === "16" || /UNAUTHENTICATED/i.test(error.message)
+        ? "Google rejected the service-account token (UNAUTHENTICATED). Check Windows time sync, service-account key status, project ID, and PM2 environment; then rerun this command."
+        : error.code === 7 || error.code === "7" || /PERMISSION_DENIED/i.test(error.message)
+            ? "Firestore permission denied. Grant the service account access to the configured Firestore database/collection."
+            : error.message;
+    console.error(`Firebase Admin verification failed: ${message}`);
     process.exitCode = 1;
 });
