@@ -77,13 +77,23 @@ function writeJsonStore(filePath, defaultPath, value) {
         });
 }
 
+function normalizePrivateKey(value) {
+    let key = String(value || "").trim();
+    if ((key.startsWith('"') && key.endsWith('"')) || (key.startsWith("'") && key.endsWith("'"))) key = key.slice(1, -1);
+    return key
+        .replace(/\\\\n/g, "\n")
+        .replace(/\\n/g, "\n")
+        .replace(/\\r?\n/g, "\n")
+        .replace(/\\r/g, "\r")
+        .replace(/\r/g, "")
+        .replace(/\\+$/g, "")
+        .trim();
+}
+
 function loadCredentials(credentialsPath = process.env.FIREBASE_SERVICE_ACCOUNT_FILE || process.env.FIREBASE_SERVICE_ACCOUNT_PATH || DEFAULT_CREDENTIAL_PATH) {
     const envProjectId = String(process.env.FIREBASE_PROJECT_ID || "").trim();
     const envClientEmail = String(process.env.FIREBASE_CLIENT_EMAIL || "").trim();
-    const envPrivateKey = String(process.env.FIREBASE_PRIVATE_KEY || "")
-        .replace(/\\r?\n/g, "\n")
-        .replace(/\\n/g, "\n")
-        .trim();
+    const envPrivateKey = normalizePrivateKey(process.env.FIREBASE_PRIVATE_KEY);
     if (envProjectId && envClientEmail && envPrivateKey) {
         return {
             project_id: envProjectId,
@@ -106,7 +116,8 @@ function loadCredentials(credentialsPath = process.env.FIREBASE_SERVICE_ACCOUNT_
     if (!data.client_email.endsWith(".iam.gserviceaccount.com")) {
         throw new Error("client_email không phải email service account Firebase");
     }
-    if (!data.private_key.includes("-----BEGIN PRIVATE KEY-----")) {
+    data.private_key = normalizePrivateKey(data.private_key);
+    if (!data.private_key.includes("-----BEGIN PRIVATE KEY-----") || !data.private_key.includes("-----END PRIVATE KEY-----")) {
         throw new Error("private_key không phải khóa PEM hợp lệ của service account Firebase");
     }
     return data;
@@ -205,6 +216,7 @@ module.exports = {
     importJsonDirectory,
     initializeFirestorePersistence,
     getPersistenceStatus,
+    normalizePrivateKey,
     readJsonStore,
     writeJsonStore
 };
