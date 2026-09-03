@@ -28,8 +28,12 @@ All endpoints below require the HttpOnly `zalobot_admin` session cookie except l
 | `POST /zalobot/api/admin/auth/login` | Start an admin session; rate limited after failed attempts |
 | `POST /zalobot/api/admin/auth/logout` | Revoke the current session |
 | `GET /zalobot/api/admin/dashboard` | Health, counts, invalid chats, errors, and recent audit events |
+| `GET /zalobot/api/admin/workspace` | Unified users, groups, chats, MSSV subscriptions, notification times, duty data, and access summary |
 | `GET /zalobot/api/admin/chats` | Filter users/groups by `status` and `type` |
-| `GET /zalobot/api/admin/users` | Registered private chats |
+| `GET /zalobot/api/admin/users` | Unified user/member records, MSSV, chat contexts, and notification status |
+| `POST /zalobot/api/admin/users` | Add a user/member to a private chat or group |
+| `PATCH /zalobot/api/admin/users/:userId` | Update display name or active/disabled/removed membership state in a chat |
+| `DELETE /zalobot/api/admin/users/:userId?chatId=...` | Remove a member; add `hard=1` to also delete that chat-specific subscription |
 | `GET /zalobot/api/admin/groups` | Registered group chats |
 | `GET /zalobot/api/admin/chats/:chatId` | Chat detail, subscriptions, and duty registration |
 | `PATCH /zalobot/api/admin/chats/:chatId` | Change status or a feature override |
@@ -73,6 +77,8 @@ The trailing slash on both `location /zalobot/` and `proxy_pass .../zalobot/` pr
 
 Older `unknown` chat types are enriched from the existing interaction registry. New inbound messages persist `private`/`group`, latest `userId`, chat title, and display name in `chatDirectory`. Command execution remains protected by the existing owner check and requires a user/chat identity from `adminSettings` or `OWNER_USER_ID`/`OWNER_CHAT_ID`.
 
+The web UI is organized into tabs: Overview, Chat directory, Users, Groups, Notifications, Duty, Chat health, Command console, Settings, and Logs/Audit. It defaults to a dark blue theme and has a light-theme toggle. Users are separate from chats: a user can have different MSSV and notification times in different group contexts. Admins can add/edit/remove members, promote an identity to admin, manage chat metadata, and review the creation/update timestamp of every notification time.
+
 ## Deployment checklist
 
 1. Set the admin credentials in the server environment, never in frontend files.
@@ -81,3 +87,6 @@ Older `unknown` chat types are enriched from the existing interaction registry. 
 4. Open `https://mrnauthdev.dpdns.org/zalobot/` and sign in.
 5. Confirm login, dashboard counts, chat filtering, reactivation, disable, soft removal, feature overrides, retry, and logout.
 6. Confirm `/lythuyet` and the root proxy still work.
+## Windows production
+
+The reproducible Windows Server deployment is documented in [deployment/windows/README.md](deployment/windows/README.md). It uses IIS + URL Rewrite + ARR at `https://zalobot.mrnauthdev.dpdns.org/`, with Node listening privately on `127.0.0.1:3000`, PM2 process `zalobot`, and Firebase credentials stored at `C:\Secure\ZaloBot`.

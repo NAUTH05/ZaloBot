@@ -2,7 +2,9 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
     formatDailySchedule,
+    formatLesson,
     formatWeeklySchedule,
+    isLessonActive,
     lessonsForDate,
     lessonsForWeek,
     normalizeStudentId,
@@ -14,7 +16,7 @@ const {
     getVietnamWeekInfo,
     toLhuQueryDate
 } = require("../timezone");
-const { escapeMarkdown } = require("../richText");
+const { escapeMarkdown, escapeMarkdownMultiline, sanitizeExternalRichText } = require("../richText");
 const EMOJI_PATTERN = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/u;
 
 test("chuẩn hóa ngày Việt Nam tại ranh giới UTC", () => {
@@ -81,8 +83,8 @@ test("định dạng tin nhắn lịch học", () => {
         }]
     };
     const message = formatDailySchedule(data, new Date("2026-08-09T05:00:00Z"));
-    assert.match(message, /^# \{green\}\[LỊCH\] HÔM NAY\{\/green\}/);
-    assert.match(message, /\{orange\}\[1 BUỔI HỌC\]\{\/orange\}/);
+    assert.match(message, /^# \{green\}\[NGÀY\] CHỦ NHẬT · 09\/08\/2026 · \[HÔM NAY\]\{\/green\}/);
+    assert.match(message, /\{orange\}1 BUỔI HỌC\{\/orange\}/);
     assert.doesNotMatch(message, EMOJI_PATTERN);
     assert.match(message, /Lập trình Web/);
     assert.match(message, /07:00 - 09:15/);
@@ -113,7 +115,7 @@ test("định dạng và nhóm lịch học cả tuần", () => {
         ]
     };
     const message = formatWeeklySchedule(data, new Date("2026-08-09T05:00:00Z"));
-    assert.match(message, /^# \{green\}\[LỊCH\] TUẦN NÀY\{\/green\}/);
+    assert.match(message, /^# \{green\}\[LỊCH HỌC\] TUẦN NÀY\{\/green\}/);
     assert.match(message, /03\/08\/2026 – 09\/08\/2026/);
     assert.match(message, /\{orange\}2 buổi học\{\/orange\}/);
     assert.match(message, /THỨ HAI/);
@@ -121,6 +123,93 @@ test("định dạng và nhóm lịch học cả tuần", () => {
     assert.match(message, /Lập trình Web/);
     assert.match(message, /Cơ sở dữ liệu/);
     assert.doesNotMatch(message, EMOJI_PATTERN);
+});
+
+test("lịch tuần chỉ đánh dấu đúng ngày hôm nay theo giờ Việt Nam qua ranh giới năm", () => {
+    const data = {
+        studentId: "123456789",
+        studentName: "Nguyễn Văn A",
+        lessons: [
+            {
+                ThoiGianBD: "2026-12-31T07:00:00",
+                ThoiGianKT: "2026-12-31T09:00:00",
+                TenMonHoc: "Môn cuối năm",
+                TinhTrang: 0
+            },
+            {
+                ThoiGianBD: "2027-01-01T07:00:00",
+                ThoiGianKT: "2027-01-01T09:00:00",
+                TenMonHoc: "Môn đầu năm",
+                TinhTrang: 0
+            }
+        ]
+    };
+    const referenceDate = new Date("2026-12-31T17:30:00.000Z");
+    const message = formatWeeklySchedule(data, referenceDate, { referenceDate });
+
+    assert.match(message, /28\/12\/2026 – 03\/01\/2027/);
+    assert.match(message, /01\/01\/2027 · \[HÔM NAY\]/);
+    assert.doesNotMatch(message, /31\/12\/2026 · \[HÔM NAY\]/);
+    assert.equal((message.match(/\[HÔM NAY\]/g) || []).length, 1);
+});
+
+test("xác định lớp đang học đúng các mốc bắt đầu và kết thúc", () => {
+    const lesson = {
+        ThoiGianBD: "2026-09-01T12:50:00",
+        ThoiGianKT: "2026-09-01T16:45:00",
+        TenMonHoc: "Phát triển ứng dụng",
+        TinhTrang: 0,
+        CalenType: 1
+    };
+
+    assert.equal(isLessonActive(lesson, new Date("2026-09-01T05:49:59.000Z")), false);
+    assert.equal(isLessonActive(lesson, new Date("2026-09-01T05:50:00.000Z")), true);
+    assert.equal(isLessonActive(lesson, new Date("2026-09-01T07:00:00.000Z")), true);
+    assert.equal(isLessonActive(lesson, new Date("2026-09-01T09:45:00.000Z")), false);
+    assert.equal(isLessonActive(lesson, new Date("2026-09-01T10:00:00.000Z")), false);
+    assert.equal(isLessonActive({ ...lesson, TinhTrang: 1 }, new Date("2026-09-01T07:00:00.000Z")), false);
+    assert.equal(isLessonActive({ ...lesson, CalenType: 2 }, new Date("2026-09-01T07:00:00.000Z")), false);
+});
+
+test("lịch sinh viên hiển thị ĐANG HỌC nhưng lịch ngoài giờ thì không", () => {
+    const data = {
+        studentId: "123456789",
+        studentName: "Nguyễn Văn A",
+        lessons: [{
+            ThoiGianBD: "2026-09-01T12:50:00",
+            ThoiGianKT: "2026-09-01T16:45:00",
+            TenMonHoc: "Phát triển ứng dụng",
+            TinhTrang: 0,
+            CalenType: 1
+        }]
+    };
+    const active = formatDailySchedule(data, new Date("2026-09-01T07:00:00.000Z"));
+    const ended = formatDailySchedule(data, new Date("2026-09-01T10:00:00.000Z"));
+    assert.match(active, /\[ĐANG HỌC\] 12:50 - 16:45/);
+    assert.doesNotMatch(ended, /\[ĐANG HỌC\]/);
+});
+
+test("các lớp trùng giờ đều được đánh dấu đang học nhất quán", () => {
+    const referenceDate = new Date("2026-09-01T07:00:00.000Z");
+    const message = formatDailySchedule({
+        studentId: "123456789",
+        studentName: "Nguyễn Văn A",
+        lessons: [
+            {
+                ThoiGianBD: "2026-09-01T12:50:00",
+                ThoiGianKT: "2026-09-01T16:45:00",
+                TenMonHoc: "Môn A",
+                TinhTrang: 0
+            },
+            {
+                ThoiGianBD: "2026-09-01T13:30:00",
+                ThoiGianKT: "2026-09-01T15:00:00",
+                TenMonHoc: "Môn B",
+                TinhTrang: 0
+            }
+        ]
+    }, referenceDate);
+    assert.equal((message.match(/\[ĐANG HỌC\]/g) || []).length, 2);
 });
 
 test("escape dữ liệu động để không làm vỡ Markdown của Zalo", () => {
@@ -142,6 +231,10 @@ test("escape dữ liệu động để không làm vỡ Markdown của Zalo", ()
     assert.match(message, /Nguyễn \\\*A\\\* \[K24\]/);
     assert.match(message, /C# \[Nâng cao\]/);
     assert.match(message, /A\\_101/);
+
+    assert.equal(escapeMarkdown("Dòng 1\n> Dòng 2"), "Dòng 1 \\> Dòng 2");
+    assert.equal(escapeMarkdownMultiline("Dòng 1\n> Dòng 2"), "Dòng 1\n\\> Dòng 2");
+    assert.equal(sanitizeExternalRichText("**Nội dung** {green}x{/green}"), "**Nội dung** (green)x(/green)");
 });
 
 test("lịch trống vẫn là một tin rich text", () => {
@@ -150,11 +243,24 @@ test("lịch trống vẫn là một tin rich text", () => {
     const weekly = formatWeeklySchedule(data, new Date("2026-08-09T05:00:00Z"));
 
     assert.match(daily, /^# \{green\}/);
-    assert.match(daily, /\{green\}\[i\] Hôm nay không có lịch học\.\{\/green\}/);
+    assert.match(daily, /\{green\}HÔM NAY KHÔNG CÓ LỊCH HỌC\{\/green\}/);
     assert.match(weekly, /^# \{green\}/);
-    assert.match(weekly, /\{green\}\[i\] Tuần này không có lịch học\.\{\/green\}/);
+    assert.match(weekly, /\{green\}TUẦN NÀY KHÔNG CÓ LỊCH HỌC\{\/green\}/);
     assert.doesNotMatch(daily, EMOJI_PATTERN);
     assert.doesNotMatch(weekly, EMOJI_PATTERN);
+});
+
+test("lịch gửi buổi tối đánh dấu rõ ngày mai", () => {
+    const targetDate = new Date("2026-09-01T22:00:00.000Z");
+    const referenceDate = new Date("2026-09-01T13:00:00.000Z");
+    const message = formatDailySchedule({
+        studentId: "123456789",
+        studentName: "Nguyễn Văn A",
+        lessons: []
+    }, targetDate, { referenceDate });
+
+    assert.match(message, /02\/09\/2026 · \[NGÀY MAI\]/);
+    assert.match(message, /NGÀY MAI KHÔNG CÓ LỊCH HỌC/);
 });
 
 test("kiểm tra định dạng MSSV", () => {
@@ -185,11 +291,54 @@ test("định dạng lịch thi và danh sách phòng trống", () => {
     };
 
     const examMsg = formatExamSchedule(examData);
-    assert.match(examMsg, /\[LỊCH THI\] DANH SÁCH MÔN THI/);
+    assert.match(examMsg, /\[LỊCH THI\]/);
     assert.match(examMsg, /Thứ Năm, 20\/08\/2026/);
     assert.match(examMsg, /Cơ sở dữ liệu/);
 
     const emptyRoomsMsg = findEmptyRooms("Cơ sở I", { lessons: [] }, new Date("2026-08-17T00:00:00Z"));
     assert.match(emptyRoomsMsg, /PHÒNG TRỐNG/);
     assert.match(emptyRoomsMsg, /A101/);
+});
+
+test("formatter dùng cùng thuật ngữ và trường dữ liệu cho lịch học", () => {
+    const message = formatLesson({
+        ThoiGianBD: "2026-09-01T12:50:00",
+        ThoiGianKT: "2026-09-01T16:45:00",
+        TenMonHoc: "Phát triển ứng dụng",
+        TenPhong: "B301_Ecommerce LAB",
+        TenCoSo: "Cơ sở I",
+        GiaoVien: "Nguyễn Minh Phúc",
+        TenNhom: "23CT113",
+        Type: 0,
+        TinhTrang: 0,
+        OnlineLink: "https://meet.example.edu/class"
+    }, 0, { referenceDate: new Date("2026-09-01T05:50:00.000Z") });
+
+    assert.match(message, /\[ĐANG HỌC\] 12:50 - 16:45 · Phát triển ứng dụng/);
+    assert.match(message, /Phòng:\*\* B301\\_Ecommerce LAB - Cơ sở I/);
+    assert.match(message, /Giảng viên:\*\* Nguyễn Minh Phúc/);
+    assert.match(message, /Nhóm:\*\* 23CT113/);
+    assert.match(message, /Hình thức:\*\* Lý thuyết/);
+    assert.match(message, /Trực tuyến:\*\* https:\/\/meet\.example\.edu\/class/);
+});
+
+test("formatter hiển thị trạng thái hủy và lịch thi, đồng thời bỏ qua trường tùy chọn bị thiếu", () => {
+    const cancelled = formatLesson({
+        ThoiGianBD: "2026-09-01T07:00:00",
+        ThoiGianKT: "2026-09-01T09:00:00",
+        TenMonHoc: "Môn đã hủy",
+        TinhTrang: 1
+    }, 0);
+    const exam = formatLesson({
+        ThoiGianBD: "2026-09-02T07:00:00",
+        ThoiGianKT: "2026-09-02T09:00:00",
+        TenMonHoc: "Môn thi",
+        TinhTrang: 0,
+        CalenType: 2
+    }, 0);
+
+    assert.match(cancelled, /Trạng thái:\*\* \{orange\}\[BÁO NGHỈ\]/);
+    assert.doesNotMatch(cancelled, /Phòng:|Giảng viên:|Nhóm:|Hình thức:|Trực tuyến:/);
+    assert.match(exam, /Trạng thái:\*\* \{orange\}\[LỊCH THI\]/);
+    assert.match(exam, /Hình thức:\*\* Thi/);
 });

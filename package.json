@@ -8,6 +8,8 @@
     "start": "node main.js",
     "admin:hash-password": "node hashAdminPassword.js",
     "migrate:firestore": "node migrateToFirestore.js recent_json",
+    "verify:firebase-admin": "node scripts/verifyFirebaseAdmin.js",
+    "build:admin": "node scripts/verifyAdminUi.js",
     "test": "node --test --test-force-exit"
   },
   "dependencies": {

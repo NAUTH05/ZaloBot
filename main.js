@@ -21,9 +21,12 @@ const {
     searchTeacherByName
 } = require("./lhuSchedule");
 const {
+    disableClassStartNotifications,
     disableNotifications,
+    enableClassStartNotifications,
     enableNotifications,
     getAllSubscriptions,
+    getClassStartNotificationSubscriptions,
     getEnabledSubscriptions,
     getSubscription,
     DEFAULT_NOTIFICATION_TIME,
@@ -33,6 +36,11 @@ const {
     saveStudent,
     updateNotificationTime
 } = require("./subscriptions");
+const {
+    createClassStartReminderService,
+    DEFAULT_CACHE_TTL_MS,
+    DEFAULT_GRACE_PERIOD_MS
+} = require("./classStartNotifications");
 const { getMessageContext } = require("./userContext");
 const {
     captureScheduleChange,
@@ -42,7 +50,21 @@ const {
 } = require("./scheduleChanges");
 const { TIME_ZONE, getVietnamDateInfo } = require("./timezone");
 const { resolveScheduleTarget } = require("./scheduleDatePolicy");
-const { escapeMarkdown } = require("./richText");
+const { escapeMarkdown, escapeMarkdownMultiline, sanitizeExternalRichText } = require("./richText");
+const {
+    formatAdminHelp,
+    formatClassStartEnabled,
+    formatClassStartStatus,
+    formatDailyNotificationEnabled,
+    formatDutyHelp,
+    formatErrorMessage,
+    formatGeneralHelp,
+    formatMissingStudentIdMessage,
+    formatStudentSavedMessage,
+    formatSuccessMessage,
+    formatWarningMessage,
+    formatWelcomeMessage
+} = require("./messageTemplates");
 const { getInteractionTargets, recordInteraction } = require("./interactionRegistry");
 const {
     getAllChats,
@@ -105,6 +127,7 @@ if (!process.env.BOT_TOKEN) {
 
 const bot = new ZaloBot(process.env.BOT_TOKEN, { polling: false });
 const dashboardCommandContext = new AsyncLocalStorage();
+const registeredSchedulers = new WeakSet();
 
 function logDiscord(level, message) {
     if (level === "ERROR" || level === "WARN") {
@@ -208,20 +231,6 @@ function getCommandArgument(match) {
     return (match?.[1] || "").trim();
 }
 
-function friendlyError(error) {
-    if (error?.userMessage) return error.userMessage;
-    if (error?.message) return error.message;
-    return "Không thể thực hiện yêu cầu lúc này. Bạn vui lòng thử lại sau.";
-}
-
-function formatErrorMessage(error) {
-    return `# {orange}[X] KHÔNG THỂ THỰC HIỆN{/orange}\n\n${escapeMarkdown(friendlyError(error))}`;
-}
-
-function formatWarningMessage(title, message) {
-    return `# {orange}[!] ${escapeMarkdown(title)}{/orange}\n\n${message}`;
-}
-
 function asyncCommand(handler) {
     return (msg, match) => {
         Promise.resolve(handler(msg, match)).catch((error) => {
@@ -257,6 +266,12 @@ function isOwner(context) {
     const configured = getConfiguredAdminIds();
     if (configured.userIds.length === 0 && configured.chatIds.length === 0) return false;
     return isConfiguredAdmin(context);
+}
+
+async function sendUserError(chatId, error, operation = "command") {
+    console.error(`Lỗi ${operation}:`, error);
+    logDiscord("ERROR", `${operation}_error: ${error?.message || error}`);
+    await sendMessage(chatId, formatErrorMessage(error));
 }
 
 async function requireOwner(context) {
@@ -333,7 +348,7 @@ function formatBirthdayInvitation(year) {
 
 Hôm nay, **27/08**, là sinh nhật của tôi. Năm nay tôi **${age} tuổi**!
 
-> Hãy dùng **/sinhnhat [câu hỏi]** để gửi cho tôi bất kỳ câu hỏi nào bạn muốn.
+> Dùng **/sinhnhat [câu hỏi]** để gửi câu hỏi bạn muốn.
 > **Ví dụ:** /sinhnhat Điều bạn tự hào nhất trong năm qua là gì?
 
 {orange}Cổng nhận câu hỏi mở đến hết ngày 27/08 theo giờ Việt Nam.{/orange}`;
@@ -342,7 +357,7 @@ Hôm nay, **27/08**, là sinh nhật của tôi. Năm nay tôi **${age} tuổi**
 function formatBirthdayResults(year, questions) {
     const age = Math.max(0, Number(year) - BIRTH_YEAR);
     const sections = questions.map((question) =>
-        `## {orange}[#${question.id}] ${escapeMarkdown(question.text)}{/orange}\n${escapeMarkdown(question.answer)}`
+        `## {orange}[#${question.id}] ${escapeMarkdown(question.text)}{/orange}\n${escapeMarkdownMultiline(question.answer)}`
     );
     return `# {green}[SINH NHẬT ${year}] CÔNG BỐ HỎI & ĐÁP{/green}
 
@@ -410,15 +425,7 @@ async function publishBirthdayResults(year) {
 }
 
 async function sendWelcomeMessage(chatId, displayName = "bạn") {
-    const name = escapeMarkdown(displayName || "bạn");
-    await sendMessage(
-        chatId,
-        "# {green}[BOT] LỊCH HỌC LHU{/green}\n\n" +
-        `Xin chào **${name}**!\n\n` +
-        "> **Tra cứu:** Dùng **/find [MSSV]** để lưu mã sinh viên.\n" +
-        "> **Thông báo:** Sau đó dùng **/dangky** để bật thông báo lịch học.\n\n" +
-        "{orange}Gõ /help để xem toàn bộ lệnh.{/orange}"
-    );
+    await sendMessage(chatId, formatWelcomeMessage(displayName));
 }
 
 function parseDangKyArgument(argument, savedStudentId) {
@@ -464,6 +471,9 @@ const COMMAND_EXAMPLES = {
     lichgv: "/lichgv Nguyễn Văn A",
     phongtrong: "/phongtrong 1",
     ai: "/ai Hôm nay tôi học môn gì?",
+    batnhaclich: "/batnhaclich",
+    tatnhaclich: "/tatnhaclich",
+    trangthainhaclich: "/trangthainhaclich",
     huythongbao: "/huythongbao",
     sinhnhat: "/sinhnhat Bạn muốn hỏi tôi điều gì?",
     myid: "/myid",
@@ -478,7 +488,7 @@ const COMMAND_EXAMPLES = {
     help411: "/help411",
     helpadmin: "/helpadmin",
     time: "/time",
-    thongbao: "/thongbao Bot vừa cập nhật tính năng mới",
+    thongbao: "/thongbao Đã cập nhật tính năng mới",
     blockbot: "/blockbot 123456",
     unblockbot: "/unblockbot 123456",
     blockai: "/blockai 123456",
@@ -543,98 +553,8 @@ function suggestCommandCorrection(command) {
 
 function formatNotificationTimes(subscription) {
     const times = normalizeNotificationTimes(subscription);
-    if (!times.length) return "> _Chưa có giờ thông báo nào._";
+    if (!times.length) return "> Chưa có giờ nhận lịch.";
     return times.map((item) => `- **#${item.id}** — \`${item.time}\``).join("\n");
-}
-
-function formatGeneralHelp() {
-    return `# {green}[BOT] HƯỚNG DẪN ZALOBOT LHU{/green}
-
-## {orange}[BẮT ĐẦU]{/orange}
-- **/start** — Xem lời chào và hướng dẫn bắt đầu. _(Ví dụ: /start)_
-
-## {orange}[TRA CỨU] LỊCH HỌC & THI{/orange}
-- **/find [MSSV]** — Kiểm tra và lưu MSSV. _(Ví dụ: /find 123456789)_
-- **/lich [MSSV]** — Xem lịch học hôm nay. _(Ví dụ: /lich 123456789)_
-- **/lichtuan [MSSV]** — Xem lịch học cả tuần. _(Ví dụ: /lichtuan 123456789)_
-- **/lichthi [MSSV]** — Xem danh sách lịch thi học kỳ. _(Ví dụ: /lichthi 123456789)_
-- **/lichgv [Tên giảng viên]** — Xem lịch giảng dạy. _(Ví dụ: /lichgv Nguyễn Văn A)_
-- **/phongtrong [Cơ sở]** — Tìm phòng trống. _(Ví dụ: /phongtrong 1)_
-
-## {orange}[TRỢ LÝ AI] HỎI ĐÁP{/orange}
-- **/ai [Câu hỏi]** — Hỏi AI về lịch học. _(Ví dụ: /ai Trong 2 tuần tới tôi rảnh ngày nào?)_
-
-## {orange}[THÔNG BÁO] LỊCH HỌC{/orange}
-- **/dangky [MSSV]** — Bật thông báo với giờ mặc định 06:00. _(Ví dụ: /dangky 123456789)_
-- **/dangky [hh:mm]** — Bật thông báo lịch học theo giờ tùy chọn. _(Ví dụ: /dangky 05:30)_
-- **/dangky [MSSV] [hh:mm]** — Lưu MSSV và giờ thông báo. _(Ví dụ: /dangky 123456789 05:30)_
-- **/danhsachdangky** — Xem các giờ đang nhận lịch. _(Ví dụ: /danhsachdangky)_
-- **/suadangky #ID [hh:mm]** — Sửa một giờ thông báo. _(Ví dụ: /suadangky #1 20:00)_
-- **/xoadangky #ID** — Xóa một giờ thông báo. _(Ví dụ: /xoadangky #1)_
-- **/huythongbao** — Tắt thông báo lịch học. _(Ví dụ: /huythongbao)_
-
-## {orange}[KHÁC] TIỆN ÍCH{/orange}
-- **/sinhnhat [Câu hỏi]** — Gửi câu hỏi sinh nhật ngày 27/08. _(Ví dụ: /sinhnhat Điều bạn mong chờ nhất ở tuổi mới là gì?)_
-- **/time** — Xem giờ hệ thống. _(Ví dụ: /time)_
-- **/myid** — Xem User ID và Chat ID. _(Ví dụ: /myid)_
-- **/help** — Xem hướng dẫn này. _(Ví dụ: /help)_`;
-}
-
-function formatDutyHelp() {
-    return `# {green}[PHÒNG 411] HƯỚNG DẪN TRỰC NHẬT{/green}
-
-## {orange}[LỊCH TRỰC NHẬT PHÒNG 411]{/orange}
-- **/lichtruc** — Xem phân công trực nhật hôm nay. _(Ví dụ: /lichtruc)_
-- **/danhsachlichtruc** — Xem toàn bộ lịch trực nhật phòng 411. _(Ví dụ: /danhsachlichtruc)_
-- **/dangkylich** — Nhận thông báo trực nhật lúc 06:00 hàng ngày. _(Ví dụ: /dangkylich)_
-- **/huydangkylich** — Hủy thông báo trực nhật. _(Ví dụ: /huydangkylich)_
-`;
-}
-
-function formatAdminHelp() {
-    return `${formatGeneralHelp()}
-
-${formatDutyHelp()}
-
-# {orange}[ADMIN] TOÀN BỘ LỆNH QUẢN TRỊ{/orange}
-
-## {orange}[PHÂN QUYỀN]{/orange}
-- **/blockbot [ID/Tên]** — Chặn dùng Bot. _(Ví dụ: /blockbot 123456)_
-- **/unblockbot [ID/Tên]** — Bỏ chặn dùng Bot. _(Ví dụ: /unblockbot 123456)_
-- **/blockai [ID/Tên]** — Chặn dùng AI. _(Ví dụ: /blockai 123456)_
-- **/unblockai [ID/Tên]** — Bỏ chặn dùng AI. _(Ví dụ: /unblockai 123456)_
-- **/allowbot [ID/Tên]** — Thêm vào allowlist Bot. _(Ví dụ: /allowbot 123456)_
-- **/unallowbot [ID/Tên]** — Xóa khỏi allowlist Bot. _(Ví dụ: /unallowbot 123456)_
-- **/allowai [ID/Tên]** — Thêm vào allowlist AI. _(Ví dụ: /allowai 123456)_
-- **/unallowai [ID/Tên]** — Xóa khỏi allowlist AI. _(Ví dụ: /unallowai 123456)_
-- **/accessmode [bot|ai] [all|allowlist]** — Đổi chế độ truy cập. _(Ví dụ: /accessmode bot allowlist)_
-- **/accesslist** — Xem danh sách phân quyền. _(Ví dụ: /accesslist)_
-
-## {orange}[TRỰC NHẬT PHÒNG 411]{/orange}
-- **/themlichtruc [dd/mm] [Tên 1 - Tên 2]** — Thêm lịch trực nhật. _(Ví dụ: /themlichtruc 25/08 Nhân - Sang)_
-- **/sualichtruc [ID/Ngày] [Nội dung mới]** — Sửa lịch trực nhật. _(Ví dụ: /sualichtruc 25/08 Nhân - Cường)_
-- **/xoalichtruc [ID/Ngày]** — Xóa lịch trực nhật. _(Ví dụ: /xoalichtruc 25/08)_
-
-## {orange}[HỎI ĐÁP SINH NHẬT]{/orange}
-- **/danhsach [Năm]** — Xem danh sách câu hỏi. _(Ví dụ: /danhsach 2026)_
-- **/them [Câu hỏi]** — Thêm câu hỏi. _(Ví dụ: /them Câu hỏi mới)_
-- **/sua [ID] [Câu hỏi mới]** — Sửa câu hỏi. _(Ví dụ: /sua 1 Nội dung mới)_
-- **/xoa [ID]** — Xóa câu hỏi. _(Ví dụ: /xoa 1)_
-- **/traloi [ID] [Câu trả lời]** — Trả lời câu hỏi. _(Ví dụ: /traloi 1 Nội dung trả lời)_
-- **/congbo [Năm]** — Công bố các câu đã trả lời. _(Ví dụ: /congbo 2026)_
-
-## {orange}[KIỂM TRA HỆ THỐNG]{/orange}
-- **/quanlychat [bộ lọc] [trang]** — Xem user/nhóm và trạng thái gửi thông báo. _(Ví dụ: /quanlychat inactive 1)_
-- **/thongtinch [Chat ID]** — Xem chi tiết một chat. _(Ví dụ: /thongtinch 123456)_
-- **/vohieuchat [Chat ID] [lý do]** — Admin tắt gửi tới chat. _(Ví dụ: /vohieuchat 123456 yêu cầu ngừng)_
-- **/kichhoatchat [Chat ID]** — Kích hoạt lại chat. _(Ví dụ: /kichhoatchat 123456)_
-- **/thuchatchat [Chat ID]** — Gửi thử và kích hoạt nếu thành công. _(Ví dụ: /thuchatchat 123456)_
-- **/xoachat [Chat ID]** — Xóa mềm khỏi các tác vụ thông báo. _(Ví dụ: /xoachat 123456)_
-- **/chatfeature [Chat ID] [schedule|duty|birthday|broadcast] [on|off|auto]** — Ghi đè từng tính năng.
-- **/thongbao [Nội dung]** — Gửi thông báo cập nhật tới các chat đang dùng bot. _(Ví dụ: /thongbao Bot vừa cập nhật tính năng mới)_
-- **/test6h** — Thử gửi lịch học 06:00. _(Ví dụ: /test6h)_
-- **/test6hlichtruc** — Thử gửi lịch trực nhật phòng 411. _(Ví dụ: /test6hlichtruc)_
-- **/helpadmin** — Xem toàn bộ lệnh. _(Ví dụ: /helpadmin)_`;
 }
 
 function formatChatTime(value) {
@@ -734,17 +654,10 @@ async function handleCommand(msg, parsedCommand) {
 
             await sendMessage(
                 chatId,
-                "# {green}[OK] ĐÃ LƯU MSSV{/green}\n\n" +
-                `**Sinh viên:** ${escapeMarkdown(data.studentName || "Sinh viên")}\n` +
-                `> **MSSV:** ${escapeMarkdown(studentId)}\n` +
-                `> **Tài khoản:** ${escapeMarkdown(context.userDisplayName || "Tài khoản Zalo này")}\n\n` +
-                (subscription.notificationsEnabled
-                    ? "{green}[BẬT] Thông báo lịch đang hoạt động.{/green}\n\n"
-                    : "{orange}[TẮT] Thông báo lịch chưa được bật.{/orange}\n\n") +
-                "> Dùng **/lich** để xem lịch hoặc **/dangky [hh:mm]** để chọn giờ nhận lịch."
+                formatStudentSavedMessage(data, subscription)
             );
         } catch (error) {
-            await sendMessage(chatId, formatErrorMessage(error));
+            await sendUserError(chatId, error, "find");
         }
     } else if (command === "dangky") {
         const saved = getSubscription(context);
@@ -755,13 +668,12 @@ async function handleCommand(msg, parsedCommand) {
         const hasExplicitTime = argument.includes(":") || registrationParts.length === 2;
 
         if (!studentId || (hasExplicitTime && !parsedRegistration.notificationTime)) {
-            await sendMessage(
-                chatId,
-                formatWarningMessage(
-                    argument ? "SAI CÚ PHÁP" : "CHƯA LƯU MSSV",
+            await sendMessage(chatId, argument
+                ? formatWarningMessage(
+                    "SAI CÚ PHÁP",
                     "> **Cú pháp:** /dangky [hh:mm] hoặc /dangky [MSSV] [hh:mm]\n> **Ví dụ:** /dangky 05:30\n> Giờ hợp lệ từ **00:00** đến **23:59**."
                 )
-            );
+                : formatMissingStudentIdMessage("dangky"));
             return;
         }
 
@@ -779,20 +691,17 @@ async function handleCommand(msg, parsedCommand) {
             initializeScheduleSnapshot(data, new Date(), !wasAlreadyWatched);
             await sendMessage(
                 chatId,
-                "# {green}[OK] ĐĂNG KÝ THÀNH CÔNG{/green}\n\n" +
-                `**Sinh viên:** ${escapeMarkdown(data.studentName || "Sinh viên")}\n` +
-                `> **MSSV:** ${escapeMarkdown(studentId)}\n\n` +
-                `{green}Đã đăng ký ${notificationTimes.length} giờ: ${notificationTimes.map((item) => `#${item.id} ${item.time}`).join(", ")}.{/green}`
+                formatDailyNotificationEnabled(data, notificationTimes)
             );
         } catch (error) {
-            await sendMessage(chatId, formatErrorMessage(error));
+            await sendUserError(chatId, error, "daily_subscription");
         }
     } else if (command === "danhsachdangky") {
         const saved = getSubscription(context);
-        await sendMessage(
-            chatId,
-            `# {green}[THÔNG BÁO] DANH SÁCH GIỜ NHẬN LỊCH{/green}\n\n${formatNotificationTimes(saved)}`
-        );
+        const times = normalizeNotificationTimes(saved);
+        await sendMessage(chatId, times.length
+            ? `# {green}[GIỜ NHẬN LỊCH]{/green}\n\n${formatNotificationTimes(saved)}`
+            : formatWarningMessage("CHƯA CÓ GIỜ NHẬN LỊCH", "> Dùng **/dangky [hh:mm]** để thêm giờ nhận lịch."));
     } else if (command === "suadangky") {
         const saved = getSubscription(context);
         const parsed = parseNotificationTimeEditArgument(argument);
@@ -807,7 +716,7 @@ async function handleCommand(msg, parsedCommand) {
         await sendMessage(
             chatId,
             updated
-                ? `# {green}[OK] ĐÃ SỬA GIỜ THÔNG BÁO{/green}\n\n${formatNotificationTimes(updated)}`
+                ? formatSuccessMessage("ĐÃ CẬP NHẬT GIỜ NHẬN LỊCH", formatNotificationTimes(updated))
                 : formatWarningMessage("KHÔNG THỂ SỬA", "> ID không tồn tại hoặc giờ này đã được đăng ký.")
         );
     } else if (command === "xoadangky") {
@@ -823,23 +732,17 @@ async function handleCommand(msg, parsedCommand) {
         await sendMessage(
             chatId,
             removed
-                ? `# {green}[OK] ĐÃ XÓA GIỜ ${removed.removed.time}{/green}\n\n${formatNotificationTimes(removed.subscription)}`
-                : formatWarningMessage("KHÔNG TÌM THẤY", `> Không có giờ thông báo **#${parsedId}**.`)
+                ? formatSuccessMessage(`ĐÃ XÓA GIỜ ${removed.removed.time}`, formatNotificationTimes(removed.subscription))
+                : formatWarningMessage("KHÔNG TÌM THẤY", `> Không có giờ nhận lịch **#${parsedId}**.`)
         );
     } else if (command === "lich") {
         const saved = getSubscription(context);
         const studentId = resolveStudentIdForCommand(argument, saved?.studentId);
 
         if (!studentId) {
-            await sendMessage(
-                chatId,
-                formatWarningMessage(
-                    argument ? "MSSV KHÔNG HỢP LỆ" : "CHƯA LƯU MSSV",
-                    argument
-                        ? "> MSSV phải gồm đúng **9 chữ số**."
-                        : "> Hãy dùng **/find [MSSV]** hoặc **/lich [MSSV]**."
-                )
-            );
+            await sendMessage(chatId, argument
+                ? formatWarningMessage("MSSV KHÔNG HỢP LỆ", "> MSSV phải gồm đúng **9 chữ số**.")
+                : formatMissingStudentIdMessage("lich"));
             return;
         }
 
@@ -847,22 +750,16 @@ async function handleCommand(msg, parsedCommand) {
             const data = await fetchStudentSchedule(studentId);
             await sendMessage(chatId, formatDailySchedule(data));
         } catch (error) {
-            await sendMessage(chatId, formatErrorMessage(error));
+            await sendUserError(chatId, error, "daily_schedule");
         }
     } else if (command === "lichtuan") {
         const saved = getSubscription(context);
         const studentId = resolveStudentIdForCommand(argument, saved?.studentId);
 
         if (!studentId) {
-            await sendMessage(
-                chatId,
-                formatWarningMessage(
-                    argument ? "MSSV KHÔNG HỢP LỆ" : "CHƯA LƯU MSSV",
-                    argument
-                        ? "> MSSV phải gồm đúng **9 chữ số**."
-                        : "> Hãy dùng **/find [MSSV]** hoặc **/lichtuan [MSSV]**."
-                )
-            );
+            await sendMessage(chatId, argument
+                ? formatWarningMessage("MSSV KHÔNG HỢP LỆ", "> MSSV phải gồm đúng **9 chữ số**.")
+                : formatMissingStudentIdMessage("lichtuan"));
             return;
         }
 
@@ -870,15 +767,16 @@ async function handleCommand(msg, parsedCommand) {
             const data = await fetchStudentSchedule(studentId);
             await sendMessage(chatId, formatWeeklySchedule(data));
         } catch (error) {
-            await sendMessage(chatId, formatErrorMessage(error));
+            await sendUserError(chatId, error, "weekly_schedule");
         }
     } else if (command === "huythongbao") {
         if (disableNotifications(context)) {
             await sendMessage(
                 chatId,
-                "# {orange}[TẮT] ĐÃ TẮT THÔNG BÁO{/orange}\n\n" +
-                "> Đã tắt tự động gửi thông báo lịch học hàng ngày.\n\n" +
-                "{green}MSSV đã lưu vẫn có thể dùng với /lich và /lichtuan.{/green}"
+                formatSuccessMessage(
+                    "ĐÃ TẮT THÔNG BÁO LỊCH",
+                    "> MSSV đã lưu vẫn dùng được với **/lich** và **/lichtuan**."
+                )
             );
         } else {
             await sendMessage(
@@ -889,6 +787,27 @@ async function handleCommand(msg, parsedCommand) {
                 )
             );
         }
+    } else if (command === "batnhaclich") {
+        const saved = getSubscription(context);
+        if (!saved?.studentId) {
+            await sendMessage(chatId, formatMissingStudentIdMessage("batnhaclich"));
+            return;
+        }
+        const updated = enableClassStartNotifications(context);
+        await sendMessage(chatId, formatClassStartEnabled(updated || saved));
+    } else if (command === "tatnhaclich") {
+        if (disableClassStartNotifications(context)) {
+            await sendMessage(chatId, formatSuccessMessage("ĐÃ TẮT NHẮC GIỜ HỌC"));
+        } else {
+            await sendMessage(chatId, formatWarningMessage("NHẮC GIỜ HỌC ĐANG TẮT", "> Dùng **/batnhaclich** để bật."));
+        }
+    } else if (command === "trangthainhaclich") {
+        const saved = getSubscription(context);
+        if (!saved?.studentId) {
+            await sendMessage(chatId, formatMissingStudentIdMessage("trangthainhaclich"));
+            return;
+        }
+        await sendMessage(chatId, formatClassStartStatus(saved));
     } else if (command === "sinhnhat") {
         const dateInfo = getVietnamDateInfo();
         if (!isBirthdayDate(dateInfo)) {
@@ -916,27 +835,21 @@ async function handleCommand(msg, parsedCommand) {
                 }
             });
             await sendMessage(chatId,
-                `# {green}[OK] ĐÃ GHI NHẬN CÂU HỎI #${question.id}{/green}\n\n` +
+                `# {green}✓ ĐÃ GHI NHẬN CÂU HỎI #${question.id}{/green}\n\n` +
                 `> ${escapeMarkdown(question.text)}\n\n` +
-                "Cảm ơn bạn! Câu trả lời sẽ được gửi khi chủ BOT dùng **/congbo**."
+                "Cảm ơn bạn. Câu trả lời sẽ được công bố sau."
             );
         } catch (error) {
-            await sendMessage(chatId, formatWarningMessage("KHÔNG THỂ GHI NHẬN", `> ${escapeMarkdown(error.message)}`));
+            await sendUserError(chatId, error, "birthday_question");
         }
     } else if (command === "lichthi") {
         const saved = getSubscription(context);
         const studentId = resolveStudentIdForCommand(argument, saved?.studentId);
 
         if (!studentId) {
-            await sendMessage(
-                chatId,
-                formatWarningMessage(
-                    argument ? "MSSV KHÔNG HỢP LỆ" : "CHƯA LƯU MSSV",
-                    argument
-                        ? "> MSSV phải gồm đúng **9 chữ số**."
-                        : "> Hãy dùng **/find [MSSV]** hoặc **/lichthi [MSSV]**."
-                )
-            );
+            await sendMessage(chatId, argument
+                ? formatWarningMessage("MSSV KHÔNG HỢP LỆ", "> MSSV phải gồm đúng **9 chữ số**.")
+                : formatMissingStudentIdMessage("lichthi"));
             return;
         }
 
@@ -944,7 +857,7 @@ async function handleCommand(msg, parsedCommand) {
             const data = await fetchExamSchedule(studentId);
             await sendMessage(chatId, formatExamSchedule(data));
         } catch (error) {
-            await sendMessage(chatId, formatErrorMessage(error));
+            await sendUserError(chatId, error, "exam_schedule");
         }
     } else if (command === "lichgv") {
         if (!argument) {
@@ -965,7 +878,7 @@ async function handleCommand(msg, parsedCommand) {
                     chatId,
                     formatWarningMessage(
                         "KHÔNG TÌM THẤY GIẢNG VIÊN",
-                        `> Không tìm thấy giảng viên nào có tên **"${escapeMarkdown(argument)}"**.`
+                        "> Không tìm thấy giảng viên phù hợp với tên bạn nhập."
                     )
                 );
                 return;
@@ -976,7 +889,7 @@ async function handleCommand(msg, parsedCommand) {
             scheduleData.teacherName = selected.fullName;
             await sendMessage(chatId, formatTeacherSchedule(scheduleData));
         } catch (error) {
-            await sendMessage(chatId, formatErrorMessage(error));
+            await sendUserError(chatId, error, "teacher_schedule");
         }
     } else if (command === "phongtrong") {
         const campus = argument || "Cơ sở I";
@@ -1014,23 +927,17 @@ async function handleCommand(msg, parsedCommand) {
 
         const saved = getSubscription(context);
         if (!saved?.studentId) {
-            await sendMessage(
-                chatId,
-                formatWarningMessage(
-                    "CHƯA LƯU MSSV",
-                    "> Vui lòng dùng **/find [MSSV]** trước để lưu mã sinh viên trước khi hỏi AI lịch học."
-                )
-            );
+            await sendMessage(chatId, formatMissingStudentIdMessage("ai"));
             return;
         }
 
         try {
             const scheduleData = await fetchStudentSchedule(saved.studentId);
-            await sendMessage(chatId, "# {green}[AI] TRỢ LÝ LỊCH HỌC{/green}\n\n_Đang phân tích dữ liệu lịch học..._");
+            await sendMessage(chatId, "# {green}[TRỢ LÝ LỊCH HỌC]{/green}\n\n_Đang phân tích lịch học..._");
             const answerText = await askScheduleAi(argument, scheduleData);
-            await sendMessage(chatId, `# {green}[AI] CÂU TRẢ LỜI{/green}\n\n${answerText}`);
+            await sendMessage(chatId, `# {green}[TRỢ LÝ LỊCH HỌC] CÂU TRẢ LỜI{/green}\n\n${sanitizeExternalRichText(answerText)}`);
         } catch (error) {
-            await sendMessage(chatId, formatErrorMessage(error));
+            await sendUserError(chatId, error, "ai_schedule");
         }
     } else if (command === "blockbot") {
         if (!await requireOwner(context)) return;
@@ -1175,7 +1082,7 @@ async function handleCommand(msg, parsedCommand) {
             setChatStatus(targetId, "removed", String(context.userId), "admin_removed");
             await sendMessage(chatId, `# {orange}[CHAT] ĐÃ XÓA MỀM{/orange}\n\n> \`${escapeMarkdown(targetId)}\`\n> Dữ liệu lịch sử vẫn được giữ lại.`);
         } else {
-            const result = await sendNotification(targetId, "[TEST] Bot đang kiểm tra khả năng gửi thông báo tới chat này.", { feature: "broadcast", operation: "admin_test", bypassEligibility: true });
+            const result = await sendNotification(targetId, "# {orange}[ADMIN TEST]{/orange}\n\nĐang kiểm tra khả năng gửi thông báo tới cuộc trò chuyện này.", { feature: "broadcast", operation: "admin_test", bypassEligibility: true });
             if (result.sent) {
                 setChatStatus(targetId, "active", String(context.userId), "admin_test_succeeded");
                 await sendMessage(chatId, `# {green}[CHAT] KIỂM TRA THÀNH CÔNG{/green}\n\n> \`${escapeMarkdown(targetId)}\``);
@@ -1237,7 +1144,7 @@ async function handleCommand(msg, parsedCommand) {
                 text: argument,
                 author: { userId: context.userId, displayName: "Chủ BOT", chatId }
             });
-            await sendMessage(chatId, `# {green}[OK] ĐÃ THÊM CÂU HỎI #${question.id}{/green}\n\n> ${escapeMarkdown(question.text)}`);
+            await sendMessage(chatId, `# {green}✓ ĐÃ THÊM CÂU HỎI #${question.id}{/green}\n\n> ${escapeMarkdown(question.text)}`);
         } catch (error) {
             await sendMessage(chatId, formatWarningMessage("KHÔNG THỂ THÊM", `> ${escapeMarkdown(error.message)}`));
         }
@@ -1251,7 +1158,7 @@ async function handleCommand(msg, parsedCommand) {
         try {
             const question = updateQuestion(input.id, input.text);
             await sendMessage(chatId, question
-                ? `# {green}[OK] ĐÃ SỬA CÂU HỎI #${question.id}{/green}\n\n> ${escapeMarkdown(question.text)}`
+                ? `# {green}✓ ĐÃ SỬA CÂU HỎI #${question.id}{/green}\n\n> ${escapeMarkdown(question.text)}`
                 : formatWarningMessage("KHÔNG TÌM THẤY", `> Không có câu hỏi **#${input.id}**.`));
         } catch (error) {
             await sendMessage(chatId, formatWarningMessage("KHÔNG THỂ SỬA", `> ${escapeMarkdown(error.message)}`));
@@ -1265,7 +1172,7 @@ async function handleCommand(msg, parsedCommand) {
         }
         const question = deleteQuestion(Number(id));
         await sendMessage(chatId, question
-            ? `# {green}[OK] ĐÃ XÓA CÂU HỎI #${question.id}{/green}\n\n> ${escapeMarkdown(question.text)}`
+            ? `# {green}✓ ĐÃ XÓA CÂU HỎI #${question.id}{/green}\n\n> ${escapeMarkdown(question.text)}`
             : formatWarningMessage("KHÔNG TÌM THẤY", `> Không có câu hỏi **#${id}**.`));
     } else if (command === "traloi") {
         if (!await requireOwner(context)) return;
@@ -1280,7 +1187,7 @@ async function handleCommand(msg, parsedCommand) {
         try {
             const question = answerQuestion(input.id, input.text);
             await sendMessage(chatId, question
-                ? `# {green}[OK] ĐÃ TRẢ LỜI CÂU #${question.id}{/green}\n\n**Hỏi:** ${escapeMarkdown(question.text)}\n> **Trả lời:** ${escapeMarkdown(question.answer)}`
+                ? `# {green}✓ ĐÃ TRẢ LỜI CÂU #${question.id}{/green}\n\n**Hỏi:** ${escapeMarkdown(question.text)}\n> **Trả lời:** ${escapeMarkdown(question.answer)}`
                 : formatWarningMessage("KHÔNG TÌM THẤY", `> Không có câu hỏi **#${input.id}**.`));
         } catch (error) {
             await sendMessage(chatId, formatWarningMessage("KHÔNG THỂ TRẢ LỜI", `> ${escapeMarkdown(error.message)}`));
@@ -1306,7 +1213,7 @@ async function handleCommand(msg, parsedCommand) {
             return;
         }
         await sendMessage(chatId,
-            `# {green}[OK] ĐÃ CÔNG BỐ HỎI & ĐÁP ${year}{/green}\n\n` +
+            `# {green}✓ ĐÃ CÔNG BỐ HỎI & ĐÁP ${year}{/green}\n\n` +
             `> **Gửi thành công:** ${result.sent}\n` +
             `> **Đã có cùng bản công bố:** ${result.skipped}\n` +
             `> **Gửi lỗi:** ${result.failed}\n` +
@@ -1318,15 +1225,15 @@ async function handleCommand(msg, parsedCommand) {
         if (!argument) {
             await sendMessage(chatId, formatWarningMessage(
                 "THIẾU NỘI DUNG",
-                "> **Cú pháp:** /thongbao [Nội dung cập nhật]\n> **Ví dụ:** /thongbao Bot vừa cập nhật giờ thông báo tùy chọn."
+                "> **Cú pháp:** /thongbao [Nội dung cập nhật]\n> **Ví dụ:** /thongbao Đã cập nhật giờ nhận lịch tùy chọn."
             ));
             return;
         }
-        const message = `# {green}[BOT] THÔNG BÁO CẬP NHẬT{/green}\n\n${escapeMarkdown(argument)}`;
+        const message = `# {green}[THÔNG BÁO CẬP NHẬT]{/green}\n\n${escapeMarkdownMultiline(argument)}`;
         const result = await sendBotAnnouncement(message);
         await sendMessage(
             chatId,
-            "# {green}[OK] ĐÃ GỬI THÔNG BÁO{/green}\n\n" +
+            "# {green}✓ ĐÃ GỬI THÔNG BÁO{/green}\n\n" +
             `> **Tổng cuộc trò chuyện:** ${result.targets}\n` +
             `> **Gửi thành công:** ${result.sent}\n` +
             `> **Gửi lỗi:** ${result.failed}`
@@ -1352,7 +1259,7 @@ async function handleCommand(msg, parsedCommand) {
                 chatId,
                 formatWarningMessage(
                     "SAI CÚ PHÁP",
-                    "> **Cú pháp:** /themlichtruc [dd/mm] [Name 1 - Name 2]\n> **Ví dụ một dòng:** /themlichtruc 25/08 Nhân - Sang\n> **Nhiều dòng:** gửi mỗi lịch trên một dòng sau lệnh."
+                    "> **Cú pháp:** /themlichtruc [dd/mm] [Tên 1 - Tên 2]\n> **Ví dụ một dòng:** /themlichtruc 25/08 Nhân - Sang\n> **Nhiều dòng:** gửi mỗi lịch trên một dòng sau lệnh."
                 )
             );
             return;
@@ -1364,7 +1271,7 @@ async function handleCommand(msg, parsedCommand) {
             const summary = items.map((item) =>
                 `> **#${item.id}** \`[${escapeMarkdown(item.dateStr)}]\` — \`${escapeMarkdown(item.assigned)}\``
             ).join("\n");
-            await sendMessage(chatId, `# {green}[OK] ĐÃ THÊM ${items.length} LỊCH TRỰC NHẬT PHÒNG 411{/green}\n\n${summary}`);
+            await sendMessage(chatId, `# {green}✓ ĐÃ THÊM ${items.length} LỊCH TRỰC NHẬT PHÒNG 411{/green}\n\n${summary}`);
         } catch (error) {
             await sendMessage(chatId, formatWarningMessage("KHÔNG THỂ THÊM LỊCH TRỰC NHẬT PHÒNG 411", `> ${escapeMarkdown(error.message)}`));
         }
@@ -1386,7 +1293,7 @@ async function handleCommand(msg, parsedCommand) {
             await sendMessage(
                 chatId,
                 item
-                    ? `# {green}[OK] ĐÃ SỬA LỊCH TRỰC NHẬT PHÒNG 411 #${item.id}{/green}\n\n` +
+                    ? `# {green}✓ ĐÃ SỬA LỊCH TRỰC NHẬT PHÒNG 411 #${item.id}{/green}\n\n` +
                       `> **Ngày:** \`[${escapeMarkdown(item.dateStr)}]\`\n` +
                       `> **Phân công:** \`[${escapeMarkdown(item.assigned)}]\``
                     : formatWarningMessage("KHÔNG TÌM THẤY", `> Không tìm thấy lịch trực nhật phòng 411 **${escapeMarkdown(parsed.target)}**.`)
@@ -1411,7 +1318,7 @@ async function handleCommand(msg, parsedCommand) {
         await sendMessage(
             chatId,
             deleted
-                ? `# {green}[OK] ĐÃ XÓA LỊCH TRỰC NHẬT PHÒNG 411 #${deleted.id}{/green}\n\n` +
+                ? `# {green}✓ ĐÃ XÓA LỊCH TRỰC NHẬT PHÒNG 411 #${deleted.id}{/green}\n\n` +
                   `> **Ngày:** \`[${escapeMarkdown(deleted.dateStr)}]\`\n` +
                   `> **Phân công:** \`[${escapeMarkdown(deleted.assigned)}]\``
                 : formatWarningMessage("KHÔNG TÌM THẤY", `> Không tìm thấy lịch trực nhật phòng 411 **${escapeMarkdown(target)}**.`)
@@ -1423,23 +1330,23 @@ async function handleCommand(msg, parsedCommand) {
         enableDutyNotifications(context);
         await sendMessage(
             chatId,
-            "# {green}[OK] ĐÃ ĐĂNG KÝ LỊCH TRỰC NHẬT PHÒNG 411{/green}\n\n" +
-            "> Cuộc trò chuyện này sẽ tự động nhận thông báo lịch trực nhật phòng 411 vào lúc **06:00 sáng** hàng ngày.\n\n" +
-            "{orange}Dùng /huydangkylich nếu muốn tắt thông báo.{/orange}"
+            "# {green}✓ ĐÃ BẬT THÔNG BÁO LỊCH TRỰC{/green}\n\n" +
+            "> **Giờ nhận lịch:** 06:00 hằng ngày\n\n" +
+            "Dùng **/huydangkylich** để tắt thông báo."
         );
     } else if (command === "huydangkylich" || command === "huylichtruc") {
         if (disableDutyNotifications(context)) {
             await sendMessage(
                 chatId,
-                "# {orange}[TẮT] ĐÃ HỦY ĐĂNG KÝ LỊCH TRỰC NHẬT PHÒNG 411{/orange}\n\n" +
-                "> Đã tắt tự động gửi thông báo lịch trực nhật phòng 411 lúc 06:00 sáng cho cuộc trò chuyện này."
+                "# {green}✓ ĐÃ TẮT THÔNG BÁO LỊCH TRỰC{/green}\n\n" +
+                "> Cuộc trò chuyện này sẽ không còn nhận lịch trực nhật lúc 06:00."
             );
         } else {
             await sendMessage(
                 chatId,
                 formatWarningMessage(
-                    "CHƯA ĐĂNG KÝ LỊCH TRỰC NHẬT PHÒNG 411",
-                    "> Cuộc trò chuyện này chưa đăng ký nhận thông báo lịch trực nhật phòng 411. Dùng **/dangkylich** để bật."
+                    "THÔNG BÁO LỊCH TRỰC ĐANG TẮT",
+                    "> Dùng **/dangkylich** để nhận lịch trực nhật phòng 411 lúc 06:00 hằng ngày."
                 )
             );
         }
@@ -1452,26 +1359,25 @@ async function handleCommand(msg, parsedCommand) {
         await sendMessage(chatId, formatAdminHelp());
     } else if (command === "time") {
         const vietnam = getVietnamDateInfo();
-        const message = `# {green}[GIỜ] THỜI GIAN HỆ THỐNG{/green}
+        const message = `# {green}[GIỜ VIỆT NAM]{/green}
 
-> **Server ISO:** ${escapeMarkdown(new Date().toISOString())}
-> **Giờ Việt Nam:** ${escapeMarkdown(vietnam.formattedDateTime)}
-> **Múi giờ bot:** ${escapeMarkdown(TIME_ZONE)}
+> **Thời gian:** ${escapeMarkdown(vietnam.formattedDateTime)}
+> **Múi giờ:** ${escapeMarkdown(TIME_ZONE)}
 
-{green}Bot luôn lập lịch theo giờ Thành phố Hồ Chí Minh.{/green}`;
+Lịch học và thông báo đều dùng múi giờ này.`;
         await sendMessage(chatId, message);
     } else if (command === "test6h") {
         if (!await requireOwner(context)) return;
-        await sendMessage(chatId, "⏰ *[TEST]* Bắt đầu kích hoạt thử nghiệm gửi lịch 06:00...");
+        await sendMessage(chatId, "# {orange}[ADMIN TEST] GỬI LỊCH 06:00{/orange}\n\nĐang chạy kiểm tra gửi lịch học.");
         await sendDailySchedulesAtSix();
-        await sendMessage(chatId, "✅ *[TEST]* Đã hoàn tất thử nghiệm gửi lịch 06:00.");
+        await sendMessage(chatId, "# {green}✓ ĐÃ HOÀN TẤT KIỂM TRA GỬI LỊCH 06:00{/green}");
     } else if (command === "test6hlichtruc") {
         if (!await requireOwner(context)) return;
-        await sendMessage(chatId, "⏰ *[TEST]* Bắt đầu kích hoạt thử nghiệm gửi thông báo lịch trực nhật phòng 411 06:00...");
+        await sendMessage(chatId, "# {orange}[ADMIN TEST] GỬI LỊCH TRỰC 06:00{/orange}\n\nĐang chạy kiểm tra gửi lịch trực nhật phòng 411.");
         const result = await sendDailyDutyNotificationAtSix();
         await sendMessage(
             chatId,
-            `✅ *[TEST]* Đã hoàn tất thử nghiệm gửi lịch trực nhật phòng 411 06:00.\n` +
+            `# {green}✓ ĐÃ HOÀN TẤT KIỂM TRA GỬI LỊCH TRỰC 06:00{/green}\n\n` +
             `> **Đã gửi:** ${result.sent}\n` +
             `> **Lỗi:** ${result.failed}`
         );
@@ -1481,7 +1387,7 @@ async function handleCommand(msg, parsedCommand) {
             chatId,
             formatWarningMessage(
                 "LỆNH KHÔNG HỢP LỆ",
-                `> Không nhận diện được **/${escapeMarkdown(command)}**.\n> Vui lòng sử dụng **${suggestion}** để sửa cú pháp.`
+                `> Không nhận diện được **/${escapeMarkdown(command)}**.\n> Bạn có thể dùng **${suggestion}** hoặc **/help** để xem danh sách lệnh.`
             )
         );
     }
@@ -1500,6 +1406,36 @@ async function sendNotification(chatId, text, options = {}) {
         const record = recordDeliveryFailure(chatId, error, { feature, operation, maxConsecutiveFailures });
         return { failed: true, error, suspended: record?.status === "inactive" };
     }
+}
+
+function positiveDuration(value, fallback) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+const classStartReminderService = createClassStartReminderService({
+    fetchSchedule: fetchStudentSchedule,
+    getSubscriptions: getClassStartNotificationSubscriptions,
+    isEligible: (subscription) => isChatEligible(subscription.chatId, "schedule"),
+    sendReminder: (subscription, message) => sendNotification(subscription.chatId, message, {
+        feature: "schedule",
+        operation: "class_start_reminder"
+    }),
+    onError: ({ stage, error }) => logDiscord("ERROR", `class_start_${stage}_error: ${error.message}`),
+    flushPersistence: flushPersistenceWrites,
+    gracePeriodMs: positiveDuration(process.env.CLASS_START_GRACE_MS, DEFAULT_GRACE_PERIOD_MS),
+    cacheTtlMs: positiveDuration(process.env.CLASS_START_CACHE_TTL_MS, DEFAULT_CACHE_TTL_MS)
+});
+
+async function sendClassStartNotifications(date = new Date()) {
+    const result = await classStartReminderService.run(date);
+    if (result.sent > 0) {
+        console.log(`[NHẮC GIỜ] Đã gửi ${result.sent} thông báo bắt đầu buổi học.`);
+    }
+    if (result.failed > 0) {
+        logDiscord("ERROR", `class_start_reminder_failed: ${result.failed} delivery or schedule check(s)`);
+    }
+    return result;
 }
 
 function groupSubscriptionsByStudent(subscriptions, notificationTime = null) {
@@ -1660,6 +1596,33 @@ async function sendDailyDutyNotificationAtSix(date = new Date()) {
     return result;
 }
 
+function registerRuntimeJobs(scheduler = schedule) {
+    if (scheduler && typeof scheduler === "object") {
+        if (registeredSchedulers.has(scheduler)) return [];
+        registeredSchedulers.add(scheduler);
+    }
+    const jobs = [];
+    jobs.push(scheduler.scheduleJob({ rule: "*/15 * * * *", tz: TIME_ZONE }, asyncCommand(async () => {
+        await checkAndNotifyScheduleChanges();
+        await flushPersistenceWrites();
+    })));
+    jobs.push(scheduler.scheduleJob({ rule: "* * * * *", tz: TIME_ZONE }, asyncCommand(async () => {
+        const dailyResult = await sendScheduledDailySchedules();
+        const classStartResult = await sendClassStartNotifications();
+        if (dailyResult.processed || classStartResult.processed) await flushPersistenceWrites();
+    })));
+    // Lịch trực phòng 411 có mốc cố định 06:00, độc lập với các giờ nhận lịch học.
+    jobs.push(scheduler.scheduleJob({ rule: "0 6 * * *", tz: TIME_ZONE }, asyncCommand(async () => {
+        await sendDailyDutyNotificationAtSix();
+        await flushPersistenceWrites();
+    })));
+    jobs.push(scheduler.scheduleJob({ rule: "5 0 27 8 *", tz: TIME_ZONE }, asyncCommand(async () => {
+        await sendBirthdayInvitations();
+        await flushPersistenceWrites();
+    })));
+    return jobs;
+}
+
 async function startRuntime() {
     await initializeFirestorePersistence({
         storeIds: [
@@ -1671,6 +1634,7 @@ async function startRuntime() {
             "chatDirectory",
             "dutyScheduleData",
             "interactions",
+            "classStartNotifications",
             "scheduleSnapshots",
             "subscriptions"
         ]
@@ -1688,7 +1652,7 @@ async function startRuntime() {
         },
         retryChat: async (chatId) => sendNotification(
             chatId,
-            "[ADMIN TEST] ZaloBot đang kiểm tra khả năng gửi thông báo tới cuộc trò chuyện này.",
+            "# {orange}[ADMIN TEST]{/orange}\n\nĐang kiểm tra khả năng gửi thông báo tới cuộc trò chuyện này.",
             { feature: "broadcast", operation: "admin_dashboard_retry", bypassEligibility: true }
         )
     });
@@ -1698,20 +1662,9 @@ async function startRuntime() {
     });
     console.log(`Admin dashboard listening on http://127.0.0.1:${adminRuntime.port}${adminRuntime.basePath}`);
     // Chỉ bật scheduler sau khi state Firestore đã được hydrate vào bộ nhớ.
-    schedule.scheduleJob({ rule: "*/15 * * * *", tz: TIME_ZONE }, asyncCommand(async () => {
-        await checkAndNotifyScheduleChanges();
-        await flushPersistenceWrites();
-    }));
-    schedule.scheduleJob({ rule: "* * * * *", tz: TIME_ZONE }, asyncCommand(async () => {
-        const result = await sendScheduledDailySchedules();
-        if (result.processed) await flushPersistenceWrites();
-    }));
-    schedule.scheduleJob({ rule: "5 0 27 8 *", tz: TIME_ZONE }, asyncCommand(async () => {
-        await sendBirthdayInvitations();
-        await flushPersistenceWrites();
-    }));
+    registerRuntimeJobs();
     await bot.startPolling();
-    console.log(`Bot đã khởi động. Tự động kiểm tra thay đổi lịch mỗi 15 phút và gửi lịch theo giờ đăng ký (${TIME_ZONE}).`);
+    console.log(`Bot đã khởi động. Tự động kiểm tra thay đổi lịch, gửi lịch theo giờ đăng ký và nhắc giờ bắt đầu buổi học (${TIME_ZONE}).`);
     logDiscord("INFO", `Bot đã khởi động - timezone ${TIME_ZONE}`);
     await sendBirthdayInvitations();
     await flushPersistenceWrites();
@@ -1744,7 +1697,7 @@ bot.on("message", asyncCommand(async (msg) => {
                 context.chatId,
                 formatWarningMessage(
                     "KHÔNG CÓ QUYỀN TRUY CẬP",
-                    "> Tài khoản hoặc nhóm này hiện đã bị chặn sử dụng ZaloBOT."
+                    "> Tài khoản hoặc nhóm này hiện không có quyền sử dụng trợ lý."
                 )
             );
             return;
@@ -1774,7 +1727,7 @@ bot.on("message", asyncCommand(async (msg) => {
             context.chatId,
             formatWarningMessage(
                 "LỆNH KHÔNG HỢP LỆ",
-                "> Không thể phân tích lệnh này.\n> Vui lòng dùng **/help** để xem cú pháp và ví dụ."
+                "> Không thể phân tích lệnh này.\n> Dùng **/help** để xem cú pháp và danh sách lệnh."
             )
         );
     }
@@ -1814,8 +1767,10 @@ module.exports = {
     parseCommand,
     parseQuestionIdAndText,
     publishBirthdayResults,
+    registerRuntimeJobs,
     sendBirthdayInvitations,
     sendBotAnnouncement,
+    sendClassStartNotifications,
     sendDailyDutyNotificationAtSix,
     sendDailySchedulesAtSix,
     sendDailySchedulesAtTime,

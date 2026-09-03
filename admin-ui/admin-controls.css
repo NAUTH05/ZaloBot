@@ -1,18 +1,2 @@
-.command-form .error {
-  max-height: 320px;
-  overflow: auto;
-  padding: 12px;
-  border-radius: 6px;
-  background: #f6f8fa;
-  color: #344252;
-  white-space: pre-wrap;
-}
-
-.action-wrap {
-  flex-wrap: wrap;
-}
-
-.danger {
-  color: #b33f31;
-  border-color: #e5b9b3;
-}
+/* Reserved for deployment-specific dashboard overrides. */
+.time-chip strong,.time-chip small{display:block}.time-chip small{font:10px ui-sans-serif,system-ui;color:var(--muted);margin-top:2px}.toolbar{flex-wrap:wrap}.toolbar select{max-width:180px}

@@ -27,6 +27,8 @@ let collectionName = DEFAULT_COLLECTION;
 let db = null;
 const cache = new Map();
 let writeQueue = Promise.resolve();
+let lastPersistenceError = null;
+let lastPersistenceWriteAt = null;
 
 function clone(value) {
     return value == null ? value : JSON.parse(JSON.stringify(value));
@@ -64,20 +66,36 @@ function writeJsonStore(filePath, defaultPath, value) {
     cache.set(storeId, clone(value));
     writeQueue = writeQueue
         .catch(() => {})
-        .then(() => writeFirestoreDocument(storeId, value))
+        .then(() => writeFirestoreDocumentWithRetry(storeId, clone(value)))
+        .then(() => {
+            lastPersistenceError = null;
+            lastPersistenceWriteAt = new Date().toISOString();
+        })
         .catch((error) => {
+            lastPersistenceError = { storeId, message: error.message, at: new Date().toISOString() };
             console.error(`Không thể ghi Firestore store ${storeId}:`, error.message);
         });
 }
 
-function loadCredentials(credentialsPath = process.env.FIREBASE_SERVICE_ACCOUNT_PATH || DEFAULT_CREDENTIAL_PATH) {
+function normalizePrivateKey(value) {
+    let key = String(value || "").trim();
+    if ((key.startsWith('"') && key.endsWith('"')) || (key.startsWith("'") && key.endsWith("'"))) key = key.slice(1, -1);
+    return key
+        .replace(/\\\\n/g, "\n")
+        .replace(/\\n/g, "\n")
+        .replace(/\\r?\n/g, "\n")
+        .replace(/\\r/g, "\r")
+        .replace(/\r/g, "")
+        .replace(/\\+$/g, "")
+        .trim();
+}
+
+function loadCredentials(credentialsPath = process.env.FIREBASE_SERVICE_ACCOUNT_FILE || process.env.FIREBASE_SERVICE_ACCOUNT_PATH || DEFAULT_CREDENTIAL_PATH) {
     const envProjectId = String(process.env.FIREBASE_PROJECT_ID || "").trim();
     const envClientEmail = String(process.env.FIREBASE_CLIENT_EMAIL || "").trim();
-    const envPrivateKey = String(process.env.FIREBASE_PRIVATE_KEY || "")
-        .replace(/\\r?\n/g, "\n")
-        .replace(/\\n/g, "\n")
-        .trim();
-    if (envProjectId && envClientEmail && envPrivateKey) {
+    const envPrivateKey = normalizePrivateKey(process.env.FIREBASE_PRIVATE_KEY);
+    const externalFileConfigured = Boolean(String(process.env.FIREBASE_SERVICE_ACCOUNT_FILE || "").trim());
+    if (!externalFileConfigured && envProjectId && envClientEmail && envPrivateKey) {
         return {
             project_id: envProjectId,
             client_email: envClientEmail,
@@ -99,7 +117,8 @@ function loadCredentials(credentialsPath = process.env.FIREBASE_SERVICE_ACCOUNT_
     if (!data.client_email.endsWith(".iam.gserviceaccount.com")) {
         throw new Error("client_email không phải email service account Firebase");
     }
-    if (!data.private_key.includes("-----BEGIN PRIVATE KEY-----")) {
+    data.private_key = normalizePrivateKey(data.private_key);
+    if (!data.private_key.includes("-----BEGIN PRIVATE KEY-----") || !data.private_key.includes("-----END PRIVATE KEY-----")) {
         throw new Error("private_key không phải khóa PEM hợp lệ của service account Firebase");
     }
     return data;
@@ -117,6 +136,20 @@ async function writeFirestoreDocument(storeId, value) {
         payload: JSON.stringify(value),
         updatedAt: new Date().toISOString()
     }, { merge: true });
+}
+
+async function writeFirestoreDocumentWithRetry(storeId, value, attempts = 3) {
+    let lastError;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+        try {
+            await writeFirestoreDocument(storeId, value);
+            return;
+        } catch (error) {
+            lastError = error;
+            if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+        }
+    }
+    throw lastError;
 }
 
 async function initializeFirestorePersistence(options = {}) {
@@ -167,11 +200,24 @@ function flushPersistenceWrites() {
     return writeQueue;
 }
 
+function getPersistenceStatus() {
+    return {
+        backend,
+        projectId: credentials?.project_id || null,
+        databaseId,
+        collectionName,
+        lastWriteAt: lastPersistenceWriteAt,
+        lastError: lastPersistenceError
+    };
+}
+
 module.exports = {
     DEFAULT_CREDENTIAL_PATH,
     flushPersistenceWrites,
     importJsonDirectory,
     initializeFirestorePersistence,
+    getPersistenceStatus,
+    normalizePrivateKey,
     readJsonStore,
     writeJsonStore
 };

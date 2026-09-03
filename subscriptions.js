@@ -78,8 +78,9 @@ function isCurrentSubscription(subscription) {
         subscription.chatId != null && subscription.userId != null;
 }
 
-function getSubscription(context) {
-    return getAllSubscriptions()[createSubscriptionKey(context)] || null;
+function getSubscription(context, filePath = FILE_PATH) {
+    const data = readJsonStore(filePath, FILE_PATH, {});
+    return data?.[createSubscriptionKey(context)] || null;
 }
 
 function removeLegacyChatRecord(subscriptions, context) {
@@ -88,9 +89,9 @@ function removeLegacyChatRecord(subscriptions, context) {
 }
 
 // /find chỉ lưu MSSV cho đúng user trong đúng chat. /dangky mới bật thông báo.
-function saveStudent(contextInput, { studentId, studentName }) {
+function saveStudent(contextInput, { studentId, studentName }, filePath = FILE_PATH) {
     const context = normalizeContext(contextInput);
-    const subscriptions = getAllSubscriptions();
+    const subscriptions = readJsonStore(filePath, FILE_PATH, {});
     const key = createSubscriptionKey(context);
     const existing = subscriptions[key];
     removeLegacyChatRecord(subscriptions, context);
@@ -101,15 +102,16 @@ function saveStudent(contextInput, { studentId, studentName }) {
         studentName: studentName || "",
         notificationTimes: normalizeNotificationTimes(existing),
         notificationsEnabled: existing?.studentId === studentId && existing.notificationsEnabled === true,
+        classStartNotificationsEnabled: existing?.studentId === studentId && existing.classStartNotificationsEnabled === true,
         updatedAt: new Date().toISOString()
     };
-    writeSubscriptions(subscriptions);
+    writeJsonStore(filePath, FILE_PATH, subscriptions);
     return subscriptions[key];
 }
 
-function enableNotifications(contextInput, { studentId, studentName, notificationTime } = {}) {
+function enableNotifications(contextInput, { studentId, studentName, notificationTime } = {}, filePath = FILE_PATH) {
     const context = normalizeContext(contextInput);
-    const subscriptions = getAllSubscriptions();
+    const subscriptions = readJsonStore(filePath, FILE_PATH, {});
     const key = createSubscriptionKey(context);
     removeLegacyChatRecord(subscriptions, context);
     const existing = subscriptions[key] || {};
@@ -131,24 +133,47 @@ function enableNotifications(contextInput, { studentId, studentName, notificatio
         studentName: studentName || "",
         notificationTimes,
         notificationsEnabled: true,
+        classStartNotificationsEnabled: existing.studentId === studentId && existing.classStartNotificationsEnabled === true,
         updatedAt: new Date().toISOString()
     };
-    writeSubscriptions(subscriptions);
+    writeJsonStore(filePath, FILE_PATH, subscriptions);
     return subscriptions[key];
 }
 
-function disableNotifications(context) {
-    const subscriptions = getAllSubscriptions();
+function disableNotifications(context, filePath = FILE_PATH) {
+    const subscriptions = readJsonStore(filePath, FILE_PATH, {});
     const key = createSubscriptionKey(context);
     if (!subscriptions[key]?.notificationsEnabled) return false;
     subscriptions[key].notificationsEnabled = false;
     subscriptions[key].updatedAt = new Date().toISOString();
-    writeSubscriptions(subscriptions);
+    writeJsonStore(filePath, FILE_PATH, subscriptions);
     return true;
 }
 
-function updateNotificationTime(contextInput, timeId, notificationTime) {
-    const subscriptions = getAllSubscriptions();
+function enableClassStartNotifications(contextInput, filePath = FILE_PATH) {
+    const subscriptions = readJsonStore(filePath, FILE_PATH, {});
+    const key = createSubscriptionKey(contextInput);
+    const subscription = subscriptions[key];
+    if (!isCurrentSubscription(subscription) || !subscription.studentId) return null;
+    subscription.classStartNotificationsEnabled = true;
+    subscription.updatedAt = new Date().toISOString();
+    writeJsonStore(filePath, FILE_PATH, subscriptions);
+    return subscription;
+}
+
+function disableClassStartNotifications(contextInput, filePath = FILE_PATH) {
+    const subscriptions = readJsonStore(filePath, FILE_PATH, {});
+    const key = createSubscriptionKey(contextInput);
+    const subscription = subscriptions[key];
+    if (!subscription?.classStartNotificationsEnabled) return false;
+    subscription.classStartNotificationsEnabled = false;
+    subscription.updatedAt = new Date().toISOString();
+    writeJsonStore(filePath, FILE_PATH, subscriptions);
+    return true;
+}
+
+function updateNotificationTime(contextInput, timeId, notificationTime, filePath = FILE_PATH) {
+    const subscriptions = readJsonStore(filePath, FILE_PATH, {});
     const key = createSubscriptionKey(contextInput);
     const subscription = subscriptions[key];
     const normalizedTime = normalizeNotificationTime(notificationTime, null);
@@ -159,12 +184,12 @@ function updateNotificationTime(contextInput, timeId, notificationTime) {
     times[index] = { ...times[index], time: normalizedTime, updatedAt: new Date().toISOString() };
     subscription.notificationTimes = times;
     subscription.updatedAt = new Date().toISOString();
-    writeSubscriptions(subscriptions);
+    writeJsonStore(filePath, FILE_PATH, subscriptions);
     return subscription;
 }
 
-function removeNotificationTime(contextInput, timeId) {
-    const subscriptions = getAllSubscriptions();
+function removeNotificationTime(contextInput, timeId, filePath = FILE_PATH) {
+    const subscriptions = readJsonStore(filePath, FILE_PATH, {});
     const key = createSubscriptionKey(contextInput);
     const subscription = subscriptions[key];
     if (!subscription) return null;
@@ -174,8 +199,36 @@ function removeNotificationTime(contextInput, timeId) {
     subscription.notificationTimes = times.filter((item) => Number(item.id) !== Number(timeId));
     if (subscription.notificationTimes.length === 0) subscription.notificationsEnabled = false;
     subscription.updatedAt = new Date().toISOString();
-    writeSubscriptions(subscriptions);
+    writeJsonStore(filePath, FILE_PATH, subscriptions);
     return { subscription, removed };
+}
+
+function updateSubscriptionMetadata(contextInput, changes = {}, filePath = FILE_PATH) {
+    const context = normalizeContext(contextInput);
+    const subscriptions = readJsonStore(filePath, FILE_PATH, {});
+    const key = createSubscriptionKey(context);
+    const subscription = subscriptions[key];
+    if (!subscription) return null;
+    if (changes.studentId != null) {
+        const studentId = String(changes.studentId).trim();
+        if (studentId !== subscription.studentId) subscription.classStartNotificationsEnabled = false;
+        subscription.studentId = studentId;
+    }
+    if (changes.studentName != null) subscription.studentName = String(changes.studentName).trim();
+    if (changes.userDisplayName != null) subscription.userDisplayName = String(changes.userDisplayName).trim();
+    subscription.updatedAt = new Date().toISOString();
+    writeJsonStore(filePath, FILE_PATH, subscriptions);
+    return subscription;
+}
+
+function deleteSubscription(contextInput, filePath = FILE_PATH) {
+    const subscriptions = readJsonStore(filePath, FILE_PATH, {});
+    const key = createSubscriptionKey(contextInput);
+    if (!subscriptions[key]) return null;
+    const removed = subscriptions[key];
+    delete subscriptions[key];
+    writeJsonStore(filePath, FILE_PATH, subscriptions);
+    return removed;
 }
 
 function getEnabledSubscriptions() {
@@ -189,14 +242,26 @@ function getEnabledSubscriptions() {
     );
 }
 
+function getClassStartNotificationSubscriptions() {
+    return Object.fromEntries(
+        Object.entries(getAllSubscriptions())
+            .filter(([, subscription]) => isCurrentSubscription(subscription) &&
+                subscription.classStartNotificationsEnabled === true && subscription.studentId)
+    );
+}
+
 module.exports = {
     CONTEXT_VERSION,
     DEFAULT_NOTIFICATION_TIME,
     FILE_PATH,
     createSubscriptionKey,
+    deleteSubscription,
+    disableClassStartNotifications,
     disableNotifications,
+    enableClassStartNotifications,
     enableNotifications,
     getAllSubscriptions,
+    getClassStartNotificationSubscriptions,
     getEnabledSubscriptions,
     getSubscription,
     isCurrentSubscription,
@@ -204,5 +269,6 @@ module.exports = {
     normalizeNotificationTimes,
     removeNotificationTime,
     saveStudent,
-    updateNotificationTime
+    updateNotificationTime,
+    updateSubscriptionMetadata
 };
