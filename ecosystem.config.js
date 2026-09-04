@@ -9,9 +9,9 @@ module.exports = {
         time: true,
         env: {
             NODE_ENV: "production",
-            PORT: process.env.PORT || 3000,
-            ADMIN_PORT: process.env.ADMIN_PORT || process.env.PORT || 3000,
-            FIREBASE_SERVICE_ACCOUNT_FILE: process.env.FIREBASE_SERVICE_ACCOUNT_FILE || ""
+            PORT: process.env.PORT || 6003,
+            ADMIN_PORT: process.env.ADMIN_PORT || process.env.PORT || 6003,
+            FIREBASE_SERVICE_ACCOUNT_FILE: '/home/dpdns-zalobot-mrnauthdev/htdocs/firebase-service-account.json'
         }
     }]
 };
