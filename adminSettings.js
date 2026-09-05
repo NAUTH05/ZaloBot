@@ -2,7 +2,8 @@ const path = require("path");
 const { readJsonStore, writeJsonStore } = require("./firestorePersistence");
 
 const FILE_PATH = path.join(__dirname, "adminSettings.json");
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
+const DEFAULT_PAGE_SIZE = 25;
 
 function nowIso() { return new Date().toISOString(); }
 
@@ -32,14 +33,16 @@ function normalizeAdmin(input = {}, existing = {}) {
 }
 
 function readSettings(filePath = FILE_PATH) {
-    const fallback = { schemaVersion: SCHEMA_VERSION, admins: [] };
+    const fallback = { schemaVersion: SCHEMA_VERSION, admins: [], defaultPageSize: DEFAULT_PAGE_SIZE };
     const data = readJsonStore(filePath, FILE_PATH, fallback);
     const admins = Array.isArray(data?.admins) ? data.admins.map((item) => normalizeAdmin(item)).filter(Boolean) : [];
-    return { schemaVersion: SCHEMA_VERSION, admins };
+    const parsedPageSize = Number(data?.defaultPageSize);
+    const defaultPageSize = [10, 20, 25, 50, 100].includes(parsedPageSize) ? parsedPageSize : DEFAULT_PAGE_SIZE;
+    return { schemaVersion: SCHEMA_VERSION, admins, defaultPageSize };
 }
 
 function writeSettings(settings, filePath = FILE_PATH) {
-    writeJsonStore(filePath, FILE_PATH, { schemaVersion: SCHEMA_VERSION, admins: settings.admins || [] });
+    writeJsonStore(filePath, FILE_PATH, { schemaVersion: SCHEMA_VERSION, admins: settings.admins || [], defaultPageSize: settings.defaultPageSize || DEFAULT_PAGE_SIZE });
 }
 
 function getAdminSettings(filePath = FILE_PATH) {
@@ -94,4 +97,13 @@ function removeAdmin(identifier, filePath = FILE_PATH) {
     return removed;
 }
 
-module.exports = { FILE_PATH, getAdminSettings, getConfiguredAdminIds, isConfiguredAdmin, removeAdmin, upsertAdmin };
+function setDefaultPageSize(value, filePath = FILE_PATH) {
+    const pageSize = Number(value);
+    if (![10, 20, 25, 50, 100].includes(pageSize)) throw new Error("defaultPageSize must be one of 10, 20, 25, 50, 100");
+    const settings = readSettings(filePath);
+    settings.defaultPageSize = pageSize;
+    writeSettings(settings, filePath);
+    return settings;
+}
+
+module.exports = { DEFAULT_PAGE_SIZE, FILE_PATH, getAdminSettings, getConfiguredAdminIds, isConfiguredAdmin, removeAdmin, setDefaultPageSize, upsertAdmin };

@@ -116,3 +116,6 @@ Keep `.env`, Firebase keys, bot tokens, passwords, and cookies outside source co
 ## Development
 
 Use `dev` for platform-neutral application work and `dev_windows` for the Windows deployment edition. Run the test suite and `npm run build:admin` before commits. Keep command logic in the backend and add regression tests for behavior changes.
+## Admin dashboard notes
+
+The admin dashboard supports consistent pagination for growing lists and a persisted default rows-per-page setting. Its Available commands view, autocomplete, and bot help metadata are derived from the centralized command registry. Manual commands execute as the authenticated admin session; optional target IDs remain separate and are validated by the existing command engine.

@@ -6,6 +6,24 @@ let workspace = null;
 let dashboard = null;
 let logs = null;
 let settings = null;
+let commandRegistry = [];
+const pageState = {};
+const PAGE_SIZES = [10, 20, 25, 50, 100];
+function pageSize() { return Number(settings?.defaultPageSize) || 25; }
+function paginate(items, key) {
+  const size = pageState[key]?.size || pageSize(); const totalPages = items.length ? Math.ceil(items.length / size) : 0;
+  const page = totalPages ? Math.min(Math.max(pageState[key]?.page || 1, 1), totalPages) : 1;
+  pageState[key] = { page, size }; return { rows: items.slice((page - 1) * size, page * size), totalPages, page, size, total: items.length };
+}
+function pager(targetId, key, result, rerender) {
+  const target = $(targetId); if (!target) return;
+  if (!result.total) { target.innerHTML = ""; return; }
+  const pages = Array.from({ length: result.totalPages }, (_, i) => i + 1).filter((p) => p === 1 || p === result.totalPages || Math.abs(p - result.page) <= 2);
+  target.innerHTML = `<div class="pagination" role="navigation" aria-label="Pagination"><span>Showing ${((result.page - 1) * result.size) + 1}-${Math.min(result.page * result.size, result.total)} of ${result.total}</span><label>Rows per page: <select data-page-size aria-label="Rows per page">${PAGE_SIZES.map((n) => `<option value="${n}" ${n === result.size ? "selected" : ""}>${n}</option>`).join("")}</select></label><button data-page="1" aria-label="First page" ${result.page === 1 ? "disabled" : ""}>«</button><button data-page="${result.page - 1}" aria-label="Previous page" ${result.page === 1 ? "disabled" : ""}>‹</button>${pages.map((p) => `<button data-page="${p}" class="${p === result.page ? "active" : ""}" aria-current="${p === result.page ? "page" : "false"}">${p}</button>`).join("")}<button data-page="${result.page + 1}" aria-label="Next page" ${result.page === result.totalPages ? "disabled" : ""}>›</button><button data-page="${result.totalPages}" aria-label="Last page" ${result.page === result.totalPages ? "disabled" : ""}>»</button></div>`;
+  target.querySelector("[data-page-size]").addEventListener("change", (e) => { pageState[key] = { page: 1, size: Number(e.target.value) }; rerender(); });
+  target.querySelectorAll("[data-page]").forEach((button) => button.addEventListener("click", () => { pageState[key].page = Number(button.dataset.page); rerender(); }));
+}
+function ensurePager(id, anchor) { if (!$(id)) { const el = document.createElement("div"); el.id = id.slice(1); anchor?.parentElement?.appendChild(el); } }
 
 async function api(path, options = {}) {
   const response = await fetch(`${base}${path}`, { credentials: "same-origin", headers: { "Content-Type": "application/json", ...(options.headers || {}) }, ...options });
@@ -111,9 +129,28 @@ function renderSettings() {
   $("#accessSummary").innerHTML = `<div class="access-modes"><div><span>Bot mode</span><strong>${escapeHtml(access.botMode)}</strong></div><div><span>AI mode</span><strong>${escapeHtml(access.aiMode)}</strong></div></div>${[["Bot blocked", access.botBlocked], ["AI blocked", access.aiBlocked], ["Bot allowlist", access.botAllowlist], ["AI allowlist", access.aiAllowlist]].map(([title, items]) => `<section><h3>${title} <span>${items.length}</span></h3>${items.slice(0, 8).map((item) => `<p>${escapeHtml(item.targetName || item.targetId)} <code>${escapeHtml(item.targetId)}</code></p>`).join("") || `<p class="muted">Trống</p>`}</section>`).join("")}`;
   $$('[data-remove-admin]').forEach((button) => button.addEventListener("click", async () => { await api(`/api/admin/settings/admins?id=${encodeURIComponent(button.dataset.removeAdmin)}`, { method: "DELETE" }); await loadData(); }));
   const select = $("#commandAdminIdentity");
+  if (!select) return;
   const current = select.value;
   select.innerHTML = `<option value="">Nhập thủ công</option>${(settings.admins || []).map((admin, index) => `<option value="${index}">${escapeHtml(admin.displayName || admin.userId || admin.chatId)} · ${escapeHtml(admin.userId || "-")}</option>`).join("")}`;
   select.value = current;
+  const panel = $("#adminSettingsList")?.closest(".panel");
+  if (panel && !$("#defaultPageSize")) {
+    const form = document.createElement("form"); form.id = "pageSizeForm"; form.innerHTML = `<label>Default rows per page<select id="defaultPageSize" name="defaultPageSize">${PAGE_SIZES.map((n) => `<option value="${n}" ${n === pageSize() ? "selected" : ""}>${n}</option>`).join("")}</select></label><button class="secondary" type="submit">Save page size</button><p id="pageSizeMessage" class="success"></p>`; panel.appendChild(form);
+    form.addEventListener("submit", async (event) => { event.preventDefault(); try { await api("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ defaultPageSize: Number(form.elements.defaultPageSize.value) }) }); settings.defaultPageSize = Number(form.elements.defaultPageSize.value); Object.keys(pageState).forEach((key) => { pageState[key].page = 1; pageState[key].size = settings.defaultPageSize; }); $("#pageSizeMessage").textContent = "Saved."; applyPaginationViews(); } catch (error) { $("#pageSizeMessage").textContent = error.message; } });
+  }
+}
+
+function renderCommands() {
+  const panel = $("[data-panel=commands]"); if (!panel) return;
+  if (!$("#commandRegistryList")) { const section = document.createElement("section"); section.className = "panel command-registry"; section.innerHTML = `<div class="panel-heading"><h2>Available commands</h2><input id="commandSearch" placeholder="Search commands" /></div><div id="commandRegistryList" class="command-list"></div><div id="commandRegistryPagination"></div>`; panel.appendChild(section); $("#commandSearch").addEventListener("input", renderCommands); }
+  const query = $("#commandSearch")?.value.trim().toLowerCase() || ""; const list = commandRegistry.filter((item) => JSON.stringify(item).toLowerCase().includes(query)); const result = paginate(list, "commands");
+  $("#commandRegistryList").innerHTML = result.rows.map((item) => `<article class="stack-item"><strong>${escapeHtml(item.name)}</strong><p>${escapeHtml(item.description)}</p><small>${escapeHtml(item.usage)} · ${escapeHtml(item.category)} · ${escapeHtml(item.permission)}</small></article>`).join("") || `<div class="empty-state">No commands found.</div>`;
+  pager("#commandRegistryPagination", "commands", result, renderCommands);
+}
+function setupCommandConsole() {
+  const form = $("#commandForm"); if (!form || form.dataset.ready) return; form.dataset.ready = "1";
+  form.innerHTML = `<label>Command<input name="command" id="commandInput" list="commandSuggestions" placeholder="/lich" required autocomplete="off" /><datalist id="commandSuggestions"></datalist></label><p class="muted">Executing as: <strong>${escapeHtml("authenticated admin")}</strong></p><label>Target User ID (optional)<input name="targetUserId" placeholder="Only for commands that support a target" /></label><label>Target Chat ID (optional)<input name="targetChatId" placeholder="Defaults to the configured admin chat" /></label><button class="primary" type="submit">Execute command</button><pre id="commandResult" class="command-output">No result yet.</pre>`;
+  const input = $("#commandInput"); input.addEventListener("input", () => { const query = input.value.toLowerCase(); $("#commandSuggestions").innerHTML = commandRegistry.filter((item) => item.name.toLowerCase().startsWith(query || "/")).map((item) => `<option value="${escapeHtml(item.usage)}">`).join(""); });
 }
 
 function renderLogs() {
@@ -121,12 +158,25 @@ function renderLogs() {
   $("#deliveryLogList").innerHTML = (logs.deliveryErrors || []).map((item) => `<article class="stack-item"><strong>${escapeHtml(item.displayName || item.chatId)}</strong><p>${escapeHtml(item.lastError?.message || "-")}</p><small>${escapeHtml(formatDate(item.lastError?.at))}</small></article>`).join("") || `<div class="empty-state">Không có lỗi gửi gần đây.</div>`;
 }
 
-function renderAll() { renderOverview(); renderDirectory(); renderUsers(); renderGroups(); renderNotifications(); renderDuty(); renderHealth(); renderSettings(); renderLogs(); $("#healthPill").textContent = `${dashboard.bot.status} · ${dashboard.bot.health}`; $("#generatedAt").textContent = formatDate(workspace.generatedAt); }
+function ensurePaginationViews() {
+  [["#directoryRows", "directory"], ["#userRows", "users"], ["#groupCards", "groups"], ["#notificationRows", "notifications"], ["#healthRows", "health"], ["#dutyScheduleList", "dutySchedules"], ["#dutySubscriptionList", "dutySubscriptions"], ["#systemLogList", "systemLogs"], ["#deliveryLogList", "deliveryLogs"]].forEach(([selector, key]) => {
+    const anchor = $(selector); if (!anchor) return; const id = `${key}Pagination`; if (!document.getElementById(id)) { const el = document.createElement("div"); el.id = id; anchor.closest(".panel")?.appendChild(el) || anchor.parentElement.appendChild(el); }
+  });
+}
+function paginateRendered(selector, key) {
+  const container = $(selector); if (!container) return;
+  const items = [...container.children].filter((item) => !item.classList.contains("empty-state"));
+  const size = pageState[key]?.size || pageSize(); const totalPages = items.length ? Math.ceil(items.length / size) : 0; const page = totalPages ? Math.min(Math.max(pageState[key]?.page || 1, 1), totalPages) : 1;
+  pageState[key] = { page, size }; items.forEach((item, index) => { item.hidden = index < (page - 1) * size || index >= page * size; });
+  pager(`#${key}Pagination`, key, { page, size, totalPages, total: items.length }, applyPaginationViews);
+}
+function applyPaginationViews() { ensurePaginationViews(); paginateRendered("#directoryRows", "directory"); paginateRendered("#userRows", "users"); paginateRendered("#groupCards", "groups"); paginateRendered("#notificationRows", "notifications"); paginateRendered("#healthRows", "health"); paginateRendered("#dutyScheduleList", "dutySchedules"); paginateRendered("#dutySubscriptionList", "dutySubscriptions"); paginateRendered("#systemLogList", "systemLogs"); paginateRendered("#deliveryLogList", "deliveryLogs"); }
+function renderAll() { renderOverview(); renderDirectory(); renderUsers(); renderGroups(); renderNotifications(); renderDuty(); renderHealth(); renderSettings(); renderLogs(); setupCommandConsole(); renderCommands(); ensurePaginationViews(); applyPaginationViews(); $("#healthPill").textContent = `${dashboard.bot.status} · ${dashboard.bot.health}`; $("#generatedAt").textContent = formatDate(workspace.generatedAt); }
 
 async function loadData() {
   setDataState("loading", "Loading admin data...");
   try {
-    [workspace, dashboard, logs, settings] = await Promise.all([api("/api/admin/workspace"), api("/api/admin/dashboard"), api("/api/admin/logs"), api("/api/admin/settings")]);
+    [workspace, dashboard, logs, settings, commandRegistry] = await Promise.all([api("/api/admin/workspace"), api("/api/admin/dashboard"), api("/api/admin/logs"), api("/api/admin/settings"), api("/api/admin/commands").then((data) => data.commands || [])]);
     renderAll();
     setDataState("success", "Updated just now");
     window.setTimeout(() => setDataState("success", ""), 1800);
@@ -188,13 +238,14 @@ $("#loginForm").addEventListener("submit", async (event) => { event.preventDefau
 $("#logoutButton").addEventListener("click", async () => { await api("/api/admin/auth/logout", { method: "POST" }); showAuthenticated(false); });
 $("#refreshButton").addEventListener("click", loadData); $("#themeToggle").addEventListener("click", () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
 $("#closeDialog").addEventListener("click", () => $("#detailDialog").close());
-$("#userSearch").addEventListener("input", renderUsers); $("#groupSearch").addEventListener("input", renderGroups); $("#notificationFilter").addEventListener("change", renderNotifications); $("#healthFilter").addEventListener("change", renderHealth); $("#healthType").addEventListener("change", renderHealth);
-$("#directorySearch").addEventListener("input", renderDirectory); $("#directoryType").addEventListener("change", renderDirectory); $("#addChatButton").addEventListener("click", openCreateChat);
+const rerender = (fn, key) => { pageState[key] = { ...(pageState[key] || {}), page: 1 }; fn(); applyPaginationViews(); };
+$("#userSearch").addEventListener("input", () => rerender(renderUsers, "users")); $("#groupSearch").addEventListener("input", () => rerender(renderGroups, "groups")); $("#notificationFilter").addEventListener("change", () => rerender(renderNotifications, "notifications")); $("#healthFilter").addEventListener("change", () => rerender(renderHealth, "health")); $("#healthType").addEventListener("change", () => rerender(renderHealth, "health"));
+$("#directorySearch").addEventListener("input", () => rerender(renderDirectory, "directory")); $("#directoryType").addEventListener("change", () => rerender(renderDirectory, "directory")); $("#addChatButton").addEventListener("click", openCreateChat);
 $("#addUserButton").addEventListener("click", openCreateUser);
 $("#addDutyButton").addEventListener("click", async () => { const input = prompt("Nhập một hoặc nhiều dòng: dd/mm Tên người trực"); if (!input) return; await api("/api/admin/duty/schedules", { method: "POST", body: JSON.stringify({ input }) }); await loadData(); });
 $("#adminForm").addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); try { await api("/api/admin/settings/admins", { method: "POST", body: JSON.stringify(Object.fromEntries(form.entries())) }); event.currentTarget.reset(); $("#adminFormMessage").textContent = "Đã lưu."; await loadData(); } catch (error) { $("#adminFormMessage").textContent = error.message; } });
 $("#commandForm").addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); $("#commandResult").textContent = "Đang thực thi..."; try { const result = await api("/api/admin/commands", { method: "POST", body: JSON.stringify(Object.fromEntries(form.entries())) }); $("#commandResult").textContent = (result.messages || []).map((item) => item.text).join("\n\n") || `Đã gửi phản hồi tới ${result.deliveredToChatId}`; await loadData(); } catch (error) { $("#commandResult").textContent = error.message; } });
-$("#commandAdminIdentity").addEventListener("change", (event) => { const admin = (settings?.admins || [])[Number(event.currentTarget.value)]; if (!admin) return; const form = $("#commandForm"); form.elements.userId.value = admin.userId || ""; form.elements.chatId.value = admin.chatId || ""; form.elements.displayName.value = admin.displayName || ""; });
+$("#commandAdminIdentity")?.addEventListener("change", () => {});
 $$('.tab-button').forEach((button) => button.addEventListener("click", () => switchTab(button.dataset.tab)));
 applyTheme(localStorage.getItem("zalobot-admin-theme") || "dark"); switchTab(localStorage.getItem("zalobot-admin-tab") || "overview");
 loadData().then(() => showAuthenticated(true)).catch((error) => { showAuthenticated(false); if (error.status !== 401) $("#loginError").textContent = error.message; });

@@ -88,6 +88,7 @@ const {
 } = require("./accessControl");
 const { askScheduleAi } = require("./aiAssistant");
 const { flushPersistenceWrites, initializeFirestorePersistence } = require("./firestorePersistence");
+const { getCommandRegistry } = require("./commandRegistry");
 const { createAdminServer } = require("./adminServer");
 const { recordSystemLog } = require("./operationalLog");
 const { getConfiguredAdminIds, isConfiguredAdmin } = require("./adminSettings");
@@ -1641,14 +1642,14 @@ async function startRuntime() {
     });
     if (syncChatDirectoryFromLegacyStores() > 0) await flushPersistenceWrites();
     const adminRuntime = createAdminServer({
-        executeCommand: async ({ command, userId, chatId, displayName }) => {
+        executeCommand: async ({ command, userId, chatId, displayName, executor, target }) => {
             const parsed = parseCommand(command);
             if (!parsed) throw new Error("Lệnh phải bắt đầu bằng /");
-            const context = { userId: String(userId), chatId: String(chatId), userDisplayName: String(displayName || "Dashboard Admin") };
+            const context = { userId: String(executor?.userId || userId), chatId: String(chatId), userDisplayName: String(executor?.displayName || displayName || executor?.username || "Dashboard Admin") };
             if (!isOwner(context)) throw new Error("Admin context chưa được cấp quyền");
             const capture = { chatId: context.chatId, messages: [] };
             await dashboardCommandContext.run(capture, () => handleCommand({ text: command, chat: { id: context.chatId, type: "private" }, from: { id: context.userId, display_name: context.userDisplayName } }, parsed));
-            return { command, deliveredToChatId: context.chatId, messages: capture.messages };
+            return { command, deliveredToChatId: context.chatId, messages: capture.messages, executor: executor || { userId: context.userId, displayName: context.userDisplayName }, target: target || null };
         },
         retryChat: async (chatId) => sendNotification(
             chatId,
@@ -1762,6 +1763,7 @@ module.exports = {
     getBroadcastTargets,
     groupSubscriptionsByStudent,
     handleCommand,
+    getCommandRegistry,
     isOwner,
     parseDangKyArgument,
     parseCommand,

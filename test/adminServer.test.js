@@ -105,3 +105,19 @@ test("admin API exposes chat CRUD, settings and command execution", async (t) =>
     assert.equal(deleted.status, 200, JSON.stringify(deleted.body));
     await request(port, "DELETE", "/zalobot/api/admin/settings/admins?id=dashboard-admin-user", null, cookie);
 });
+
+test("command execution derives executor identity from the session", async (t) => {
+    preserveRuntimeFiles(t);
+    const oldUsername = process.env.ADMIN_USERNAME; const oldPassword = process.env.ADMIN_PASSWORD;
+    process.env.ADMIN_USERNAME = "session-admin"; process.env.ADMIN_PASSWORD = "test-password";
+    let executed = null;
+    const runtime = createAdminServer({ port: 0, executeCommand: async (payload) => { executed = payload; return { ok: true }; } });
+    await new Promise((resolve) => runtime.server.listen(0, "127.0.0.1", resolve)); const port = runtime.server.address().port;
+    t.after(() => { runtime.server.close(); process.env.ADMIN_USERNAME = oldUsername; process.env.ADMIN_PASSWORD = oldPassword; });
+    const login = await request(port, "POST", "/zalobot/api/admin/auth/login", { username: "session-admin", password: "test-password" });
+    const cookie = String(login.headers["set-cookie"][0]).split(";")[0];
+    const result = await request(port, "POST", "/zalobot/api/admin/commands", { command: "/help", userId: "spoofed", targetUserId: "target-1" }, cookie);
+    assert.equal(result.status, 200);
+    assert.notEqual(executed.userId, "spoofed");
+    assert.equal(executed.target.userId, "target-1");
+});
