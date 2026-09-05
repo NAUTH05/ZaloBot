@@ -13,7 +13,8 @@ const {
     upsertChat
 } = require("./chatDirectory");
 const { getInteractionTargets, removeInteractionMember, upsertInteractionMember } = require("./interactionRegistry");
-const { getAdminSettings, removeAdmin, upsertAdmin } = require("./adminSettings");
+const { getAdminSettings, getConfiguredAdminIds, removeAdmin, setDefaultPageSize, upsertAdmin } = require("./adminSettings");
+const { getCommandRegistry } = require("./commandRegistry");
 const {
     deleteSubscription,
     disableNotifications,
@@ -451,6 +452,13 @@ async function handleApi(request, response, url, options = {}) {
         return json(response, 200, { ok: true, result });
     }
     if (url.pathname === `${API_PREFIX}/settings` && request.method === "GET") return json(response, 200, getAdminSettings());
+    if (url.pathname === `${API_PREFIX}/settings` && request.method === "PATCH") {
+        let body;
+        try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
+        try { const updated = setDefaultPageSize(body.defaultPageSize); audit("settings.page_size", request, { result: "success", defaultPageSize: updated.defaultPageSize }); return json(response, 200, updated); }
+        catch (error) { return json(response, 400, { error: error.message }); }
+    }
+    if (url.pathname === `${API_PREFIX}/commands` && request.method === "GET") return json(response, 200, { commands: getCommandRegistry() });
     if (url.pathname === `${API_PREFIX}/settings/admins` && ["POST", "PATCH"].includes(request.method)) {
         let body;
         try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
@@ -469,8 +477,17 @@ async function handleApi(request, response, url, options = {}) {
         let body;
         try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
         try {
-            const result = await options.executeCommand({ command: body.command, userId: body.userId, chatId: body.chatId, displayName: body.displayName });
-            audit("command.execute", request, { result: "success", command: body.command, userId: body.userId, chatId: body.chatId });
+            const configured = getConfiguredAdminIds();
+            const configuredAdmin = getAdminSettings().admins.find((admin) => admin.displayName && admin.displayName.toLowerCase() === String(request.admin.username).toLowerCase());
+            const executor = {
+                userId: configuredAdmin?.userId || configured.userIds[0] || `admin:${request.admin.username}`,
+                username: request.admin.username,
+                role: "owner",
+                displayName: configuredAdmin?.displayName || request.admin.username
+            };
+            const target = body.targetUserId || body.targetChatId ? { userId: body.targetUserId || null, chatId: body.targetChatId || null } : null;
+            const result = await options.executeCommand({ command: body.command, userId: executor.userId, chatId: body.chatId || configuredAdmin?.chatId || configured.chatIds[0] || executor.userId, displayName: executor.displayName, executor, target });
+            audit("command.execute", request, { result: "success", command: body.command, executor: executor.username, userId: executor.userId, target });
             return json(response, 200, result);
         } catch (error) {
             audit("command.execute", request, { result: "failed", command: body.command, error: error.message });
