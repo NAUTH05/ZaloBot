@@ -1,6 +1,10 @@
 process.env.TZ = "Asia/Ho_Chi_Minh";
 
-require("dotenv").config();
+const path = require("path");
+
+// Nạp .env theo thư mục dự án để cấu hình hoạt động giống nhau dù tiến trình
+// được khởi động từ thư mục nào (PM2, terminal, systemd).
+require("dotenv").config({ path: path.join(__dirname, ".env"), quiet: true });
 
 const https = require("https");
 const crypto = require("crypto");
@@ -56,9 +60,9 @@ const {
     formatClassStartEnabled,
     formatClassStartStatus,
     formatDailyNotificationEnabled,
-    formatDutyHelp,
     formatErrorMessage,
     formatGeneralHelp,
+    formatInternal411Help,
     formatMissingStudentIdMessage,
     formatStudentSavedMessage,
     formatSuccessMessage,
@@ -90,6 +94,7 @@ const { askScheduleAi } = require("./aiAssistant");
 const { flushPersistenceWrites, initializeFirestorePersistence } = require("./firestorePersistence");
 const { getCommandRegistry } = require("./commandRegistry");
 const { createAdminServer } = require("./adminServer");
+const { DEFAULT_SHUTDOWN_TIMEOUT_MS, createShutdownController } = require("./shutdown");
 const { recordSystemLog } = require("./operationalLog");
 const { getConfiguredAdminIds, isConfiguredAdmin } = require("./adminSettings");
 const {
@@ -129,6 +134,12 @@ if (!process.env.BOT_TOKEN) {
 const bot = new ZaloBot(process.env.BOT_TOKEN, { polling: false });
 const dashboardCommandContext = new AsyncLocalStorage();
 const registeredSchedulers = new WeakSet();
+
+// Trạng thái runtime phục vụ dừng an toàn.
+let runtimeSchedulerJobs = [];
+let adminRuntime = null;
+let shutdownController = null;
+let shuttingDown = false;
 
 function logDiscord(level, message) {
     if (level === "ERROR" || level === "WARN") {
@@ -459,6 +470,8 @@ function parseNotificationTimeEditArgument(argument) {
     return { id: Number(match[1]), notificationTime: normalizeNotificationTime(match[2]) };
 }
 
+// Dùng cho gợi ý khi người dùng gõ sai lệnh. Các lệnh nội bộ phòng 411
+// không nằm ở đây để gợi ý công khai không lộ tính năng nội bộ.
 const COMMAND_EXAMPLES = {
     start: "/start",
     find: "/find 123456789",
@@ -478,15 +491,7 @@ const COMMAND_EXAMPLES = {
     huythongbao: "/huythongbao",
     sinhnhat: "/sinhnhat Bạn muốn hỏi tôi điều gì?",
     myid: "/myid",
-    lichtruc: "/lichtruc",
-    themlichtruc: "/themlichtruc 25/08 Nhân - Sang",
-    sualichtruc: "/sualichtruc 25/08 Nhân - Cường",
-    xoalichtruc: "/xoalichtruc 25/08",
-    danhsachlichtruc: "/danhsachlichtruc",
-    dangkylich: "/dangkylich",
-    huydangkylich: "/huydangkylich",
     help: "/help",
-    help411: "/help411",
     helpadmin: "/helpadmin",
     time: "/time",
     thongbao: "/thongbao Đã cập nhật tính năng mới",
@@ -1354,7 +1359,9 @@ async function handleCommand(msg, parsedCommand) {
     } else if (command === "help") {
         await sendMessage(chatId, formatGeneralHelp());
     } else if (command === "help411") {
-        await sendMessage(chatId, formatDutyHelp());
+        // Trợ giúp nội bộ phòng 411 chỉ dành cho quản trị viên.
+        if (!await requireOwner(context)) return;
+        await sendMessage(chatId, formatInternal411Help());
     } else if (command === "helpadmin") {
         if (!await requireOwner(context)) return;
         await sendMessage(chatId, formatAdminHelp());
@@ -1624,24 +1631,94 @@ function registerRuntimeJobs(scheduler = schedule) {
     return jobs;
 }
 
-async function startRuntime() {
-    await initializeFirestorePersistence({
-        storeIds: [
-            "accessControl",
-            "adminAudit",
-            "adminLogs",
-            "adminSettings",
-            "birthdayData",
-            "chatDirectory",
-            "dutyScheduleData",
-            "interactions",
-            "classStartNotifications",
-            "scheduleSnapshots",
-            "subscriptions"
-        ]
+// Hủy các job đã đăng ký với node-schedule (job.cancel là API chính thức).
+function cancelSchedulerJobs() {
+    const jobs = runtimeSchedulerJobs;
+    runtimeSchedulerJobs = [];
+    for (const job of jobs) {
+        try {
+            if (job && typeof job.cancel === "function") job.cancel();
+        } catch (error) {
+            console.warn(`[Runtime] Không hủy được job scheduler: ${error.message}`);
+        }
+    }
+    return jobs.length;
+}
+
+// node-zalo-bot không có stopPolling công khai; instance Polling nội bộ có stop().
+// Chỉ gọi khi thư viện thực sự cung cấp, không tự phát minh API.
+// Hủy yêu cầu long-poll đang chờ để không phải đợi hết timeout của Zalo.
+function stopZaloPolling() {
+    shuttingDown = true;
+    if (bot && typeof bot.stopPolling === "function") return Promise.resolve(bot.stopPolling());
+    const polling = bot && bot._polling;
+    if (polling && typeof polling.stop === "function") {
+        return Promise.resolve(polling.stop({ cancel: true, reason: "Bot is shutting down" }));
+    }
+    console.warn("[Runtime] Thư viện Zalo không cung cấp API dừng polling; bỏ qua bước này.");
+    return Promise.resolve();
+}
+
+function closeDashboardServer() {
+    const server = adminRuntime && adminRuntime.server;
+    if (!server) return Promise.resolve();
+    return new Promise((resolve) => {
+        server.close(() => resolve());
+        if (typeof server.closeIdleConnections === "function") server.closeIdleConnections();
     });
+}
+
+function registerShutdownHandlers() {
+    shutdownController ||= createShutdownController({
+        timeoutMs: positiveDuration(process.env.SHUTDOWN_TIMEOUT_MS, DEFAULT_SHUTDOWN_TIMEOUT_MS),
+        log: (message) => console.log(message),
+        stopScheduler: () => { cancelSchedulerJobs(); },
+        stopPolling: () => stopZaloPolling(),
+        closeDashboard: () => closeDashboardServer(),
+        flushPersistence: () => flushPersistenceWrites()
+    });
+    for (const signal of ["SIGINT", "SIGTERM"]) {
+        process.on(signal, () => { shutdownController.run(signal); });
+    }
+    return shutdownController;
+}
+
+async function startRuntime() {
+    let firebaseTarget;
+    try {
+        // Bước 1: nạp cấu hình Firebase + hydrate state Firestore vào bộ nhớ.
+        firebaseTarget = await initializeFirestorePersistence({
+            storeIds: [
+                "accessControl",
+                "adminAudit",
+                "adminLogs",
+                "adminSettings",
+                "birthdayData",
+                "chatDirectory",
+                "dutyScheduleData",
+                "interactions",
+                "classStartNotifications",
+                "scheduleSnapshots",
+                "subscriptions"
+            ]
+        });
+    } catch (error) {
+        console.error(`[Firebase] Không thể khởi tạo Firestore: ${error.message}`);
+        console.error("[Runtime] Dừng khởi động: scheduler và Zalo polling không được bật.");
+        throw error;
+    }
+
+    console.log(`[Firebase] Project: ${firebaseTarget.projectId}`);
+    console.log(`[Firebase] Database: ${firebaseTarget.databaseId}`);
+    console.log(`[Firebase] Collection: ${firebaseTarget.collectionName}`);
+    console.log(`[Persistence] State loaded (${firebaseTarget.storeIds.length} store)`);
+    console.log(`[Runtime] Timezone: ${TIME_ZONE}`);
+
+    // Bước 2: đồng bộ lại state phái sinh từ dữ liệu cũ trước khi chạy runtime.
     if (syncChatDirectoryFromLegacyStores() > 0) await flushPersistenceWrites();
-    const adminRuntime = createAdminServer({
+
+    // Bước 3: dashboard.
+    adminRuntime = createAdminServer({
         executeCommand: async ({ command, userId, chatId, displayName, executor, target }) => {
             const parsed = parseCommand(command);
             if (!parsed) throw new Error("Lệnh phải bắt đầu bằng /");
@@ -1661,11 +1738,16 @@ async function startRuntime() {
         adminRuntime.server.once("error", reject);
         adminRuntime.server.listen(adminRuntime.port, "127.0.0.1", resolve);
     });
-    console.log(`Admin dashboard listening on http://127.0.0.1:${adminRuntime.port}${adminRuntime.basePath}`);
-    // Chỉ bật scheduler sau khi state Firestore đã được hydrate vào bộ nhớ.
-    registerRuntimeJobs();
+    console.log(`[Dashboard] Listening on http://127.0.0.1:${adminRuntime.port}${adminRuntime.basePath}`);
+
+    // Bước 4: chỉ bật scheduler sau khi state Firestore đã được hydrate vào bộ nhớ.
+    runtimeSchedulerJobs = registerRuntimeJobs() || [];
+    registerShutdownHandlers();
+    console.log(`[Runtime] Scheduler started (${TIME_ZONE})`);
+
+    // Bước 5: polling Zalo sau cùng.
     await bot.startPolling();
-    console.log(`Bot đã khởi động. Tự động kiểm tra thay đổi lịch, gửi lịch theo giờ đăng ký và nhắc giờ bắt đầu buổi học (${TIME_ZONE}).`);
+    console.log(`[Runtime] Zalo polling started (${TIME_ZONE})`);
     logDiscord("INFO", `Bot đã khởi động - timezone ${TIME_ZONE}`);
     await sendBirthdayInvitations();
     await flushPersistenceWrites();
@@ -1736,6 +1818,8 @@ bot.on("message", asyncCommand(async (msg) => {
 }));
 
 bot.on("polling_error", (error) => {
+    // Lỗi phát sinh do chủ động hủy long-poll lúc dừng bot không phải sự cố.
+    if (shuttingDown) return;
     if (error.code === "EZALO" && error.message?.includes("408")) return;
     console.error("Lỗi polling:", error);
     logDiscord("ERROR", `polling_error: ${error.message}`);
@@ -1750,16 +1834,21 @@ if (!isTestEnv) {
     startRuntime().catch((error) => {
         console.error("Không thể khởi động persistence/runtime:", error);
         logDiscord("ERROR", `runtime_startup_error: ${error.message}`);
-        process.exitCode = 1;
+        // Không chạy nền bằng JSON cục bộ trong môi trường thật: dừng với mã lỗi.
+        process.exit(1);
     });
 }
 
 module.exports = {
+    cancelSchedulerJobs,
+    closeDashboardServer,
     formatBirthdayInvitation,
     formatBirthdayResults,
-    formatDutyHelp,
     formatGeneralHelp,
     formatAdminHelp,
+    formatInternal411Help,
+    registerShutdownHandlers,
+    stopZaloPolling,
     getBroadcastTargets,
     groupSubscriptionsByStudent,
     handleCommand,

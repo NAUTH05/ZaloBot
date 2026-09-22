@@ -1,28 +1,20 @@
 const fs = require("fs");
 const path = require("path");
-let cert;
-let getApps;
-let initializeApp;
-let getFirestore;
 
-try {
-    ({ cert, getApps, initializeApp } = require("firebase-admin/app"));
-    ({ getFirestore } = require("firebase-admin/firestore"));
-} catch (_) {
-    // Compatibility with firebase-admin versions before modular subpath exports.
-    const legacyAdmin = require("firebase-admin");
-    cert = legacyAdmin.credential.cert;
-    getApps = () => legacyAdmin.apps || [];
-    initializeApp = legacyAdmin.initializeApp.bind(legacyAdmin);
-    getFirestore = legacyAdmin.firestore.bind(legacyAdmin);
-}
-
-const DEFAULT_COLLECTION = "bot_state";
-const DEFAULT_CREDENTIAL_PATH = "";
+const {
+    DEFAULT_COLLECTION,
+    createFirestore,
+    describeFirebaseTarget,
+    getCollectionName,
+    getDatabaseId,
+    loadServiceAccount,
+    normalizePrivateKey
+} = require("./firebaseConfig");
 
 let backend = "local";
 let credentials = null;
-let databaseId = "(default)";
+let credentialSource = null;
+let databaseId = getDatabaseId();
 let collectionName = DEFAULT_COLLECTION;
 let db = null;
 const cache = new Map();
@@ -77,53 +69,6 @@ function writeJsonStore(filePath, defaultPath, value) {
         });
 }
 
-function normalizePrivateKey(value) {
-    let key = String(value || "").trim();
-    if ((key.startsWith('"') && key.endsWith('"')) || (key.startsWith("'") && key.endsWith("'"))) key = key.slice(1, -1);
-    return key
-        .replace(/\\\\n/g, "\n")
-        .replace(/\\n/g, "\n")
-        .replace(/\\r?\n/g, "\n")
-        .replace(/\\r/g, "\r")
-        .replace(/\r/g, "")
-        .replace(/\\+$/g, "")
-        .trim();
-}
-
-function loadCredentials(credentialsPath = process.env.FIREBASE_SERVICE_ACCOUNT_FILE || process.env.FIREBASE_SERVICE_ACCOUNT_PATH || DEFAULT_CREDENTIAL_PATH) {
-    const envProjectId = String(process.env.FIREBASE_PROJECT_ID || "").trim();
-    const envClientEmail = String(process.env.FIREBASE_CLIENT_EMAIL || "").trim();
-    const envPrivateKey = normalizePrivateKey(process.env.FIREBASE_PRIVATE_KEY);
-    const externalFileConfigured = Boolean(String(process.env.FIREBASE_SERVICE_ACCOUNT_FILE || "").trim());
-    if (!externalFileConfigured && envProjectId && envClientEmail && envPrivateKey) {
-        return {
-            project_id: envProjectId,
-            client_email: envClientEmail,
-            private_key: envPrivateKey
-        };
-    }
-    if (!credentialsPath) {
-        throw new Error(
-            "Thiếu FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL hoặc FIREBASE_PRIVATE_KEY trong môi trường"
-        );
-    }
-    if (!fs.existsSync(credentialsPath)) {
-        throw new Error(`Không tìm thấy service account Firebase tại ${credentialsPath}`);
-    }
-    const data = JSON.parse(fs.readFileSync(credentialsPath, "utf8"));
-    if (!data.project_id || !data.client_email || !data.private_key) {
-        throw new Error("Service account Firebase thiếu project_id, client_email hoặc private_key");
-    }
-    if (!data.client_email.endsWith(".iam.gserviceaccount.com")) {
-        throw new Error("client_email không phải email service account Firebase");
-    }
-    data.private_key = normalizePrivateKey(data.private_key);
-    if (!data.private_key.includes("-----BEGIN PRIVATE KEY-----") || !data.private_key.includes("-----END PRIVATE KEY-----")) {
-        throw new Error("private_key không phải khóa PEM hợp lệ của service account Firebase");
-    }
-    return data;
-}
-
 async function readFirestoreDocument(storeId) {
     const snapshot = await db.collection(collectionName).doc(storeId).get();
     if (!snapshot.exists) return null;
@@ -152,48 +97,77 @@ async function writeFirestoreDocumentWithRetry(storeId, value, attempts = 3) {
     throw lastError;
 }
 
-async function initializeFirestorePersistence(options = {}) {
-    credentials = loadCredentials(options.credentialsPath);
-    databaseId = options.databaseId || process.env.FIREBASE_DATABASE_ID || "(default)";
-    collectionName = options.collectionName || process.env.FIREBASE_STATE_COLLECTION || DEFAULT_COLLECTION;
-    if (getApps().length === 0) {
-        initializeApp({
-            credential: cert(credentials),
-            projectId: credentials.project_id
-        });
+// Một đường khởi tạo Firebase duy nhất dùng chung cho runtime, migration và script kiểm tra.
+function connectFirestore(options = {}) {
+    if (db) return { credentials, databaseId, collectionName, credentialSource };
+
+    const account = loadServiceAccount(process.env, { projectRoot: options.projectRoot });
+    credentials = account.credentials;
+    credentialSource = account.source;
+    databaseId = options.databaseId || getDatabaseId();
+    collectionName = options.collectionName || getCollectionName();
+
+    if (account.source === "env-fields") {
+        console.warn(
+            "[Firebase] Đang dùng FIREBASE_PROJECT_ID / FIREBASE_CLIENT_EMAIL / FIREBASE_PRIVATE_KEY. " +
+            "Nên chuyển sang FIREBASE_SERVICE_ACCOUNT_FILE để đơn giản và an toàn hơn."
+        );
     }
-    db = getFirestore();
+
+    db = createFirestore(credentials, databaseId);
+    backend = "firestore";
+    return { credentials, databaseId, collectionName, credentialSource };
+}
+
+async function initializeFirestorePersistence(options = {}) {
+    const connection = connectFirestore(options);
     const storeIds = options.storeIds || [];
     for (const storeId of storeIds) {
         const value = await readFirestoreDocument(storeId);
         if (value != null) cache.set(storeId, value);
     }
-    backend = "firestore";
-    return { projectId: credentials.project_id, databaseId, collectionName };
+    return {
+        ...describeFirebaseTarget({ credentials: connection.credentials, databaseId: connection.databaseId, collectionName: connection.collectionName }),
+        credentialSource: connection.credentialSource,
+        storeIds
+    };
 }
 
-async function importJsonDirectory(sourceDirectory) {
-    credentials ||= loadCredentials();
-    databaseId = process.env.FIREBASE_DATABASE_ID || "(default)";
-    collectionName = process.env.FIREBASE_STATE_COLLECTION || DEFAULT_COLLECTION;
-    if (!db) {
-        if (getApps().length === 0) {
-            initializeApp({
-                credential: cert(credentials),
-                projectId: credentials.project_id
-            });
-        }
-        db = getFirestore();
+async function importJsonDirectory(sourceDirectory, options = {}) {
+    const resolvedSource = path.resolve(String(sourceDirectory || ""));
+    if (!sourceDirectory || !fs.existsSync(resolvedSource)) {
+        throw new Error(`Không tìm thấy thư mục nguồn để migrate: ${resolvedSource || "(trống)"}`);
     }
-    const files = fs.readdirSync(sourceDirectory).filter((name) => name.toLowerCase().endsWith(".json"));
-    const result = [];
+    if (!fs.statSync(resolvedSource).isDirectory()) {
+        throw new Error(`Đường dẫn nguồn migrate không phải thư mục: ${resolvedSource}`);
+    }
+
+    const files = fs.readdirSync(resolvedSource).filter((name) => name.toLowerCase().endsWith(".json")).sort();
+    if (files.length === 0) {
+        return { sourceDirectory: resolvedSource, items: [] };
+    }
+
+    connectFirestore(options);
+
+    const items = [];
     for (const fileName of files) {
         const storeId = storeIdFromPath(fileName);
-        const value = JSON.parse(fs.readFileSync(path.join(sourceDirectory, fileName), "utf8"));
-        await writeFirestoreDocument(storeId, value);
-        result.push({ fileName, storeId });
+        const absoluteFile = path.join(resolvedSource, fileName);
+        let value;
+        try {
+            value = JSON.parse(fs.readFileSync(absoluteFile, "utf8"));
+        } catch (error) {
+            throw new Error(`File JSON không hợp lệ: ${fileName} (${error.message})`);
+        }
+        await writeFirestoreDocumentWithRetry(storeId, value);
+        items.push({ fileName, storeId });
     }
-    return result;
+
+    return {
+        sourceDirectory: resolvedSource,
+        target: describeFirebaseTarget({ credentials, databaseId, collectionName }),
+        items
+    };
 }
 
 function flushPersistenceWrites() {
@@ -206,17 +180,18 @@ function getPersistenceStatus() {
         projectId: credentials?.project_id || null,
         databaseId,
         collectionName,
+        credentialSource,
         lastWriteAt: lastPersistenceWriteAt,
         lastError: lastPersistenceError
     };
 }
 
 module.exports = {
-    DEFAULT_CREDENTIAL_PATH,
+    connectFirestore,
     flushPersistenceWrites,
+    getPersistenceStatus,
     importJsonDirectory,
     initializeFirestorePersistence,
-    getPersistenceStatus,
     normalizePrivateKey,
     readJsonStore,
     writeJsonStore

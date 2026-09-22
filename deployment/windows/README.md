@@ -15,7 +15,7 @@ npm ci
 Copy-Item .env.example .env
 ```
 
-Place the Firebase key at `C:\Secure\ZaloBot\firebase-service-account.json` and grant access only to the deployment account and Administrators.
+Place the Firebase key at `C:\Secure\ZaloBot\firebase-service-account.json` and grant access only to the deployment account and Administrators. Any file name is accepted as long as `FIREBASE_SERVICE_ACCOUNT_FILE` points at it; the conventional name is `zalobot-firebase-adminsdk-fbsvc.json`.
 
 ## Configuration and verification
 
@@ -49,11 +49,13 @@ Expected status is `200`. Keep Node bound to localhost and do not expose port 30
 
 ```powershell
 npm install -g pm2
-pm2 start ecosystem.config.js --update-env
+pm2 start ecosystem.config.cjs --update-env
 pm2 status
 pm2 logs zalobot
 pm2 save
 ```
+
+`ecosystem.config.cjs` pins `instances: 1` and `exec_mode: "fork"`. Never switch to cluster mode: multiple instances would duplicate polling, scheduled tasks, and notifications.
 
 Create a Task Scheduler task named `ZaloBot PM2 resurrect`, trigger **At startup**, under the same service account:
 

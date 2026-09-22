@@ -1,5 +1,7 @@
 node_modules/
 .env
+.env.*
+!.env.example
 credentials.json
 subscriptions.json
 subscriptions.json.tmp
@@ -13,9 +15,14 @@ birthdayData.json
 birthdayData.json.tmp
 dutyScheduleData.json
 dutyScheduleData.json.tmp
+chatDirectory.json
+chatDirectory.json.tmp
+classStartNotifications.json
+classStartNotifications.json.tmp
 thongtinfirebase.txt
 firebase-service-account.json
 *firebase-adminsdk*.json
+*-firebase-adminsdk-*.json
 recent_json/
 .npm-cache/
 *.log

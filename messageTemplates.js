@@ -1,4 +1,5 @@
 const { escapeMarkdown } = require("./richText");
+const { formatAdminHelp, formatInternalHelp, formatPublicHelp } = require("./helpContent");
 
 const GENERIC_ERROR_MESSAGE = "Đã xảy ra lỗi khi xử lý yêu cầu. Bạn thử lại sau ít phút nhé.";
 
@@ -38,130 +39,14 @@ Xin chào **${escapeMarkdown(displayName || "bạn")}**!
 {orange}Dùng **/help** để xem danh sách lệnh.{/orange}`;
 }
 
+// Nội dung trợ giúp được quản lý tập trung trong helpContent.js để /help,
+// /helpadmin và /help411 luôn khớp với parser thật.
 function formatGeneralHelp() {
-    return `# {green}[BOT] HƯỚNG DẪN{/green}
-
-## {orange}BẮT ĐẦU{/orange}
-**/start**
-Xem hướng dẫn bắt đầu.
-
-**/find [MSSV]**
-Lưu MSSV cho tài khoản hiện tại.
-
-## {orange}LỊCH HỌC{/orange}
-**/lich [MSSV]**
-Xem lịch học hôm nay.
-
-**/lichtuan [MSSV]**
-Xem lịch học trong tuần.
-
-**/lichthi [MSSV]**
-Xem lịch thi trong học kỳ.
-
-**/lichgv [Tên giảng viên]**
-Xem lịch dạy của giảng viên.
-
-**/phongtrong [Cơ sở]**
-Xem gợi ý phòng trống hôm nay.
-
-## {orange}THÔNG BÁO{/orange}
-**/dangky [hh:mm]**
-Nhận lịch học tự động vào giờ đã chọn.
-
-**/dangky [MSSV] [hh:mm]**
-Lưu MSSV và bật nhận lịch trong cùng lệnh.
-
-**/danhsachdangky**
-Xem các giờ nhận lịch đã lưu.
-
-**/suadangky #ID [hh:mm]**
-Đổi một giờ nhận lịch.
-
-**/xoadangky #ID**
-Xóa một giờ nhận lịch.
-
-**/huythongbao**
-Tắt nhận lịch học tự động.
-
-**/batnhaclich**
-Bật nhắc giờ bắt đầu tiết học.
-
-**/tatnhaclich**
-Tắt nhắc giờ bắt đầu tiết học.
-
-**/trangthainhaclich**
-Xem trạng thái nhắc giờ học.
-
-## {orange}TIỆN ÍCH{/orange}
-**/ai [Câu hỏi]**
-Hỏi trợ lý AI về lịch học đã lưu.
-
-**/lichtruc** · **/danhsachlichtruc**
-Xem lịch trực nhật phòng 411.
-
-**/dangkylich** · **/huydangkylich**
-Bật hoặc tắt thông báo lịch trực nhật.
-
-**/sinhnhat [Câu hỏi]**
-Gửi câu hỏi trong ngày 27/08.
-
-**/time** · **/myid** · **/help411** · **/help**
-Xem giờ hệ thống, ID tài khoản hoặc các hướng dẫn.`;
+    return formatPublicHelp();
 }
 
-function formatDutyHelp() {
-    return `# {green}[PHÒNG 411] HƯỚNG DẪN{/green}
-
-**/lichtruc**
-Xem phân công trực nhật hôm nay.
-
-**/danhsachlichtruc**
-Xem toàn bộ danh sách phân công.
-
-**/dangkylich**
-Nhận lịch trực nhật lúc 06:00 hằng ngày.
-
-**/huydangkylich**
-Tắt thông báo lịch trực nhật.`;
-}
-
-function formatAdminHelp() {
-    return `${formatGeneralHelp()}
-
-${formatDutyHelp()}
-
-# {orange}[ADMIN] LỆNH QUẢN TRỊ{/orange}
-
-## {orange}PHÂN QUYỀN{/orange}
-**/blockbot** · **/unblockbot** · **/blockai** · **/unblockai**
-Chặn hoặc mở lại quyền sử dụng.
-
-**/allowbot** · **/unallowbot** · **/allowai** · **/unallowai**
-Quản lý allowlist.
-
-**/accessmode** · **/accesslist**
-Đổi chế độ và xem danh sách truy cập.
-
-## {orange}CHAT VÀ THÔNG BÁO{/orange}
-**/quanlychat** · **/thongtinch**
-Kiểm tra trạng thái chat và lỗi gửi.
-
-**/vohieuchat** · **/kichhoatchat** · **/thuchatchat** · **/xoachat**
-Quản lý vòng đời chat.
-
-**/chatfeature** · **/thongbao**
-Điều khiển tính năng hoặc gửi thông báo chung.
-
-## {orange}LỊCH TRỰC VÀ HỎI ĐÁP{/orange}
-**/themlichtruc** · **/sualichtruc** · **/xoalichtruc**
-Quản lý phân công trực nhật phòng 411.
-
-**/danhsach** · **/them** · **/sua** · **/xoa** · **/traloi** · **/congbo**
-Quản lý hỏi đáp sinh nhật.
-
-## {orange}KIỂM TRA HỆ THỐNG{/orange}
-**/test6h** · **/test6hlichtruc** · **/helpadmin**
-Chạy kiểm tra gửi và xem hướng dẫn quản trị.`;
+function formatInternal411Help() {
+    return formatInternalHelp();
 }
 
 function formatStudentSavedMessage(scheduleData, subscription) {
@@ -214,9 +99,10 @@ module.exports = {
     formatClassStartEnabled,
     formatClassStartStatus,
     formatDailyNotificationEnabled,
-    formatDutyHelp,
     formatErrorMessage,
     formatGeneralHelp,
+    formatInternal411Help,
+    formatInternalHelp,
     formatMissingStudentIdMessage,
     formatStudentSavedMessage,
     formatSuccessMessage,
