@@ -7,6 +7,7 @@ let dashboard = null;
 let logs = null;
 let settings = null;
 let commandRegistry = [];
+let bots = [];
 let targetUsers = [];
 let targetUserMatches = [];
 let targetUserActiveIndex = -1;
@@ -45,9 +46,105 @@ function setDataState(state, message = "") {
   banner.innerHTML = message ? `${escapeHtml(message)}${state === "error" ? ' <button type="button" id="retryData">Retry</button>' : ""}` : "";
   if (state === "error") $("#retryData")?.addEventListener("click", loadData, { once: true });
 }
-function formatDate(value) { if (!value) return "-"; const date = new Date(value); return Number.isNaN(date.getTime()) ? value : date.toLocaleString("vi-VN"); }
-function badge(value, tone = "neutral") { return `<span class="badge badge-${tone}">${escapeHtml(value)}</span>`; }
+// Bọc mọi thao tác quản trị trên dashboard.
+//
+// Trước đây một lỗi API (ví dụ 404 khi xoá chat) làm Promise bị từ chối âm thầm:
+// người dùng chỉ thấy dòng biến mất hoặc không có phản hồi nào. Hàm này hiện thông
+// báo lỗi rõ ràng và KHÔNG vẽ lại bảng, nên dòng vẫn còn nếu thao tác thất bại.
+async function runAction(action, failureLabel) {
+  try {
+    const result = await action();
+    return { ok: true, result };
+  } catch (error) {
+    const detail = error?.message || String(error);
+    setDataState("error", `${failureLabel}: ${detail}`);
+    console.error(failureLabel, error);
+    return { ok: false, error };
+  }
+}
+
+function formatDate(value) { if (!value) return "-"; const date = new Date(value); return Number.isNaN(date.getTime()) ? value : date.toLocaleString("vi-VN"); }function badge(value, tone = "neutral") { return `<span class="badge badge-${tone}">${escapeHtml(value)}</span>`; }
 function statusTone(status) { return status === "active" ? "success" : status === "inactive" ? "danger" : status === "disabled" ? "warning" : "neutral"; }
+
+// ---------------------------------------------------------------------------
+// Bot: bộ lọc dùng chung cho mọi danh sách + nhãn bot trên từng dòng.
+// Bản ghi không có botId thuộc về bot 1 — đúng quy tắc dữ liệu cũ.
+// ---------------------------------------------------------------------------
+const LEGACY_BOT_ID = "bot1";
+
+function recordBotId(record) {
+  const value = String(record?.botId || "").trim().toLowerCase();
+  return /^bot\d+$/.test(value) ? value : LEGACY_BOT_ID;
+}
+
+// Bộ lọc bot đang chọn. "all" = không lọc.
+function activeBotFilter() {
+  return $("#botFilter")?.value || "all";
+}
+
+function filterByBot(list) {
+  const botId = activeBotFilter();
+  if (botId === "all") return list;
+  return list.filter((item) => recordBotId(item) === botId);
+}
+
+// Nhãn bot: ưu tiên tên thật lấy từ Zalo, rồi tới nhãn BOT_N_NAME, cuối cùng là
+// botId. Server trả sẵn `label` nên giao diện không phải tự ghép.
+function botLabel(botId) {
+  const known = bots.find((bot) => bot.botId === botId);
+  if (!known) return botId;
+  const label = known.label || known.displayName || botId;
+  return known.enabled === false ? `${label} (tắt)` : label;
+}
+
+// Ô "Bot" cho bảng Users và Chat directory. Luôn hiển thị, kể cả khi đang lọc một
+// bot — cột phải ổn định để bảng không nhảy cột khi đổi bộ lọc.
+function botCell(record) {
+  const botId = recordBotId(record);
+  const known = bots.find((bot) => bot.botId === botId);
+  return `<td><span class="bot-chip" title="${escapeHtml(botId)}">${escapeHtml(botLabel(botId))}</span></td>`;
+}
+
+// Nhãn bot chỉ hiện khi xem tất cả — lọc một bot rồi thì nó là thừa.
+function botBadge(record) {
+  if (activeBotFilter() !== "all") return "";
+  const botId = recordBotId(record);
+  return badge(botLabel(botId), botId === LEGACY_BOT_ID ? "neutral" : "info");
+}
+
+function botOptionsHtml(includeAll) {
+  const options = bots.map((bot) => `<option value="${escapeHtml(bot.botId)}">${escapeHtml(botLabel(bot.botId))}</option>`).join("");
+  return (includeAll ? '<option value="all">Tất cả bot</option>' : '<option value="">-- Chọn bot --</option>') + options;
+}
+
+// Đổ danh sách bot vào bộ lọc và bộ chọn bot, giữ lựa chọn hiện tại nếu còn.
+function populateBotControls() {
+  const filter = $("#botFilter");
+  if (filter) {
+    const previous = filter.value || "all";
+    filter.innerHTML = botOptionsHtml(true);
+    filter.value = bots.some((bot) => bot.botId === previous) || previous === "all" ? previous : "all";
+  }
+  const selector = $("#commandBot");
+  if (selector) {
+    const previous = selector.value;
+    selector.innerHTML = botOptionsHtml(false);
+    if (bots.some((bot) => bot.botId === previous)) selector.value = previous;
+  }
+}
+
+// Thẻ trạng thái từng bot. Số liệu đếm riêng vì mỗi bot là một danh tính.
+function renderBotGrid() {
+  const target = $("#botGrid");
+  if (!target) return;
+  const stats = workspace.botStats || [];
+  if (!bots.length) { target.innerHTML = ""; return; }
+  target.innerHTML = bots.map((bot) => {
+    const stat = stats.find((item) => item.botId === bot.botId) || {};
+    const tone = bot.status === "running" ? "success" : bot.enabled === false ? "neutral" : "warning";
+    return `<article class="bot-card"><header><strong>${escapeHtml(bot.botId)}</strong>${badge(bot.status || (bot.enabled === false ? "disabled" : "unknown"), tone)}</header><p class="muted">Token: <code>${escapeHtml(bot.tokenFingerprint || "-")}</code> · nguồn <code>${escapeHtml(bot.tokenSource || "-")}</code></p><dl><div><dt>Chat</dt><dd>${stat.chatCount ?? 0}</dd></div><div><dt>User</dt><dd>${stat.userCount ?? 0}</dd></div><div><dt>Đăng ký</dt><dd>${stat.subscriptionCount ?? 0}</dd></div><div><dt>Đang bật</dt><dd>${stat.enabledSubscriptionCount ?? 0}</dd></div><div><dt>Lỗi gửi</dt><dd>${stat.deliveryErrorCount ?? 0}</dd></div></dl></article>`;
+  }).join("");
+}
 function emptyRow(cols, text) { return `<tr><td colspan="${cols}" class="empty-state">${escapeHtml(text)}</td></tr>`; }
 // Nhãn ngày đích: 0 = homnay, 1 = homsau. Dùng thống nhất với chat.
 function targetDayLabel(targetDayOffset) {
@@ -94,41 +191,41 @@ function renderOverview() {
 
 function renderUsers() {
   const query = $("#userSearch").value.trim().toLowerCase();
-  const users = workspace.users.filter((user) => JSON.stringify(user).toLowerCase().includes(query));
+  const users = filterByBot(workspace.users).filter((user) => JSON.stringify(user).toLowerCase().includes(query));
   $("#userRows").innerHTML = users.map((user) => {
     const times = user.subscriptions.flatMap((item) => item.notificationTimes.map((time) => ({ ...time, chatName: item.chatName })));
-    return `<tr><td><strong>${escapeHtml(user.displayName)}</strong><code>${escapeHtml(user.userId)}</code></td><td>${user.chats.map((chat) => `<div class="context-line">${badge(chat.chatType, chat.chatType === "group" ? "info" : "neutral")} ${escapeHtml(chat.chatName)} <code>${escapeHtml(chat.chatId)}</code></div>`).join("")}</td><td>${user.studentIds.length ? user.studentIds.map((id) => badge(id, "info")).join(" ") : `<span class="muted">Chưa có MSSV</span>`}</td><td>${timeChips(times)}</td><td>${badge(user.status, statusTone(user.status))} ${badge(user.notificationsEnabled ? "Nhận lịch: bật" : "Nhận lịch: tắt", user.notificationsEnabled ? "success" : "neutral")}</td><td><button class="table-action" data-user="${escapeHtml(user.userId)}">Quản lý</button></td></tr>`;
-  }).join("") || emptyRow(6, "Không tìm thấy người dùng phù hợp.");
-  $$('[data-user]').forEach((button) => button.addEventListener("click", () => openUser(button.dataset.user)));
+    return `<tr><td><strong>${escapeHtml(user.displayName)}</strong><code>${escapeHtml(user.userId)}</code></td>${botCell(user)}<td>${user.chats.map((chat) => `<div class="context-line">${badge(chat.chatType, chat.chatType === "group" ? "info" : "neutral")} ${escapeHtml(chat.chatName)} <code>${escapeHtml(chat.chatId)}</code></div>`).join("")}</td><td>${user.studentIds.length ? user.studentIds.map((id) => badge(id, "info")).join(" ") : `<span class="muted">Chưa có MSSV</span>`}</td><td>${timeChips(times)}</td><td>${badge(user.status, statusTone(user.status))} ${badge(user.notificationsEnabled ? "Nhận lịch: bật" : "Nhận lịch: tắt", user.notificationsEnabled ? "success" : "neutral")}</td><td><button class="table-action" data-user="${escapeHtml(user.userId)}" data-user-bot="${escapeHtml(recordBotId(user))}">Quản lý</button></td></tr>`;
+  }).join("") || emptyRow(7, "Không tìm thấy người dùng phù hợp.");
+  $$('[data-user]').forEach((button) => button.addEventListener("click", () => openUser(button.dataset.user, button.dataset.userBot)));
 }
 
 function renderGroups() {
   const query = $("#groupSearch").value.trim().toLowerCase();
-  const groups = workspace.groups.filter((group) => JSON.stringify(group).toLowerCase().includes(query));
-  $("#groupCards").innerHTML = groups.map((group) => `<article class="group-card"><div class="card-heading"><div><span class="eyebrow">${escapeHtml(group.typeSource)}</span><h2>${escapeHtml(group.displayName)}</h2><code>${escapeHtml(group.chatId)}</code></div>${badge(group.status, statusTone(group.status))}</div><div class="group-stats"><span><strong>${group.memberCount}</strong> thành viên</span><span><strong>${group.studentIds.length}</strong> MSSV</span><span><strong>${group.enabledSubscriptionCount}</strong> đang nhận lịch</span></div><div class="member-preview">${group.members.slice(0, 6).map((member) => `<div><strong>${escapeHtml(member.displayName)}</strong><small>${escapeHtml(member.studentIds.join(", ") || "Chưa có MSSV")}</small></div>`).join("") || `<span class="muted">Chưa có dữ liệu thành viên</span>`}</div><button class="secondary full" data-chat-detail="${escapeHtml(group.chatId)}">Xem toàn bộ nhóm</button></article>`).join("") || `<div class="empty-state panel">Không có nhóm phù hợp.</div>`;
-  $$('#groupCards [data-chat-detail]').forEach((button) => button.addEventListener("click", () => openChat(button.dataset.chatDetail)));
+  const groups = filterByBot(workspace.groups).filter((group) => JSON.stringify(group).toLowerCase().includes(query));
+  $("#groupCards").innerHTML = groups.map((group) => `<article class="group-card"><div class="card-heading"><div><span class="eyebrow">${escapeHtml(group.typeSource)}</span><h2>${escapeHtml(group.displayName)}</h2><code>${escapeHtml(group.chatId)}</code> <span class="bot-chip">${escapeHtml(botLabel(recordBotId(group)))}</span></div>${badge(group.status, statusTone(group.status))}</div><div class="group-stats"><span><strong>${group.memberCount}</strong> thành viên</span><span><strong>${group.studentIds.length}</strong> MSSV</span><span><strong>${group.enabledSubscriptionCount}</strong> đang nhận lịch</span></div><div class="member-preview">${group.members.slice(0, 6).map((member) => `<div><strong>${escapeHtml(member.displayName)}</strong><small>${escapeHtml(member.studentIds.join(", ") || "Chưa có MSSV")}</small></div>`).join("") || `<span class="muted">Chưa có dữ liệu thành viên</span>`}</div><button class="secondary full" data-chat-detail="${escapeHtml(group.chatId)}" data-chat-bot="${escapeHtml(recordBotId(group))}">Xem toàn bộ nhóm</button></article>`).join("") || `<div class="empty-state panel">Không có nhóm phù hợp.</div>`;
+  $$('#groupCards [data-chat-detail]').forEach((button) => button.addEventListener("click", () => openChat(button.dataset.chatDetail, button.dataset.chatBot)));
 }
 
 function renderDirectory() {
   const query = $("#directorySearch").value.trim().toLowerCase();
   const type = $("#directoryType").value;
-  const chats = workspace.chats.filter((chat) => (type === "all" || chat.chatType === type) && JSON.stringify(chat).toLowerCase().includes(query));
-  $("#directoryRows").innerHTML = chats.map((chat) => `<tr><td><strong>${escapeHtml(chat.displayName)}</strong><code>${escapeHtml(chat.chatId)}</code></td><td>${badge(chat.chatType, chat.chatType === "group" ? "info" : chat.chatType === "unknown" ? "warning" : "neutral")}<small class="block">${escapeHtml(chat.typeSource)}</small></td><td><code>${escapeHtml(chat.userId || "-")}</code></td><td>${badge(chat.status, statusTone(chat.status))}</td><td>${escapeHtml(chat.memberCount)} thành viên<small class="block">${escapeHtml(chat.studentIds.join(", ") || "Chưa có MSSV")}</small></td><td><small>Tương tác: ${escapeHtml(formatDate(chat.lastInboundInteractionAt))}</small><small class="block">Gửi thành công: ${escapeHtml(formatDate(chat.lastSuccessfulDeliveryAt))}</small></td><td><button class="table-action" data-chat-detail="${escapeHtml(chat.chatId)}">Quản lý</button></td></tr>`).join("") || emptyRow(7, "Không có cuộc trò chuyện phù hợp.");
-  $$('#directoryRows [data-chat-detail]').forEach((button) => button.addEventListener("click", () => openChat(button.dataset.chatDetail)));
+  const chats = filterByBot(workspace.chats).filter((chat) => (type === "all" || chat.chatType === type) && JSON.stringify(chat).toLowerCase().includes(query));
+  $("#directoryRows").innerHTML = chats.map((chat) => `<tr><td><strong>${escapeHtml(chat.displayName)}</strong><code>${escapeHtml(chat.chatId)}</code></td>${botCell(chat)}<td>${badge(chat.chatType, chat.chatType === "group" ? "info" : chat.chatType === "unknown" ? "warning" : "neutral")}<small class="block">${escapeHtml(chat.typeSource)}</small></td><td><code>${escapeHtml(chat.userId || "-")}</code></td><td>${badge(chat.status, statusTone(chat.status))}</td><td>${escapeHtml(chat.memberCount)} thành viên<small class="block">${escapeHtml(chat.studentIds.join(", ") || "Chưa có MSSV")}</small></td><td><small>Tương tác: ${escapeHtml(formatDate(chat.lastInboundInteractionAt))}</small><small class="block">Gửi thành công: ${escapeHtml(formatDate(chat.lastSuccessfulDeliveryAt))}</small></td><td><button class="table-action" data-chat-detail="${escapeHtml(chat.chatId)}" data-chat-bot="${escapeHtml(recordBotId(chat))}">Quản lý</button></td></tr>`).join("") || emptyRow(8, "Không có cuộc trò chuyện phù hợp.");
+  $$('#directoryRows [data-chat-detail]').forEach((button) => button.addEventListener("click", () => openChat(button.dataset.chatDetail, button.dataset.chatBot)));
 }
 
 function renderNotifications() {
   const filter = $("#notificationFilter").value;
-  const list = workspace.subscriptions.filter((item) => filter === "all" || (filter === "enabled" && item.notificationsEnabled) || (filter === "disabled" && !item.notificationsEnabled) || (filter === "legacy" && item.schema === "legacy"));
-  $("#notificationRows").innerHTML = list.map((item) => `<tr><td><strong>${escapeHtml(item.userDisplayName || item.userId || "Bản ghi cũ")}</strong><code>${escapeHtml(item.userId || "-")}</code><div>${badge(item.studentId || "Chưa có MSSV", item.studentId ? "info" : "neutral")} ${escapeHtml(item.studentName)}</div></td><td><strong>${escapeHtml(item.chatName)}</strong><code>${escapeHtml(item.chatId)}</code></td><td>${badge(item.chatType, item.chatType === "group" ? "info" : "neutral")}</td><td>${timeChips(item.notificationTimes)}</td><td>${badge(item.schema, item.schema === "current" ? "success" : "warning")} ${badge(item.notificationsEnabled ? "Đang bật" : "Đang tắt", item.notificationsEnabled ? "success" : "neutral")}</td><td><button class="table-action" data-subscription="${escapeHtml(item.key)}">Quản lý</button></td></tr>`).join("") || emptyRow(6, "Không có đăng ký phù hợp.");
+  const list = filterByBot(workspace.subscriptions).filter((item) => filter === "all" || (filter === "enabled" && item.notificationsEnabled) || (filter === "disabled" && !item.notificationsEnabled) || (filter === "legacy" && item.schema === "legacy"));
+  $("#notificationRows").innerHTML = list.map((item) => `<tr><td><strong>${escapeHtml(item.userDisplayName || item.userId || "Bản ghi cũ")}</strong> ${botBadge(item)}<code>${escapeHtml(item.userId || "-")}</code><div>${badge(item.studentId || "Chưa có MSSV", item.studentId ? "info" : "neutral")} ${escapeHtml(item.studentName)}</div></td><td><strong>${escapeHtml(item.chatName)}</strong><code>${escapeHtml(item.chatId)}</code></td><td>${badge(item.chatType, item.chatType === "group" ? "info" : "neutral")}</td><td>${timeChips(item.notificationTimes)}</td><td>${badge(item.schema, item.schema === "current" ? "success" : "warning")} ${badge(item.notificationsEnabled ? "Đang bật" : "Đang tắt", item.notificationsEnabled ? "success" : "neutral")}</td><td><button class="table-action" data-subscription="${escapeHtml(item.key)}">Quản lý</button></td></tr>`).join("") || emptyRow(6, "Không có đăng ký phù hợp.");
   $$('[data-subscription]').forEach((button) => button.addEventListener("click", () => openSubscription(button.dataset.subscription)));
 }
 
 function renderHealth() {
   const status = $("#healthFilter").value; const type = $("#healthType").value;
-  const chats = workspace.chats.filter((chat) => (status === "all" || chat.status === status) && (type === "all" || chat.chatType === type));
-  $("#healthRows").innerHTML = chats.map((chat) => `<tr><td><strong>${escapeHtml(chat.displayName)}</strong><code>${escapeHtml(chat.chatId)}</code></td><td>${badge(chat.chatType, chat.chatType === "group" ? "info" : chat.chatType === "unknown" ? "warning" : "neutral")}<small class="block">${escapeHtml(chat.typeSource)}</small></td><td>${badge(chat.status, statusTone(chat.status))}</td><td>${chat.memberCount}</td><td>${escapeHtml(formatDate(chat.lastSuccessfulDeliveryAt))}</td><td class="error-cell">${escapeHtml(chat.lastError?.message || "-")}</td><td><button class="table-action" data-chat-detail="${escapeHtml(chat.chatId)}">Chi tiết</button></td></tr>`).join("") || emptyRow(7, "Không có chat phù hợp.");
-  $$('#healthRows [data-chat-detail]').forEach((button) => button.addEventListener("click", () => openChat(button.dataset.chatDetail)));
+  const chats = filterByBot(workspace.chats).filter((chat) => (status === "all" || chat.status === status) && (type === "all" || chat.chatType === type));
+  $("#healthRows").innerHTML = chats.map((chat) => `<tr><td><strong>${escapeHtml(chat.displayName)}</strong><code>${escapeHtml(chat.chatId)}</code></td>${botCell(chat)}<td>${badge(chat.chatType, chat.chatType === "group" ? "info" : chat.chatType === "unknown" ? "warning" : "neutral")}<small class="block">${escapeHtml(chat.typeSource)}</small></td><td>${badge(chat.status, statusTone(chat.status))}</td><td>${chat.memberCount}</td><td>${escapeHtml(formatDate(chat.lastSuccessfulDeliveryAt))}</td><td class="error-cell">${escapeHtml(chat.lastError?.message || "-")}</td><td><button class="table-action" data-chat-detail="${escapeHtml(chat.chatId)}" data-chat-bot="${escapeHtml(recordBotId(chat))}">Chi tiết</button></td></tr>`).join("") || emptyRow(8, "Không có chat phù hợp.");
+  $$('#healthRows [data-chat-detail]').forEach((button) => button.addEventListener("click", () => openChat(button.dataset.chatDetail, button.dataset.chatBot)));
 }
 
 function renderSettings() {
@@ -179,6 +276,9 @@ function normalizeTargetUser(raw) {
   if (!userId) return null;
   const displayName = String(raw?.displayName || "").trim();
   return {
+    // botId phải được giữ lại: thiếu nó thì mọi người nhận bị coi là của bot 1 và
+    // hai người cùng User ID ở hai bot bị gộp làm một.
+    botId: recordBotId(raw),
     userId,
     displayName: displayName || `User ${userId}`,
     status: ["active", "disabled", "removed"].includes(raw?.status) ? raw.status : "active",
@@ -191,14 +291,18 @@ function normalizeTargetUser(raw) {
 
 // Khử trùng theo User ID: giữ tên hiển thị thật nhất và nhiều ngữ cảnh chat nhất.
 function mergeTargetUsers(list) {
-  const byUserId = new Map();
+  // Khóa theo (bot, user): gộp theo userId trần sẽ trộn hai bot làm một, và
+  // Command console sẽ chọn nhầm người của bot khác.
+  const byKey = new Map();
+  const keyOf = (user) => `${recordBotId(user)}::${user.userId}`;
   for (const raw of list || []) {
     const user = normalizeTargetUser(raw);
     if (!user) continue;
-    const existing = byUserId.get(user.userId);
-    if (!existing) { byUserId.set(user.userId, user); continue; }
+    const key = keyOf(user);
+    const existing = byKey.get(key);
+    if (!existing) { byKey.set(key, user); continue; }
     const existingIsPlaceholder = existing.displayName === `User ${existing.userId}`;
-    byUserId.set(user.userId, {
+    byKey.set(key, {
       ...existing,
       displayName: existingIsPlaceholder ? user.displayName : existing.displayName,
       status: existing.status === "active" ? existing.status : user.status,
@@ -208,7 +312,7 @@ function mergeTargetUsers(list) {
       targetChatHint: existing.targetChatHint === "none" ? user.targetChatHint : existing.targetChatHint
     });
   }
-  return [...byUserId.values()].sort((a, b) => a.displayName.localeCompare(b.displayName, "vi") || a.userId.localeCompare(b.userId));
+  return [...byKey.values()].sort((a, b) => a.displayName.localeCompare(b.displayName, "vi") || a.userId.localeCompare(b.userId));
 }
 
 // Dự phòng khi endpoint target-users không khả dụng: suy ra từ workspace users.
@@ -219,6 +323,7 @@ function targetUsersFromWorkspace(workspace) {
     const reliable = contexts.length === 1 && privateContexts.length === 1;
     const hint = reliable ? "private" : (!contexts.length ? "none" : (contexts.length === 1 ? "unresolved" : "multiple"));
     return {
+      botId: recordBotId(user),
       userId: user.userId,
       displayName: user.displayName,
       status: user.status,
@@ -242,7 +347,7 @@ function targetDeliveryNote(target) {
 }
 
 function targetUserOptionHtml(user, index) {
-  const meta = [`ID ${user.userId}`];
+  const meta = [`ID ${user.userId}`, botLabel(recordBotId(user))];
   if (user.studentIds.length) meta.push(user.studentIds.join(", "));
   if (user.chatCount) meta.push(`${user.chatCount} chat`);
   const suffix = targetUserStatusSuffix(user.status);
@@ -419,7 +524,7 @@ function hideBatchConfirm() {
   if (block) { block.hidden = true; block.innerHTML = ""; }
 }
 
-function showBatchConfirm({ command, targets, targeting }) {
+function showBatchConfirm({ command, targets, targeting, botId }) {
   const block = $("#batchConfirm");
   if (!block) return;
   const isBroadcast = targeting?.mode === "broadcast";
@@ -432,18 +537,20 @@ function showBatchConfirm({ command, targets, targeting }) {
     <div class="panel-heading"><h2>Xác nhận trước khi chạy</h2></div>
     <div class="detail-grid">
       <div class="detail"><span>Lệnh</span><code>${escapeHtml(command)}</code></div>
-      <div class="detail"><span>Người nhận</span><strong>${isBroadcast ? "Mọi chat đang hoạt động" : `${targets.length} người (${new Set(targets.map((item) => item.userId)).size} User ID không trùng)`}</strong></div>
+      <div class="detail"><span>Bot gửi</span><strong>${escapeHtml(botLabel(botId))}</strong></div>
+      <div class="detail"><span>Người nhận</span><strong>${isBroadcast ? `Mọi chat đang hoạt động của ${escapeHtml(botLabel(botId))}` : `${targets.length} người (${new Set(targets.map((item) => item.userId)).size} User ID không trùng)`}</strong></div>
       <div class="detail"><span>Sẽ gửi tin nhắn</span><strong>${willSend ? "Có" : "Không"}</strong></div>
       <div class="detail"><span>Bỏ qua</span><strong>${isBroadcast ? 0 : skipped}</strong></div>
     </div>
-    ${isBroadcast ? `<p class="notice">${escapeHtml(targeting.broadcastScope || "")} Danh sách người nhận không làm thay đổi phạm vi gửi.</p>` : ""}
+    <p class="notice">Tin nhắn sẽ được gửi bằng <strong>${escapeHtml(botLabel(botId))}</strong>. Người nhận thuộc bot khác sẽ bị từ chối.</p>
+    ${isBroadcast ? `<p class="notice">${escapeHtml(targeting.broadcastScope || "")} Phạm vi là chat đang hoạt động của <strong>${escapeHtml(botLabel(botId))}</strong>, không phải của mọi bot.</p>` : ""}
     ${!isBroadcast && skipped > 0 ? `<p class="warning-box">${skipped} người chưa xác định được chat riêng tư đang hoạt động nên sẽ bị bỏ qua, không gửi tin.</p>` : ""}
     <div class="row-actions">
       <button type="button" class="primary" id="batchConfirmRun">Chạy lệnh</button>
       <button type="button" class="secondary" id="batchConfirmCancel">Hủy</button>
     </div>`;
 
-  $("#batchConfirmRun").addEventListener("click", () => startBatchRun({ command, targets, targeting }));
+  $("#batchConfirmRun").addEventListener("click", () => startBatchRun({ command, targets, targeting, botId }));
   $("#batchConfirmCancel").addEventListener("click", () => {
     hideBatchConfirm();
     $("#commandResult").textContent = "Đã hủy. Không có lệnh nào được chạy.";
@@ -482,13 +589,14 @@ function renderBatchProgress(state) {
     ${rows ? `<div class="table-wrap"><table><thead><tr><th>Người nhận</th><th>Chat</th><th>Trạng thái</th><th>Ghi chú</th></tr></thead><tbody>${rows}</tbody></table></div>` : ""}`;
 }
 
-async function startBatchRun({ command, targets, targeting }) {
+async function startBatchRun({ command, targets, targeting, botId }) {
   const runButton = $("#batchConfirmRun");
   if (runButton) runButton.disabled = true;
   hideBatchConfirm();
 
   const isBroadcast = targeting?.mode === "broadcast";
-  const payload = { command, targetUserIds: targets.map((item) => item.userId) };
+  // botId bắt buộc: người nhận chỉ có nghĩa trong phạm vi một bot.
+  const payload = { command, botId, targetUserIds: targets.map((item) => item.userId) };
   renderBatchProgress({
     phase: "running",
     progress: { completed: 0, total: isBroadcast ? 1 : targets.length },
@@ -555,6 +663,11 @@ function setupCommandConsole() {
       </div>
       <div id="targetChips" class="chip-list" aria-live="polite"></div>
       <p class="field-hint" id="targetUserHint">Chưa tải danh sách user.</p>
+    </div>
+    <div class="field">
+      <label for="commandBot">Bot gửi</label>
+      <select name="botId" id="commandBot" aria-describedby="commandBotHint"><option value="">-- Chọn bot --</option></select>
+      <p class="field-hint" id="commandBotHint">Bắt buộc chọn bot. Chat ID và User ID chỉ có nghĩa trong phạm vi một bot, nên người nhận của bot 1 không thể nhận tin từ bot 2.</p>
     </div>
     <button class="primary" type="submit" id="commandSubmit">Execute command</button>
     <div id="batchConfirm" class="panel confirm-panel" hidden></div>
@@ -642,13 +755,29 @@ function setupCommandConsole() {
       return;
     }
 
-    showBatchConfirm({ command, targets: selectedTargets, targeting });
+    // Lệnh có gửi tin BẮT BUỘC phải chọn bot: người nhận thuộc về một bot cụ thể.
+    const botId = $("#commandBot")?.value || "";
+    if (!botId) {
+      $("#commandResult").textContent = "Chọn bot gửi trước khi chạy. Người nhận chỉ tồn tại trong phạm vi một bot.";
+      $("#commandBot")?.focus();
+      return;
+    }
+
+    // Người nhận phải thuộc đúng bot đã chọn — không gửi cho người của bot khác
+    // chỉ vì User ID trông giống nhau.
+    const foreign = selectedTargets.filter((item) => item.botId && item.botId !== botId);
+    if (foreign.length) {
+      $("#commandResult").textContent = `${foreign.length} người nhận thuộc bot khác (${foreign[0].botId}). Bỏ chọn họ hoặc đổi bot gửi.`;
+      return;
+    }
+
+    showBatchConfirm({ command, targets: selectedTargets, targeting, botId });
   });
 }
 
 function renderLogs() {
   $("#systemLogList").innerHTML = (logs.system || []).map((item) => `<article class="stack-item"><strong>${escapeHtml(item.level)}</strong><p>${escapeHtml(item.message)}</p><small>${escapeHtml(formatDate(item.at))}</small></article>`).join("") || `<div class="empty-state">Không có log hệ thống.</div>`;
-  $("#deliveryLogList").innerHTML = (logs.deliveryErrors || []).map((item) => `<article class="stack-item"><strong>${escapeHtml(item.displayName || item.chatId)}</strong><p>${escapeHtml(item.lastError?.message || "-")}</p><small>${escapeHtml(formatDate(item.lastError?.at))}</small></article>`).join("") || `<div class="empty-state">Không có lỗi gửi gần đây.</div>`;
+  $("#deliveryLogList").innerHTML = filterByBot(logs.deliveryErrors || []).map((item) => `<article class="stack-item"><strong>${escapeHtml(item.displayName || item.chatId)}</strong><p>${escapeHtml(item.lastError?.message || "-")}</p><small>${escapeHtml(formatDate(item.lastError?.at))}</small></article>`).join("") || `<div class="empty-state">Không có lỗi gửi gần đây.</div>`;
 }
 
 function ensurePaginationViews() {
@@ -664,7 +793,7 @@ function paginateRendered(selector, key) {
   pager(`#${key}Pagination`, key, { page, size, totalPages, total: items.length }, applyPaginationViews);
 }
 function applyPaginationViews() { ensurePaginationViews(); paginateRendered("#directoryRows", "directory"); paginateRendered("#userRows", "users"); paginateRendered("#groupCards", "groups"); paginateRendered("#notificationRows", "notifications"); paginateRendered("#healthRows", "health"); paginateRendered("#systemLogList", "systemLogs"); paginateRendered("#deliveryLogList", "deliveryLogs"); }
-function renderAll() { renderOverview(); renderDirectory(); renderUsers(); renderGroups(); renderNotifications(); renderHealth(); renderSettings(); renderLogs(); setupCommandConsole(); renderCommands(); ensurePaginationViews(); applyPaginationViews(); $("#healthPill").textContent = `${dashboard.bot.status} · ${dashboard.bot.health}`; $("#generatedAt").textContent = formatDate(workspace.generatedAt); }
+function renderAll() { populateBotControls(); renderBotGrid(); renderOverview(); renderDirectory(); renderUsers(); renderGroups(); renderNotifications(); renderHealth(); renderSettings(); renderLogs(); setupCommandConsole(); renderCommands(); ensurePaginationViews(); applyPaginationViews(); $("#healthPill").textContent = `${dashboard.bot.status} · ${dashboard.bot.health}`; $("#generatedAt").textContent = formatDate(workspace.generatedAt); }
 
 async function loadData() {
   setDataState("loading", "Loading admin data...");
@@ -672,7 +801,9 @@ async function loadData() {
     // Danh sách user cho Command console: ưu tiên endpoint đã khử trùng,
     // dự phòng bằng dữ liệu workspace đã tải.
     const targetUserRequest = api("/api/admin/target-users").then((data) => (Array.isArray(data.users) ? data.users : null)).catch(() => null);
+    const botRequest = api("/api/admin/bots").then((data) => (Array.isArray(data.bots) ? data.bots : [])).catch(() => []);
     [workspace, dashboard, logs, settings, commandRegistry] = await Promise.all([api("/api/admin/workspace"), api("/api/admin/dashboard"), api("/api/admin/logs"), api("/api/admin/settings"), api("/api/admin/commands").then((data) => data.commands || [])]);
+    bots = await botRequest;
     const remoteTargetUsers = await targetUserRequest;
     targetUsers = mergeTargetUsers(remoteTargetUsers === null ? targetUsersFromWorkspace(workspace) : remoteTargetUsers);
     renderAll();
@@ -697,24 +828,48 @@ function openCreateUser() {
   $("#createUserForm").addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); await api("/api/admin/users", { method: "POST", body: JSON.stringify(Object.fromEntries(form.entries())) }); $("#detailDialog").close(); await loadData(); });
 }
 
-function openUser(userId) {
-  const user = workspace.users.find((item) => item.userId === userId); if (!user) return;
-  showDialog(user.displayName, `<div class="detail-grid"><div class="detail"><span>User ID</span><code>${escapeHtml(user.userId)}</code></div><div class="detail"><span>MSSV</span><strong>${escapeHtml(user.studentIds.join(", ") || "Chưa có MSSV")}</strong></div><div class="detail"><span>Tương tác đầu tiên</span><strong>${escapeHtml(formatDate(user.firstInteractionAt))}</strong></div><div class="detail"><span>Hoạt động gần nhất</span><strong>${escapeHtml(formatDate(user.lastInteractionAt))}</strong></div></div><h3>Ngữ cảnh chat</h3><div class="stack">${user.chats.map((chat) => `<article class="stack-item"><form class="userContextForm" data-user-chat="${escapeHtml(chat.chatId)}"><div class="form-grid"><label>Tên hiển thị<input name="displayName" value="${escapeHtml(user.displayName)}" /></label><label>Trạng thái thành viên<select name="status"><option value="active" ${chat.memberStatus === "active" ? "selected" : ""}>Đang hoạt động</option><option value="disabled" ${chat.memberStatus === "disabled" ? "selected" : ""}>Đã tắt</option><option value="removed" ${chat.memberStatus === "removed" ? "selected" : ""}>Đã xóa</option></select></label></div><p>${escapeHtml(chat.chatType)} · chat ${escapeHtml(chat.status)} · <code>${escapeHtml(chat.chatId)}</code></p><div class="row-actions"><button type="submit">Lưu người dùng</button><button type="button" data-open-chat="${escapeHtml(chat.chatId)}">Mở chat</button><button type="button" data-user-admin="${escapeHtml(chat.chatId)}">Cấp quyền admin</button><button type="button" class="danger-text" data-user-remove="${escapeHtml(chat.chatId)}">Xóa khỏi chat</button></div></form></article>`).join("")}</div><h3>Đăng ký nhận lịch</h3><div class="stack">${user.subscriptions.map((item) => `<article class="stack-item horizontal"><div><strong>${escapeHtml(item.studentId || "Chưa có MSSV")} · ${escapeHtml(item.chatName)}</strong><p>${escapeHtml(item.notificationsEnabled ? "Đang bật" : "Đang tắt")} · ${escapeHtml(item.notificationTimes.map((time) => `${time.time} ${targetDayLabel(time.targetDayOffset)}`).join(", ") || "Chưa có giờ nhận lịch")}</p></div><button data-open-sub="${escapeHtml(item.key)}">Quản lý</button></article>`).join("") || `<div class="empty-state">Không có đăng ký nhận lịch.</div>`}</div>`);
-  $$('.userContextForm').forEach((form) => form.addEventListener("submit", async (event) => { event.preventDefault(); const values = new FormData(event.currentTarget); await api(`/api/admin/users/${encodeURIComponent(userId)}`, { method: "PATCH", body: JSON.stringify({ chatId: event.currentTarget.dataset.userChat, displayName: values.get("displayName"), status: values.get("status") }) }); $("#detailDialog").close(); await loadData(); }));
-  $$('[data-user-admin]').forEach((button) => button.addEventListener("click", async () => { await api("/api/admin/settings/admins", { method: "POST", body: JSON.stringify({ userId, chatId: button.dataset.userAdmin, displayName: user.displayName }) }); await loadData(); }));
-  $$('[data-user-remove]').forEach((button) => button.addEventListener("click", async () => { if (!confirm(`Xóa user ${userId} khỏi chat ${button.dataset.userRemove}? Subscription của user trong chat cũng sẽ bị xóa.`)) return; await api(`/api/admin/users/${encodeURIComponent(userId)}?hard=1&chatId=${encodeURIComponent(button.dataset.userRemove)}`, { method: "DELETE" }); $("#detailDialog").close(); await loadData(); }));
-  $$('[data-open-chat]').forEach((button) => button.addEventListener("click", () => openChat(button.dataset.openChat)));
+function openUser(userId, botId) {
+  // Cùng một User ID ở hai bot là hai danh tính khác nhau, nên phải khớp cả bot.
+  const wantedBot = recordBotId({ botId });
+  const user = workspace.users.find((item) => item.userId === userId && recordBotId(item) === wantedBot);
+  if (!user) return;
+  showDialog(user.displayName, `<div class="detail-grid"><div class="detail"><span>Bot</span><strong>${escapeHtml(botLabel(wantedBot))}</strong></div><div class="detail"><span>User ID</span><code>${escapeHtml(user.userId)}</code></div><div class="detail"><span>MSSV</span><strong>${escapeHtml(user.studentIds.join(", ") || "Chưa có MSSV")}</strong></div><div class="detail"><span>Tương tác đầu tiên</span><strong>${escapeHtml(formatDate(user.firstInteractionAt))}</strong></div><div class="detail"><span>Hoạt động gần nhất</span><strong>${escapeHtml(formatDate(user.lastInteractionAt))}</strong></div></div><h3>Ngữ cảnh chat</h3><div class="stack">${user.chats.map((chat) => `<article class="stack-item"><form class="userContextForm" data-user-chat="${escapeHtml(chat.chatId)}"><div class="form-grid"><label>Tên hiển thị<input name="displayName" value="${escapeHtml(user.displayName)}" /></label><label>Trạng thái thành viên<select name="status"><option value="active" ${chat.memberStatus === "active" ? "selected" : ""}>Đang hoạt động</option><option value="disabled" ${chat.memberStatus === "disabled" ? "selected" : ""}>Đã tắt</option><option value="removed" ${chat.memberStatus === "removed" ? "selected" : ""}>Đã xóa</option></select></label></div><p>${escapeHtml(chat.chatType)} · chat ${escapeHtml(chat.status)} · <code>${escapeHtml(chat.chatId)}</code></p><div class="row-actions"><button type="submit">Lưu người dùng</button><button type="button" data-open-chat="${escapeHtml(chat.chatId)}">Mở chat</button><button type="button" data-user-admin="${escapeHtml(chat.chatId)}">Cấp quyền admin</button><button type="button" class="danger-text" data-user-remove="${escapeHtml(chat.chatId)}">Xóa khỏi chat</button></div></form></article>`).join("")}</div><h3>Đăng ký nhận lịch</h3><div class="stack">${user.subscriptions.map((item) => `<article class="stack-item horizontal"><div><strong>${escapeHtml(item.studentId || "Chưa có MSSV")} · ${escapeHtml(item.chatName)}</strong><p>${escapeHtml(item.notificationsEnabled ? "Đang bật" : "Đang tắt")} · ${escapeHtml(item.notificationTimes.map((time) => `${time.time} ${targetDayLabel(time.targetDayOffset)}`).join(", ") || "Chưa có giờ nhận lịch")}</p></div><button data-open-sub="${escapeHtml(item.key)}">Quản lý</button></article>`).join("") || `<div class="empty-state">Không có đăng ký nhận lịch.</div>`}</div>`);
+  $$('.userContextForm').forEach((form) => form.addEventListener("submit", async (event) => { event.preventDefault(); const values = new FormData(event.currentTarget); await runAction(async () => { await api(`/api/admin/users/${encodeURIComponent(userId)}`, { method: "PATCH", body: JSON.stringify({ botId: wantedBot, chatId: event.currentTarget.dataset.userChat, displayName: values.get("displayName"), status: values.get("status") }) }); $("#detailDialog").close(); await loadData(); }, "Không lưu được thông tin người dùng"); }));
+  $$('[data-user-admin]').forEach((button) => button.addEventListener("click", async () => { await runAction(async () => { await api("/api/admin/settings/admins", { method: "POST", body: JSON.stringify({ userId, chatId: button.dataset.userAdmin, displayName: user.displayName }) }); await loadData(); }, "Không cấp được quyền admin"); }));
+  $$('[data-user-remove]').forEach((button) => button.addEventListener("click", async () => { if (!confirm(`Xóa user ${userId} khỏi chat ${button.dataset.userRemove}? Subscription của user trong chat cũng sẽ bị xóa.`)) return; await runAction(async () => { await api(`/api/admin/users/${encodeURIComponent(userId)}?hard=1&chatId=${encodeURIComponent(button.dataset.userRemove)}&botId=${encodeURIComponent(wantedBot)}`, { method: "DELETE" }); $("#detailDialog").close(); await loadData(); }, "Không xóa được người dùng khỏi chat"); }));
+  $$('[data-open-chat]').forEach((button) => button.addEventListener("click", () => openChat(button.dataset.openChat, wantedBot)));
   $$('[data-open-sub]').forEach((button) => button.addEventListener("click", () => openSubscription(button.dataset.openSub)));
 }
 
-async function openChat(chatId) {
-  const data = await api(`/api/admin/chats/${encodeURIComponent(chatId)}`); const chat = data.chat;
-  showDialog(chat.displayName || chat.chatId, `<form id="chatMetadataForm"><div class="form-grid"><label>Chat ID<input value="${escapeHtml(chat.chatId)}" disabled /></label><label>User ID<input name="userId" value="${escapeHtml(chat.userId || "")}" /></label><label>Display name<input name="displayName" value="${escapeHtml(chat.displayName || "")}" /></label><label>Type<select name="chatType"><option value="private" ${chat.chatType === "private" ? "selected" : ""}>Private</option><option value="group" ${chat.chatType === "group" ? "selected" : ""}>Group</option><option value="unknown" ${chat.chatType === "unknown" ? "selected" : ""}>Unknown</option></select></label></div><button class="primary" type="submit">Lưu metadata</button></form><div class="action-bar"><button data-chat-status="active">Reactivate</button><button data-chat-status="disabled">Disable</button><button data-chat-status="removed">Soft remove</button><button data-chat-retry="1">Retry</button><button data-make-admin="1">Make admin</button><button class="danger-text" data-chat-hard-delete="1">Xóa vĩnh viễn</button></div><div class="detail-grid"><div class="detail"><span>Last inbound</span><strong>${escapeHtml(formatDate(chat.lastInboundInteractionAt))}</strong></div><div class="detail"><span>Last success</span><strong>${escapeHtml(formatDate(chat.lastSuccessfulDeliveryAt))}</strong></div><div class="detail"><span>Last error</span><strong>${escapeHtml(chat.lastError?.message || "-")}</strong></div><div class="detail"><span>Error time</span><strong>${escapeHtml(formatDate(chat.lastError?.at))}</strong></div></div><h3>Members & MSSV</h3><div class="stack">${(data.members || []).map((user) => `<article class="stack-item"><strong>${escapeHtml(user.displayName)}</strong><p><code>${escapeHtml(user.userId)}</code> · ${escapeHtml(user.studentIds.join(", ") || "No MSSV")}</p></article>`).join("") || `<div class="empty-state">Không có member record.</div>`}</div><h3>Subscriptions</h3><div class="stack">${(data.subscriptions || []).map((item) => `<article class="stack-item horizontal"><div><strong>${escapeHtml(item.userDisplayName || item.userId || "Legacy")}</strong><p>${escapeHtml(item.studentId || "No MSSV")} · ${escapeHtml(item.notificationTimes.map((time) => `${time.time} ${targetDayLabel(time.targetDayOffset)}`).join(", ") || "No times")}</p></div><button data-open-sub="${escapeHtml(item.key)}">Quản lý</button></article>`).join("") || `<div class="empty-state">Không có subscription.</div>`}</div>`);
-  $("#chatMetadataForm").addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); await api(`/api/admin/chats/${encodeURIComponent(chatId)}`, { method: "PATCH", body: JSON.stringify({ action: "metadata", userId: form.get("userId"), displayName: form.get("displayName"), chatType: form.get("chatType") }) }); $("#detailDialog").close(); await loadData(); });
-  $$('[data-chat-status]').forEach((button) => button.addEventListener("click", async () => { await api(`/api/admin/chats/${encodeURIComponent(chatId)}`, { method: "PATCH", body: JSON.stringify({ action: "status", status: button.dataset.chatStatus }) }); $("#detailDialog").close(); await loadData(); }));
-  $('[data-chat-retry]').addEventListener("click", async () => { await api(`/api/admin/chats/${encodeURIComponent(chatId)}/retry`, { method: "POST" }); $("#detailDialog").close(); await loadData(); });
-  $('[data-make-admin]').addEventListener("click", async () => { await api("/api/admin/settings/admins", { method: "POST", body: JSON.stringify({ userId: chat.userId || "", chatId: chat.chatId, displayName: chat.displayName }) }); await loadData(); });
-  $('[data-chat-hard-delete]').addEventListener("click", async () => { if (!confirm(`Xóa vĩnh viễn ${chat.chatId}? Bản ghi sẽ không còn trong directory.`)) return; await api(`/api/admin/chats/${encodeURIComponent(chatId)}?hard=1`, { method: "DELETE" }); $("#detailDialog").close(); await loadData(); });
+async function openChat(chatId, botId) {
+  const scoped = `botId=${encodeURIComponent(recordBotId({ botId }))}`;
+  const data = await api(`/api/admin/chats/${encodeURIComponent(chatId)}?${scoped}`); const chat = data.chat;
+  showDialog(chat.displayName || chat.chatId, `<form id="chatMetadataForm"><div class="form-grid"><label>Chat ID<input value="${escapeHtml(chat.chatId)}" disabled /></label><label>User ID<input name="userId" value="${escapeHtml(chat.userId || "")}" /></label><label>Display name<input name="displayName" value="${escapeHtml(chat.displayName || "")}" /></label><label>Type<select name="chatType"><option value="private" ${chat.chatType === "private" ? "selected" : ""}>Private</option><option value="group" ${chat.chatType === "group" ? "selected" : ""}>Group</option><option value="unknown" ${chat.chatType === "unknown" ? "selected" : ""}>Unknown</option></select></label></div><button class="primary" type="submit">Lưu metadata</button></form><div class="action-bar"><button data-chat-status="active">Reactivate</button><button data-chat-status="disabled">Disable</button><button data-chat-status="removed">Soft remove</button><button data-chat-retry="1">Retry</button><button data-make-admin="1">Make admin</button><button class="danger-text" data-chat-hard-delete="1">Xóa vĩnh viễn</button></div><div class="detail-grid"><div class="detail"><span>Bot</span><strong>${escapeHtml(botLabel(recordBotId({ botId })))}</strong></div><div class="detail"><span>Last inbound</span><strong>${escapeHtml(formatDate(chat.lastInboundInteractionAt))}</strong></div><div class="detail"><span>Last success</span><strong>${escapeHtml(formatDate(chat.lastSuccessfulDeliveryAt))}</strong></div><div class="detail"><span>Last error</span><strong>${escapeHtml(chat.lastError?.message || "-")}</strong></div><div class="detail"><span>Error time</span><strong>${escapeHtml(formatDate(chat.lastError?.at))}</strong></div></div><h3>Members & MSSV</h3><div class="stack">${(data.members || []).map((user) => `<article class="stack-item"><strong>${escapeHtml(user.displayName)}</strong><p><code>${escapeHtml(user.userId)}</code> · ${escapeHtml(user.studentIds.join(", ") || "No MSSV")}</p></article>`).join("") || `<div class="empty-state">Không có member record.</div>`}</div><h3>Subscriptions</h3><div class="stack">${(data.subscriptions || []).map((item) => `<article class="stack-item horizontal"><div><strong>${escapeHtml(item.userDisplayName || item.userId || "Legacy")}</strong><p>${escapeHtml(item.studentId || "No MSSV")} · ${escapeHtml(item.notificationTimes.map((time) => `${time.time} ${targetDayLabel(time.targetDayOffset)}`).join(", ") || "No times")}</p></div><button data-open-sub="${escapeHtml(item.key)}">Quản lý</button></article>`).join("") || `<div class="empty-state">Không có subscription.</div>`}</div>`);
+  $("#chatMetadataForm").addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); await runAction(async () => { await api(`/api/admin/chats/${encodeURIComponent(chatId)}`, { method: "PATCH", body: JSON.stringify({ botId: recordBotId({ botId }), action: "metadata", userId: form.get("userId"), displayName: form.get("displayName"), chatType: form.get("chatType") }) }); $("#detailDialog").close(); await loadData(); }, "Không lưu được metadata chat"); });
+  $$('[data-chat-status]').forEach((button) => button.addEventListener("click", async () => { await runAction(async () => { await api(`/api/admin/chats/${encodeURIComponent(chatId)}`, { method: "PATCH", body: JSON.stringify({ botId: recordBotId({ botId }), action: "status", status: button.dataset.chatStatus }) }); $("#detailDialog").close(); await loadData(); }, "Không đổi được trạng thái chat"); }));
+  $('[data-chat-retry]').addEventListener("click", async () => { await runAction(async () => { await api(`/api/admin/chats/${encodeURIComponent(chatId)}/retry?botId=${encodeURIComponent(recordBotId({ botId }))}`, { method: "POST" }); $("#detailDialog").close(); await loadData(); }, "Không gửi lại được tin thử"); });
+  $('[data-make-admin]').addEventListener("click", async () => { await runAction(async () => { await api("/api/admin/settings/admins", { method: "POST", body: JSON.stringify({ userId: chat.userId || "", chatId: chat.chatId, displayName: chat.displayName }) }); await loadData(); }, "Không cấp được quyền admin"); });
+  $('[data-chat-hard-delete]').addEventListener("click", async () => {
+    // Nói rõ khác biệt trước khi xoá: "Soft remove" chỉ đổi trạng thái, còn thao
+    // tác này xoá bản ghi trong sổ chat. Cả hai đều KHÔNG xoá đăng ký nhận lịch
+    // hay lịch sử tương tác.
+    if (!confirm(
+      `Xoá vĩnh viễn ${chatId} khỏi sổ chat của ${botLabel(recordBotId({ botId }))}?\n\n` +
+      "• Bản ghi trong sổ chat sẽ bị xoá và chat không hiện lại trên dashboard.\n" +
+      "• Đăng ký nhận lịch và lịch sử tương tác VẪN ĐƯỢC GIỮ.\n" +
+      "• Không ảnh hưởng tới bot khác.\n\n" +
+      "Nếu chỉ muốn ngừng gửi tin, hãy dùng \"Soft remove\"."
+    )) return;
+
+    const outcome = await runAction(async () => {
+      const result = await api(`/api/admin/chats/${encodeURIComponent(chatId)}?hard=1&botId=${encodeURIComponent(recordBotId({ botId }))}`, { method: "DELETE" });
+      $("#detailDialog").close();
+      await loadData();
+      return result;
+    }, "Không xoá được chat");
+
+    if (outcome.ok) setDataState("success", outcome.result?.message || "Đã xoá chat.");
+  });
   $$('[data-open-sub]').forEach((button) => button.addEventListener("click", () => openSubscription(button.dataset.openSub)));
 }
 
@@ -763,11 +918,13 @@ function openTimeDialog({ item, time }) {
   });
 }
 
-async function updateSubscription(item, changes) { await api("/api/admin/subscriptions", { method: "PATCH", body: JSON.stringify({ chatId: item.chatId, userId: item.userId, userDisplayName: item.userDisplayName, ...changes }) }); $("#detailDialog").close(); await loadData(); }
+async function updateSubscription(item, changes) { await api("/api/admin/subscriptions", { method: "PATCH", body: JSON.stringify({ botId: recordBotId(item), chatId: item.chatId, userId: item.userId, userDisplayName: item.userDisplayName, ...changes }) }); $("#detailDialog").close(); await loadData(); }
 
 $("#loginForm").addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); try { await api("/api/admin/auth/login", { method: "POST", body: JSON.stringify(Object.fromEntries(form.entries())) }); showAuthenticated(true); await loadData(); } catch (error) { $("#loginError").textContent = error.message; } });
 $("#logoutButton").addEventListener("click", async () => { await api("/api/admin/auth/logout", { method: "POST" }); showAuthenticated(false); });
-$("#refreshButton").addEventListener("click", loadData); $("#themeToggle").addEventListener("click", () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
+$("#refreshButton").addEventListener("click", loadData);
+// Đổi bộ lọc bot: vẽ lại danh sách theo bot đã chọn.
+$("#botFilter").addEventListener("change", () => { if (workspace) renderAll(); }); $("#themeToggle").addEventListener("click", () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
 $("#closeDialog").addEventListener("click", () => $("#detailDialog").close());
 const rerender = (fn, key) => { pageState[key] = { ...(pageState[key] || {}), page: 1 }; fn(); applyPaginationViews(); };
 $("#userSearch").addEventListener("input", () => rerender(renderUsers, "users")); $("#groupSearch").addEventListener("input", () => rerender(renderGroups, "groups")); $("#notificationFilter").addEventListener("change", () => rerender(renderNotifications, "notifications")); $("#healthFilter").addEventListener("change", () => rerender(renderHealth, "health")); $("#healthType").addEventListener("change", () => rerender(renderHealth, "health"));

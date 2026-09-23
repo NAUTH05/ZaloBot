@@ -130,18 +130,49 @@ function updateChat(chatId, changes = {}, filePath = FILE_PATH) {
     return record;
 }
 
+// Xoá một chat khỏi sổ của bot hiện tại.
+//
+//   hard = false  → chỉ ĐỔI TRẠNG THÁI sang "removed". Bản ghi vẫn còn, đăng ký
+//                   vẫn còn, chỉ ngừng gửi tin. Có thể bật lại.
+//   hard = true   → XOÁ VĨNH VIỄN bản ghi trong sổ chat và ghi nhớ vào
+//                   deletedChatIds để chat không hiện lại trên dashboard.
+//
+// Cả hai chế độ KHÔNG xoá đăng ký (subscriptions) và KHÔNG xoá lịch sử tương tác
+// (interactions) — dữ liệu đó thuộc về người dùng, không phải của sổ chat. Chúng
+// cũng chỉ đụng tới bot hiện tại, không bao giờ sang bot khác.
+//
+// Trả về { record, hadDirectoryRecord, hard } hoặc null nếu chatId không hợp lệ.
 function removeChat(chatId, hard = false, filePath = FILE_PATH) {
     const id = normalizeChatId(chatId);
     if (!id) return null;
-    if (!hard) return setChatStatus(id, "removed", "admin", "admin_removed", filePath);
+
+    if (!hard) {
+        const record = setChatStatus(id, "removed", "admin", "admin_removed", filePath);
+        return record ? { record, hadDirectoryRecord: true, hard: false } : null;
+    }
+
     const data = readDirectory(filePath);
     const key = scopedChatKey(id);
     const existing = data.chats[key] || null;
-    if (!existing) return null;
+    // Ghi nhớ việc xoá kể cả khi KHÔNG có bản ghi trong sổ chat. Một chat có thể
+    // xuất hiện trên dashboard chỉ nhờ dữ liệu tương tác/đăng ký; trước đây
+    // trường hợp đó trả null nên API thành 404 dù chat đang hiện trên màn hình.
     delete data.chats[key];
     data.deletedChatIds[key] = { deletedAt: nowIso(), deletedBy: "admin" };
     writeDirectory(data, filePath);
-    return existing;
+    return { record: existing, hadDirectoryRecord: Boolean(existing), hard: true };
+}
+
+// Khóa (đã có phạm vi bot) của những chat đã bị xoá vĩnh viễn. Dùng để dashboard
+// không hiển thị lại chat vừa xoá qua dữ liệu tương tác/đăng ký.
+function getDeletedChatIds(filePath = FILE_PATH) {
+    return Object.keys(readDirectory(filePath).deletedChatIds || {});
+}
+
+function isChatDeleted(chatId, filePath = FILE_PATH) {
+    const id = normalizeChatId(chatId);
+    if (!id) return false;
+    return Boolean(readDirectory(filePath).deletedChatIds[scopedChatKey(id)]);
 }
 
 function classifyChatError(error) {
@@ -224,6 +255,8 @@ module.exports = {
     classifyChatError,
     getAllChats,
     getChat,
+    getDeletedChatIds,
+    isChatDeleted,
     normalizeChatType,
     removeChat,
     isChatEligible,

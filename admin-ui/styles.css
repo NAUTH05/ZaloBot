@@ -902,3 +902,74 @@ dialog h3:first-of-type { margin-top: var(--s-4); }
         scroll-behavior: auto !important;
     }
 }
+
+/* ---------------------------------------------------------------------------
+   Nhiều bot: bộ lọc dùng chung, thẻ trạng thái từng bot và bộ chọn bot.
+   Mỗi bot là một danh tính riêng nên trạng thái và số liệu được tách bạch.
+   --------------------------------------------------------------------------- */
+
+.bot-filter {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s-2);
+    font-size: var(--fs-sm);
+    color: var(--muted);
+}
+
+.bot-filter select {
+    min-width: 9rem;
+}
+
+.bot-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+    gap: var(--s-3);
+    margin-bottom: var(--s-4);
+}
+
+.bot-card {
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    padding: var(--s-3);
+    background: var(--surface);
+}
+
+.bot-card header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--s-2);
+    margin-bottom: var(--s-2);
+}
+
+.bot-card dl {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(4.5rem, 1fr));
+    gap: var(--s-2);
+    margin: var(--s-2) 0 0;
+}
+
+.bot-card dt {
+    font-size: var(--fs-xs);
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+}
+
+.bot-card dd {
+    margin: 0;
+    font-weight: 700;
+}
+
+/* Cột Bot trong bảng Users / Chat directory và thẻ nhóm. */
+.bot-chip {
+    display: inline-block;
+    padding: 2px var(--s-2);
+    border-radius: var(--r-full);
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--muted);
+    font-size: var(--fs-xs);
+    font-weight: 700;
+    white-space: nowrap;
+}

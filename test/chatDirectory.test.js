@@ -68,7 +68,10 @@ test("normalizes chat type and keeps hard-delete tombstones until explicit resto
     assert.equal(normalizeChatType("user"), "private");
     upsertChat({ chatId: "tombstone", chatType: "group" }, filePath);
     const removed = removeChat("tombstone", true, filePath);
-    assert.equal(removed.chatType, "group");
+    // Xoá cứng trả về bản ghi cũ kèm cờ cho biết nó có trong sổ chat hay không.
+    assert.equal(removed.hadDirectoryRecord, true);
+    assert.equal(removed.hard, true);
+    assert.equal(removed.record.chatType, "group");
     assert.equal(upsertChat({ chatId: "tombstone", chatType: "private" }, filePath), null);
     const restored = upsertChat({ chatId: "tombstone", chatType: "private", restoreDeleted: true }, filePath);
     assert.equal(restored.chatType, "private");

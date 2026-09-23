@@ -5,7 +5,10 @@ const path = require("node:path");
 
 const ROOT = path.join(__dirname, "..");
 const INCLUDED_EXTENSIONS = new Set([".js", ".html", ".md"]);
-const EXCLUDED_DIRECTORIES = new Set([".git", "node_modules", "test"]);
+// Chỉ quét COPY SẢN PHẨM. `.workbuddy-ai` là trạng thái làm việc của trợ lý (ghi
+// chú, log công việc) chứ không phải nội dung hiển thị cho người dùng, nên không
+// thuộc phạm vi bài kiểm tra này. `migration-backups` là bản sao dữ liệu.
+const EXCLUDED_DIRECTORIES = new Set([".git", "node_modules", "test", ".workbuddy-ai", "migration-backups"]);
 
 function productionTextFiles(directory = ROOT) {
     const files = [];

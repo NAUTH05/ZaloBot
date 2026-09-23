@@ -47,7 +47,7 @@ const undefinedTokens = [...used].filter((token) => !defined.has(token));
 if (undefinedTokens.length) fail(`undefined CSS variables: ${undefinedTokens.join(", ")}`);
 
 // Cấu trúc dashboard mà app.js thao tác trực tiếp vẫn phải tồn tại.
-const requiredIds = ["loginView", "dashboardView", "loginForm", "loginError", "tabNav", "commandForm", "detailDialog", "appStatus", "metricGrid", "refreshButton", "logoutButton"];
+const requiredIds = ["loginView", "dashboardView", "loginForm", "loginError", "tabNav", "commandForm", "detailDialog", "appStatus", "metricGrid", "refreshButton", "logoutButton", "botFilter", "botGrid", "commandBot"];
 for (const id of requiredIds) {
     if (!html.includes(`id="${id}"`)) fail(`index.html is missing #${id}`);
 }
@@ -70,6 +70,28 @@ if (!app.includes("progress-track")) fail("Command console must show batch progr
 // giữ bản sao danh sách lệnh trong giao diện — bản sao sẽ lệch khi lệnh đổi tên.
 if (!app.includes("entry.targeting")) fail("Command console must read targeting from the command registry");
 if (/\bperUserName\b|\bbroadcastNames\b/.test(app)) fail("Command console must not keep a local copy of the per-user/broadcast command lists");
+
+// Nhiều bot: dashboard phải lọc theo bot và bắt buộc chọn bot khi gửi. Chat ID và
+// User ID chỉ có nghĩa trong phạm vi một bot, nên thiếu hai thứ này là lỗi đúng đắn.
+if (!app.includes("/api/admin/bots")) fail("Dashboard must load the bot list from /api/admin/bots");
+if (!app.includes("function filterByBot")) fail("Dashboard must filter lists by bot");
+if (!app.includes("function botBadge")) fail("Dashboard must label which bot a record belongs to");
+// Cột Bot riêng trên bảng Users và Chat directory, không chỉ nhãn trong ô khác.
+if (!app.includes("function botCell")) fail("Dashboard must render a Bot column");
+if (!app.includes("${botCell(")) fail("Users and Chat directory rows must use the Bot column");
+// Thao tác quản trị phải báo lỗi ra giao diện thay vì để Promise bị từ chối âm thầm.
+if (!app.includes("async function runAction")) fail("Dashboard actions must be wrapped so failures are reported");
+if (!/data-chat-bot|data-user-bot/.test(app)) fail("Row actions must carry the bot id");
+// Bộ chọn người nhận không được gộp hai bot làm một.
+if (!app.includes("const keyOf = (user)")) fail("Target user merging must key by (bot, user), not userId alone");
+if (!app.includes("botLabel(recordBotId(user))")) fail("Target user options must show which bot they belong to");
+if (!app.includes("function renderBotGrid")) fail("Dashboard must show per-bot status");
+if (!app.includes("data-chat-bot")) fail("Chat row actions must carry the bot id, or a bot-2 chat opens bot-1's record");
+if (!app.includes("botId: recordBotId(")) fail("Chat and subscription writes must send the bot id");
+// Lệnh gửi tin phải có bot, và người nhận phải thuộc đúng bot đó.
+if (!app.includes('$("#commandBot")')) fail("Command console must require an explicit bot selection");
+if (!app.includes("item.botId !== botId")) fail("Command console must refuse recipients that belong to another bot");
+if (!app.includes("botId,") || !app.includes("targetUserIds")) fail("Batch payload must include the bot id");
 
 // Ô Target Chat ID rời đã bị bỏ: Chat ID chỉ được suy ra khi liên kết đủ tin cậy,
 // không còn là trường nhập tay không có tác dụng.

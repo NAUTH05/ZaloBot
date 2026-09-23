@@ -38,7 +38,7 @@ const { buildAdminData } = require("./adminDataService");
 const { buildTargetUserOptions, resolveBatchTargets } = require("./targetUsers");
 const { getPersistenceStatus, readJsonStore, writeJsonStore } = require("./firestorePersistence");
 const { getSystemLogs } = require("./operationalLog");
-const { describeRegisteredBots, getBot, runWithBot } = require("./botContext");
+const { describeRegisteredBots, getBot, listEnabledBots, runWithBot } = require("./botContext");
 const { LEGACY_BOT_ID, normalizeBotId } = require("./bots");
 
 // Bản ghi không có botId thuộc về bot 1 — quy tắc giữ tương thích dữ liệu cũ.
@@ -55,6 +55,62 @@ function botFilterFrom(url) {
 
 function matchesBot(record, botId) {
     return botId === "all" || recordBotId(record) === botId;
+}
+
+// Bot đích của một thao tác ghi: ?botId= hoặc body.botId, mặc định bot 1.
+// Bot đích của một request.
+//
+// Có nhiều bot đang chạy mà request không nêu botId thì KHÔNG được đoán: cùng một
+// Chat ID hay User ID ở hai bot là hai đối tượng khác nhau, đoán bừa sẽ tác động
+// nhầm bot. Trường hợp đó trả lỗi rõ ràng.
+//
+// Bản triển khai một bot vẫn chạy nguyên như cũ mà không cần botId — đây là đường
+// tương thích cho mọi request bot1 hiện có.
+function requestBotId(url, body) {
+    const fromBody = normalizeBotId(body?.botId);
+    if (fromBody) return fromBody;
+    const fromQuery = botFilterFrom(url);
+    if (fromQuery !== "all") return fromQuery;
+
+    const enabled = listEnabledBots();
+    if (enabled.length === 1) return enabled[0].botId;
+    // Registry chưa được nạp (dashboard chạy độc lập hoặc trong bài kiểm tra):
+    // bot 1 là mặc định lịch sử.
+    if (enabled.length === 0) return LEGACY_BOT_ID;
+
+    const error = new Error(
+        `Thiếu botId. Hệ thống đang chạy ${enabled.length} bot (${enabled.map((bot) => bot.botId).join(", ")}) ` +
+        "nên không thể xác định bot nào. Hãy chọn bot cụ thể cho thao tác này."
+    );
+    error.statusCode = 400;
+    throw error;
+}
+
+// Bot đích cho thao tác CHỈ ĐỌC. Không ném lỗi để không làm hỏng việc hiển thị;
+// khi mơ hồ thì trả về null để nơi gọi tự quyết định.
+function readBotIdOrNull(url, body) {
+    try {
+        return requestBotId(url, body);
+    } catch (_) {
+        return null;
+    }
+}
+
+// Chạy một thao tác trong ngữ cảnh của bot đích, để khóa lưu trữ rơi đúng vào
+// bot đó. Nếu bot đích đang tắt thì từ chối thay vì âm thầm ghi vào bot 1.
+function withRequestBot(url, body, fn) {
+    const botId = requestBotId(url, body);
+    const owner = getBot(botId);
+    if (!owner) {
+        // Bot 1 vẫn cho phép khi registry chưa nạp (dashboard chạy độc lập, test).
+        if (botId !== LEGACY_BOT_ID) {
+            const error = new Error(`Bot ${botId} đang tắt nên không thể thực hiện thao tác này.`);
+            error.statusCode = 400;
+            throw error;
+        }
+        return fn();
+    }
+    return runWithBot(owner, fn);
 }
 
 // Quyền truy cập chat phải được kiểm tra trong ngữ cảnh của bot SỞ HỮU đăng ký,
@@ -288,11 +344,35 @@ function prepareCommandRequest(body = {}) {
     }
 
     const settings = getAdminSettings();
+    // Bot gửi là bắt buộc với lệnh có gửi tin: người nhận chỉ có nghĩa trong
+    // phạm vi một bot. Bot đang tắt bị từ chối thay vì âm thầm dùng bot 1.
+    const explicitBotId = normalizeBotId(body.botId);
+    if (body.botId && !explicitBotId) {
+        return { ok: false, status: 400, command, error: `Bot không hợp lệ: ${String(body.botId)}` };
+    }
+    // Chạy nhiều bot mà không nêu bot thì không được đoán: cùng một User ID ở hai
+    // bot là hai người khác nhau nên đoán bừa sẽ gửi nhầm danh tính.
+    const enabledBots = listEnabledBots();
+    if (!explicitBotId && enabledBots.length > 1) {
+        return {
+            ok: false,
+            status: 400,
+            command,
+            name,
+            targeting,
+            error: `Thiếu bot gửi. Hệ thống đang chạy ${enabledBots.length} bot (${enabledBots.map((bot) => bot.botId).join(", ")}) nên phải chọn bot cụ thể.`
+        };
+    }
+    const botId = explicitBotId || (enabledBots.length === 1 ? enabledBots[0].botId : LEGACY_BOT_ID);
+    if (botId !== LEGACY_BOT_ID && !getBot(botId)) {
+        return { ok: false, status: 400, command, error: `Bot ${botId} đang tắt.` };
+    }
     // Tương thích ngược: client cũ vẫn gửi một chuỗi targetUserId.
     const rawIds = Array.isArray(body.targetUserIds)
         ? body.targetUserIds
         : (body.targetUserId != null && String(body.targetUserId).trim() !== "" ? [body.targetUserId] : []);
-    const batch = resolveBatchTargets(buildAdminData(), rawIds, { max: settings.maxBatchSize });
+    // Người nhận được phân giải trong đúng phạm vi bot đã chọn.
+    const batch = resolveBatchTargets(buildAdminData(), rawIds, { max: settings.maxBatchSize, botId });
 
     if (batch.rejected.length > 0) {
         return {
@@ -317,12 +397,13 @@ function prepareCommandRequest(body = {}) {
         };
     }
 
-    return { ok: true, command, name, targeting, batch, settings };
+    return { ok: true, command, name, targeting, batch, settings, botId };
 }
 
-async function executeForTarget({ executeCommand, command, executor, target }) {
+async function executeForTarget({ executeCommand, command, executor, target, botId }) {
     return executeCommand({
         command,
+        botId,
         userId: executor.userId,
         chatId: batchExecutorChatId(executor),
         displayName: executor.displayName,
@@ -333,7 +414,7 @@ async function executeForTarget({ executeCommand, command, executor, target }) {
 
 // Chạy lệnh lần lượt cho từng người nhận. Một người lỗi không dừng những người
 // còn lại; mỗi lần gửi cách nhau `delayMs` để không dồn dập Zalo.
-async function runCommandBatch({ executeCommand, command, targets, executor, delayMs = 0, onProgress = null }) {
+async function runCommandBatch({ executeCommand, command, targets, executor, delayMs = 0, onProgress = null, botId }) {
     const results = [];
 
     for (const target of targets) {
@@ -351,7 +432,7 @@ async function runCommandBatch({ executeCommand, command, targets, executor, del
         }
 
         try {
-            const result = await executeForTarget({ executeCommand, command, executor, target });
+            const result = await executeForTarget({ executeCommand, command, executor, target, botId });
             const messages = Array.isArray(result?.messages) ? result.messages : [];
             const messageCount = Number(result?.messageCount ?? messages.length) || 0;
             results.push(targetResult(target, {
@@ -472,19 +553,23 @@ function recentAudit(limit = 50) {
     return Array.isArray(data?.events) ? data.events.slice(-limit).reverse() : [];
 }
 
-function subscriptionsForChat(chatId) {
-    return Object.entries(getAllSubscriptions()).filter(([, subscription]) => String(subscription?.chatId || "") === String(chatId)).map(([key, subscription]) => ({ key, ...subscription }));
+function subscriptionsForChat(chatId, botId = LEGACY_BOT_ID) {
+    return Object.entries(getAllSubscriptions())
+        .filter(([key, subscription]) => String(subscription?.chatId || "") === String(chatId) && botIdOf(subscription, key) === botId)
+        .map(([key, subscription]) => ({ key, ...subscription }));
 }
 
-function detailForChat(chatId) {
+// Khớp cả botId: cùng một Chat ID ở hai bot là hai cuộc trò chuyện khác nhau,
+// tra theo chatId trần sẽ mở nhầm bản ghi của bot kia.
+function detailForChat(chatId, botId = LEGACY_BOT_ID) {
     const workspace = buildAdminData();
-    const chat = workspace.chats.find((item) => String(item.chatId) === String(chatId)) || getChat(chatId);
+    const chat = workspace.chats.find((item) => String(item.chatId) === String(chatId) && recordBotId(item) === botId);
     if (!chat) return null;
     return {
         chat: publicChat(chat),
         deliveryHistory: Array.isArray(chat.deliveryHistory) ? chat.deliveryHistory.slice(-50).reverse() : [],
-        subscriptions: workspace.subscriptions.filter((item) => String(item.chatId) === String(chatId)),
-        members: workspace.users.filter((user) => user.chats.some((item) => String(item.chatId) === String(chatId)))
+        subscriptions: workspace.subscriptions.filter((item) => String(item.chatId) === String(chatId) && recordBotId(item) === botId),
+        members: workspace.users.filter((user) => recordBotId(user) === botId && user.chats.some((item) => String(item.chatId) === String(chatId)))
     };
 }
 
@@ -593,7 +678,7 @@ async function handleApi(request, response, url, options = {}) {
     }
     const chatMatch = url.pathname.match(new RegExp(`^${API_PREFIX.replaceAll("/", "\\/")}/chats/([^/]+)$`));
     if (chatMatch && request.method === "GET") {
-        const detail = detailForChat(decodeURIComponent(chatMatch[1]));
+        const detail = detailForChat(decodeURIComponent(chatMatch[1]), readBotIdOrNull(url, null) || LEGACY_BOT_ID);
         return detail ? json(response, 200, detail) : json(response, 404, { error: "Chat not found" });
     }
     if (chatMatch && ["PATCH", "POST"].includes(request.method)) {
@@ -602,9 +687,10 @@ async function handleApi(request, response, url, options = {}) {
         const chatId = decodeURIComponent(chatMatch[1]);
         try {
             let result;
-            if (body.action === "status") result = setChatStatus(chatId, body.status, request.admin.username, body.reason || "admin_action");
-            else if (body.action === "feature") result = setFeatureOverride(chatId, body.feature, body.enabled == null ? null : body.enabled);
-            else if (body.action === "metadata") result = upsertChat({ chatId, chatType: body.chatType, displayName: body.displayName, chatTitle: body.chatTitle, userId: body.userId });
+            const runForBot = (action) => withRequestBot(url, body, action);
+            if (body.action === "status") result = runForBot(() => setChatStatus(chatId, body.status, request.admin.username, body.reason || "admin_action"));
+            else if (body.action === "feature") result = runForBot(() => setFeatureOverride(chatId, body.feature, body.enabled == null ? null : body.enabled));
+            else if (body.action === "metadata") result = runForBot(() => upsertChat({ chatId, chatType: body.chatType, displayName: body.displayName, chatTitle: body.chatTitle, userId: body.userId }));
             else return json(response, 400, { error: "Unsupported action" });
             if (!result) return json(response, 404, { error: "Chat not found or permanently deleted" });
             audit(`chat.${body.action}`, request, { chatId, result: "success", metadata: body });
@@ -618,10 +704,39 @@ async function handleApi(request, response, url, options = {}) {
         let body = {};
         try { body = await readBody(request); } catch (_) {}
         const chatId = decodeURIComponent(chatMatch[1]);
-        const result = removeChat(chatId, body.hard === true || url.searchParams.get("hard") === "1");
-        if (!result) return json(response, 404, { error: "Chat not found" });
-        audit("chat.delete", request, { chatId, hard: body.hard === true || url.searchParams.get("hard") === "1", result: "success" });
-        return json(response, 200, { ok: true, chat: publicChat(result) });
+        const hard = body.hard === true || url.searchParams.get("hard") === "1";
+        let result;
+        try {
+            result = withRequestBot(url, body, () => removeChat(chatId, hard));
+        } catch (error) {
+            // Bot mơ hồ hoặc đang tắt: trả lỗi rõ ràng thay vì âm thầm tác động
+            // lên bot 1.
+            return json(response, error.statusCode || 400, { error: error.message });
+        }
+        if (!result) return json(response, 400, { error: "chatId không hợp lệ" });
+
+        audit("chat.delete", request, {
+            chatId,
+            botId: requestBotId(url, body),
+            hard,
+            hadDirectoryRecord: result.hadDirectoryRecord,
+            result: "success"
+        });
+
+        // 200 kể cả khi chat chỉ tồn tại nhờ dữ liệu tương tác/đăng ký: thao tác
+        // đã có hiệu lực (chat không còn hiện trên dashboard) nên không phải 404.
+        return json(response, 200, {
+            ok: true,
+            hard,
+            botId: requestBotId(url, body),
+            hadDirectoryRecord: result.hadDirectoryRecord,
+            chat: result.record ? publicChat(result.record) : null,
+            message: hard
+                ? (result.hadDirectoryRecord
+                    ? "Đã xoá vĩnh viễn bản ghi trong sổ chat. Đăng ký nhận lịch và lịch sử tương tác vẫn được giữ."
+                    : "Chat này không có bản ghi trong sổ chat (chỉ có dữ liệu tương tác/đăng ký). Đã đánh dấu xoá để không hiện lại; đăng ký và lịch sử tương tác vẫn được giữ.")
+                : "Đã chuyển chat sang trạng thái removed. Bản ghi và đăng ký vẫn còn, có thể bật lại."
+        });
     }
     const retryMatch = url.pathname.match(new RegExp(`^${API_PREFIX.replaceAll("/", "\\/")}/chats/([^/]+)/retry$`));
     if (retryMatch && request.method === "POST") {
@@ -643,7 +758,7 @@ async function handleApi(request, response, url, options = {}) {
     if (url.pathname === `${API_PREFIX}/subscriptions` && request.method === "PATCH") {
         let body;
         try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
-        const context = { chatId: body.chatId, userId: body.userId, userDisplayName: body.userDisplayName || "" };
+        const context = { botId: requestBotId(url, body), chatId: body.chatId, userId: body.userId, userDisplayName: body.userDisplayName || "" };
         // Ngày đích phải được kiểm tra giống hệt lệnh chat: chỉ 0 (homnay) hoặc 1 (homsau).
         const targetDayOffset = parseTargetDayOffset(body.targetDayOffset);
         if (body.targetDayOffset !== undefined && body.targetDayOffset !== null && targetDayOffset == null) {
@@ -692,7 +807,11 @@ async function handleApi(request, response, url, options = {}) {
     if (url.pathname === `${API_PREFIX}/commands` && request.method === "GET") return json(response, 200, { commands: getCommandRegistry() });
     if (url.pathname === `${API_PREFIX}/target-users` && request.method === "GET") {
         // Khóa luôn là User ID thật; targetChatId chỉ có khi liên kết đủ tin cậy.
-        return json(response, 200, { users: buildTargetUserOptions(buildAdminData()) });
+        // Có ?botId= thì chỉ trả người của bot đó — bộ chọn không được trộn hai bot.
+        const botId = botFilterFrom(url);
+        const users = buildTargetUserOptions(buildAdminData())
+            .filter((user) => botId === "all" || recordBotId(user) === botId);
+        return json(response, 200, { users, botId });
     }
     if (url.pathname === `${API_PREFIX}/settings/admins` && ["POST", "PATCH"].includes(request.method)) {
         let body;
@@ -736,7 +855,7 @@ async function handleApi(request, response, url, options = {}) {
             let result;
             let failure = null;
             try {
-                result = await executeForTarget({ executeCommand: options.executeCommand, command, executor, target: null });
+                result = await executeForTarget({ executeCommand: options.executeCommand, command, executor, target: null, botId: prepared.botId });
             } catch (error) {
                 failure = error;
             }
@@ -761,6 +880,7 @@ async function handleApi(request, response, url, options = {}) {
         const results = await runCommandBatch({
             executeCommand: options.executeCommand,
             command,
+            botId: prepared.botId,
             targets: batch.targets,
             executor,
             delayMs: settings.batchDelayMs
@@ -839,7 +959,7 @@ async function handleApi(request, response, url, options = {}) {
                 if (isBroadcast) {
                     let outcome;
                     try {
-                        const result = await executeForTarget({ executeCommand: options.executeCommand, command, executor, target: null });
+                        const result = await executeForTarget({ executeCommand: options.executeCommand, command, executor, target: null, botId: prepared.botId });
                         const messages = Array.isArray(result?.messages) ? result.messages : [];
                         outcome = [{ userId: null, displayName: "Mọi chat đang hoạt động", chatId: null, status: "delivered", messageCount: Number(result?.messageCount ?? messages.length) || 0, deliveredToChatId: result?.deliveredToChatId || null, messages, error: null }];
                     } catch (error) {

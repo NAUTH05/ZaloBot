@@ -101,6 +101,64 @@ The Command console and Available commands section are backed by `commandRegistr
 
 `GET /zalobot/api/admin/target-users` returns the searchable list behind the Command console's recipient picker. It is derived from the same merged workspace data as the rest of the dashboard (`chatDirectory`, the interaction registry, and subscriptions), keyed strictly by **User ID** and deduplicated on it. Manual entry stays available: a value that is not in the directory is accepted unchanged.
 
+## Bots
+
+The dashboard serves one process that can run up to three Zalo identities. Each bot is a separate identity, so counts and health are reported **per bot**, never merged.
+
+- The topbar **Bot** filter applies to every list — Chats, Users, Groups, Notifications, Chat health, Delivery errors and the overview metrics. One shared filter means the tabs cannot disagree about which bot you are looking at.
+- The overview shows a card per bot with its status, token fingerprint and source, and its own chat/user/subscription/delivery-error counts. **The token itself is never sent to the browser** — only the 8-character fingerprint, which is enough to tell two tokens apart.
+- Rows carry a bot label when the filter is set to *all bots*; the label is hidden when you have already filtered to one bot.
+- `GET /api/admin/bots` returns the bot list. `?botId=` filters `/chats`, `/users` and `/notifications`.
+- Chat detail and every chat/subscription write send the bot id, so opening a chat that exists under two bots opens the right record rather than whichever came first.
+
+### Command console and bots
+
+A command that sends a message **requires an explicit bot selection**. The confirmation dialog names the bot that will send, and the batch results carry it.
+
+Recipients that belong to a different bot are refused rather than silently messaged: a User ID or Chat ID that looks identical under two bots is a different person's conversation. Broadcast scope is the selected bot's active chats — not every bot's.
+
+## Browser console warnings
+
+Two warnings commonly appear in the dashboard console. Neither is caused by the dashboard code, and neither is related to the chat-delete behaviour.
+
+### `Permissions-Policy: Unrecognized feature: ...`
+
+**Not from this repository.** The dashboard sets exactly one Permissions-Policy header, in `securityHeaders()` in `adminServer.js`:
+
+```text
+Permissions-Policy: camera=(), microphone=(), geolocation=()
+```
+
+All three of those are standard, Chrome-recognised features and do not produce this warning. The warning appears when a header lists a feature the browser does not know — commonly `interest-cohort` or `browsing-topics`, which are injected by Cloudflare or by a reverse-proxy config.
+
+Find out which layer is sending it:
+
+```bash
+curl -sI https://<your-host>/zalobot/ | grep -i permissions-policy
+```
+
+- **One** `Permissions-Policy` line containing only `camera`, `microphone`, `geolocation` → this repository, and it is correct.
+- A line mentioning `interest-cohort`, `browsing-topics`, `run-ad-auction` or similar → it comes from **Cloudflare** (Cloudflare → your zone → Speed / Optimization features, or a Transform Rule adding headers) or from the **reverse proxy** (`add_header Permissions-Policy ...` in the nginx site config, or a Cloudflare Transform Rule).
+
+Fix it where it is defined. Removing an unrecognised feature from that header is safe; do not add it to this repository.
+
+### Cloudflare Insights script blocked by CSP
+
+**Injected by Cloudflare, blocked by this repository's CSP.** Nothing in this project references `cloudflareinsights.com`, `cdn-cgi` or `beacon.min.js` — Cloudflare Web Analytics / Insights injects that script into HTML responses at the edge.
+
+The dashboard CSP is deliberately tight, because this is a private admin panel:
+
+```text
+default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'
+```
+
+Recommended fix — turn the injection off rather than widening the CSP:
+
+1. Cloudflare dashboard → your zone → **Speed → Optimization → Content Optimization** (or **Analytics → Web Analytics**).
+2. Disable **Cloudflare Web Analytics / Insights** for this hostname, or add a rule so it does not apply to `/zalobot/*`.
+
+Adding `https://static.cloudflareinsights.com` to `script-src` would silence the warning, but it means allowing third-party JavaScript to execute inside an authenticated admin panel for the sake of an analytics beacon. That is a worse trade than switching the beacon off, so this repository does not do it.
+
 ## Command console: multiple recipients
 
 The console runs one command for several recipients in a single submission. Recipients are picked with a searchable multi-select: type to filter by name, MSSV, or User ID, or use `↑`/`↓` + `Enter`. Each selection appears as a removable chip showing the display name and User ID, `Backspace` on an empty input removes the last one, and the panel offers **select all filtered** and **clear selection** with a running count. Mobile layouts stack the chips and make the action buttons full width.

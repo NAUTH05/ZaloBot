@@ -53,16 +53,27 @@ function resolveTargetChat(contexts = []) {
 }
 
 // Danh sách đã khử trùng theo User ID, sắp xếp theo tên hiển thị (vi).
-function buildTargetUserOptions(workspace = {}) {
-    const usersById = new Map();
-    const contextsById = new Map();
+// Bot của một bản ghi workspace. Thiếu botId ⇒ bot 1, đúng quy tắc dữ liệu cũ.
+function botIdOf(botId) {
+    const value = String(botId == null ? "" : botId).trim().toLowerCase();
+    return /^bot[1-9]\d*$/.test(value) ? value : "bot1";
+}
 
-    const registerContexts = (userId, contexts) => {
-        const list = contextsById.get(userId) || [];
+function buildTargetUserOptions(workspace = {}) {
+    // Khóa theo (botId, userId): cùng một User ID ở hai bot là HAI người nhận khác
+    // nhau. Gộp theo userId trần sẽ khiến Command console chọn nhầm bot.
+    const usersByKey = new Map();
+    const contextsByKey = new Map();
+
+    const keyOf = (botId, userId) => `${botIdOf(botId)}::${userId}`;
+
+    const registerContexts = (botId, userId, contexts) => {
+        const key = keyOf(botId, userId);
+        const list = contextsByKey.get(key) || [];
         for (const context of contexts) {
             if (!list.some((item) => item.chatId === context.chatId)) list.push(context);
         }
-        contextsById.set(userId, list);
+        contextsByKey.set(key, list);
     };
 
     // Nguồn chính: workspace users (đã hợp nhất directory, sổ tương tác và subscriptions).
@@ -70,9 +81,11 @@ function buildTargetUserOptions(workspace = {}) {
         if (!user) continue;
         const userId = normalizeId(user.userId);
         if (!userId) continue;
-        registerContexts(userId, (user.chats || []).map(normalizeContext).filter(Boolean));
+        const botId = botIdOf(user.botId);
+        registerContexts(botId, userId, (user.chats || []).map(normalizeContext).filter(Boolean));
         const displayName = String(user.displayName || "").trim();
-        usersById.set(userId, {
+        usersByKey.set(keyOf(botId, userId), {
+            botId,
             userId,
             displayName: isPlaceholderName(displayName, userId) ? "" : displayName,
             status: USER_STATUSES.has(user.status) ? user.status : "active",
@@ -89,10 +102,13 @@ function buildTargetUserOptions(workspace = {}) {
         const chatId = normalizeId(chat.chatId);
         // Một nhóm có chatId trùng userId chỉ là trùng số, không phải User ID.
         if (chatId && chatId === userId && chat.chatType === "group") continue;
+        const botId = botIdOf(chat.botId);
         const context = normalizeContext({ chatId, chatType: chat.chatType, chatName: chat.displayName, status: chat.status });
-        if (context) registerContexts(userId, [context]);
-        if (usersById.has(userId)) continue;
-        usersById.set(userId, {
+        if (context) registerContexts(botId, userId, [context]);
+        const key = keyOf(botId, userId);
+        if (usersByKey.has(key)) continue;
+        usersByKey.set(key, {
+            botId,
             userId,
             displayName: chat.chatType === "private" ? String(chat.displayName || "").trim() : "",
             status: "active",
@@ -101,9 +117,9 @@ function buildTargetUserOptions(workspace = {}) {
         });
     }
 
-    return [...usersById.values()]
+    return [...usersByKey.values()]
         .map((user) => {
-            const contexts = contextsById.get(user.userId) || [];
+            const contexts = contextsByKey.get(keyOf(user.botId, user.userId)) || [];
             return {
                 ...user,
                 // Tên thiếu hoặc chỉ là "User <id>" thì trả về rỗng để giao diện tự hiển thị ID.
@@ -115,10 +131,15 @@ function buildTargetUserOptions(workspace = {}) {
         .sort((left, right) => left.displayName.localeCompare(right.displayName, "vi") || left.userId.localeCompare(right.userId));
 }
 
-function findTargetUser(workspace = {}, rawValue) {
+// Tìm một người nhận. Phải khớp cả bot khi có nhiều bot: cùng User ID ở hai bot
+// là hai người khác nhau.
+function findTargetUser(workspace = {}, rawValue, botId = null) {
     const userId = normalizeId(rawValue);
     if (!userId) return null;
-    return buildTargetUserOptions(workspace).find((user) => user.userId === userId) || null;
+    const wanted = botId ? botIdOf(botId) : null;
+    const options = buildTargetUserOptions(workspace);
+    if (wanted) return options.find((user) => user.userId === userId && user.botId === wanted) || null;
+    return options.find((user) => user.userId === userId) || null;
 }
 
 // Chuẩn hoá danh sách User ID cho Command console nhiều người nhận.
@@ -133,16 +154,29 @@ function resolveBatchTargets(workspace = {}, rawValues = [], options = {}) {
     const max = Number.isInteger(options.max) && options.max > 0 ? options.max : DEFAULT_MAX_BATCH_SIZE;
     const list = Array.isArray(rawValues) ? rawValues : (rawValues == null || rawValues === "" ? [] : [rawValues]);
 
+    // Người nhận chỉ có nghĩa trong phạm vi MỘT bot: cùng User ID ở hai bot là hai
+    // người khác nhau. Có botId thì chỉ xét người của bot đó.
+    const wantedBot = options.botId ? botIdOf(options.botId) : null;
+    const keyOf = (botId, userId) => `${botIdOf(botId)}::${userId}`;
+
     // Dựng chỉ mục một lần để không phải quét lại workspace cho từng ID.
     const known = new Map();
-    for (const user of buildTargetUserOptions(workspace)) known.set(user.userId, user);
+    for (const user of buildTargetUserOptions(workspace)) {
+        if (wantedBot && user.botId !== wantedBot) continue;
+        known.set(keyOf(user.botId, user.userId), user);
+    }
     const groupChatIds = new Set(
         (workspace.chats || [])
             .filter((chat) => chat?.chatType === "group")
             .map((chat) => normalizeId(chat.chatId))
             .filter(Boolean)
     );
-    const knownUserIds = new Set((workspace.users || []).map((user) => normalizeId(user?.userId)).filter(Boolean));
+    const knownUserIds = new Set(
+        (workspace.users || [])
+            .filter((user) => !wantedBot || botIdOf(user?.botId) === wantedBot)
+            .map((user) => normalizeId(user?.userId))
+            .filter(Boolean)
+    );
 
     const seen = new Set();
     const targets = [];
@@ -156,7 +190,9 @@ function resolveBatchTargets(workspace = {}, rawValues = [], options = {}) {
             rejected.push({ userId: "", reason: "Bỏ qua một giá trị rỗng." });
             continue;
         }
-        if (seen.has(value)) {
+        // Khử trùng theo (bot, user): cùng User ID ở hai bot là hai người nhận.
+        const dedupeKey = keyOf(wantedBot || "bot1", value);
+        if (seen.has(dedupeKey)) {
             duplicates.push(value);
             continue;
         }
@@ -168,13 +204,27 @@ function resolveBatchTargets(workspace = {}, rawValues = [], options = {}) {
             });
             continue;
         }
-        seen.add(value);
+        const user = wantedBot
+            ? known.get(dedupeKey)
+            : [...known.values()].find((item) => item.userId === value);
+
+        // Có bot đích mà người này không thuộc bot đó ⇒ từ chối, không gửi sang bot
+        // khác chỉ vì User ID trông giống nhau.
+        if (wantedBot && !user) {
+            rejected.push({
+                userId: value,
+                reason: `User ${value} không thuộc ${wantedBot}. Chọn đúng bot hoặc bỏ người nhận này.`
+            });
+            continue;
+        }
+
+        seen.add(dedupeKey);
         if (targets.length >= max) {
             overflow += 1;
             continue;
         }
-        const user = known.get(value);
         targets.push({
+            botId: user?.botId || wantedBot || "bot1",
             userId: value,
             displayName: user?.displayName || `User ${value}`,
             chatId: user?.targetChatId || "",

@@ -100,7 +100,7 @@ const { createAdminServer } = require("./adminServer");
 const { DEFAULT_SHUTDOWN_TIMEOUT_MS, createShutdownController } = require("./shutdown");
 const { recordSystemLog } = require("./operationalLog");
 const { getConfiguredAdminIds, isConfiguredAdmin } = require("./adminSettings");
-const { LEGACY_BOT_ID, normalizeBotId, resolveBotConfigs, scopeKey } = require("./bots");
+const { LEGACY_BOT_ID, extractBotName, normalizeBotId, resolveBotConfigs, resolveBotDisplayName, scopeKey } = require("./bots");
 const {
     bindBot,
     describeRegisteredBots,
@@ -139,6 +139,9 @@ function createBotRuntime(config) {
         token: config.token,
         source: config.source,
         fingerprint: config.fingerprint,
+        configuredName: config.configuredName || null,
+        verifiedName: config.verifiedName || null,
+        displayName: config.displayName || config.configuredName || config.botId,
         enabled: true,
         client: new ZaloBot(config.token, { polling: false }),
         monthlyMessageWarning: config.monthlyMessageWarning,
@@ -151,6 +154,45 @@ function createBotRuntime(config) {
 
 const botRuntimes = botConfigResult.bots.map((config) => createBotRuntime(config));
 registerBots(botRuntimes);
+
+// Hỏi Zalo tên thật của từng bot bằng chính token của bot đó (getMe).
+//
+// Chạy nền và có thời hạn: KHÔNG bao giờ chặn hay làm hỏng khởi động. Không lấy
+// được tên thì giữ nhãn BOT_N_NAME, không có nữa thì dùng botId. Token không bao
+// giờ được ghi log — chỉ ghi botId và lý do lỗi.
+const BOT_NAME_TIMEOUT_MS = positiveDuration(process.env.BOT_NAME_TIMEOUT_MS, 5000);
+
+function withTimeout(promise, ms, label) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} quá thời gian ${ms}ms`)), ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+async function resolveBotNames() {
+    await Promise.all(listBots().map(async (runtime) => {
+        try {
+            if (typeof runtime.client?.getMe !== "function") return;
+            const response = await withTimeout(Promise.resolve(runtime.client.getMe()), BOT_NAME_TIMEOUT_MS, `${runtime.botId} getMe`);
+            const name = extractBotName(response);
+            if (!name) {
+                console.warn(`[Bots] ${runtime.botId}: getMe không trả về tên; dùng nhãn cấu hình.`);
+                return;
+            }
+            runtime.verifiedName = name;
+            runtime.displayName = resolveBotDisplayName({
+                botId: runtime.botId,
+                verifiedName: name,
+                configuredName: runtime.configuredName
+            });
+            console.log(`[Bots] ${runtime.botId}: tên từ Zalo = ${name}`);
+        } catch (error) {
+            // Lỗi tra tên chỉ là thông tin: bot vẫn chạy với nhãn cấu hình/botId.
+            console.warn(`[Bots] ${runtime.botId}: không lấy được tên bot (${error.message}); dùng nhãn cấu hình.`);
+        }
+    }));
+}
 const dashboardCommandContext = new AsyncLocalStorage();
 const registeredSchedulers = new WeakSet();
 
@@ -1559,7 +1601,7 @@ async function startRuntime() {
 
     // Bước 3: dashboard.
     adminRuntime = createAdminServer({
-        executeCommand: async ({ command, userId, chatId, displayName, executor, target }) => {
+        executeCommand: async ({ command, userId, chatId, displayName, executor, target, botId }) => {
             const parsed = parseCommand(command);
             if (!parsed) throw new Error("Lệnh phải bắt đầu bằng /");
 
@@ -1571,20 +1613,28 @@ async function startRuntime() {
             };
             if (!isOwner(actor)) throw new Error("Admin context chưa được cấp quyền");
 
+            // Bot gửi: người nhận thuộc bot nào thì lệnh chạy trong ngữ cảnh bot đó.
+            // Chat ID / User ID chỉ có nghĩa trong phạm vi một bot, nên bot phải
+            // được chọn tường minh thay vì mặc định về bot 1.
+            const requestedBotId = normalizeBotId(target?.botId) || normalizeBotId(botId) || LEGACY_BOT_ID;
+            const ownerBot = getBot(requestedBotId);
+            if (!ownerBot) throw new Error(`Bot ${requestedBotId} đang tắt nên không thể gửi`);
+
             // Ngữ cảnh dữ liệu: người được chọn làm đích nếu có, nếu không thì
             // chính admin. Lệnh chạy cho người nhận nên trạng thái theo người và
             // phần trả lời đều thuộc về người đó.
             const targetUserId = target?.userId ? String(target.userId) : "";
             const targetChatId = target?.chatId ? String(target.chatId) : "";
             const context = {
+                botId: requestedBotId,
                 userId: targetUserId || actor.userId,
                 chatId: targetChatId || actor.chatId,
                 userDisplayName: target?.displayName
                     || String(executor?.displayName || displayName || executor?.username || "Dashboard Admin")
             };
 
-            const capture = { chatId: context.chatId, messages: [], actor };
-            await dashboardCommandContext.run(capture, () => handleCommand({ text: command, chat: { id: context.chatId, type: "private" }, from: { id: context.userId, display_name: context.userDisplayName } }, parsed));
+            const capture = { chatId: context.chatId, messages: [], actor, botId: requestedBotId };
+            await runWithBot(ownerBot, () => dashboardCommandContext.run(capture, () => handleCommand({ text: command, chat: { id: context.chatId, type: "private" }, from: { id: context.userId, display_name: context.userDisplayName } }, parsed)));
 
             // `deliveredToChatId` là bằng chứng phần trả lời đã được gửi thật tới
             // chat nào — khác với việc chỉ phân tích được câu lệnh.
@@ -1615,6 +1665,10 @@ async function startRuntime() {
     runtimeSchedulerJobs = registerRuntimeJobs() || [];
     registerShutdownHandlers();
     console.log(`[Runtime] Scheduler started (${TIME_ZONE})`);
+
+    // Bước 4b: hỏi Zalo tên từng bot. Chỉ là thông tin hiển thị — lỗi ở đây
+    // không được ngăn bot khởi động.
+    await resolveBotNames();
 
     // Bước 5: polling Zalo sau cùng — mỗi bot một consumer riêng, không dùng
     // chung token nên không bao giờ có hai consumer trên cùng một danh tính.

@@ -23,6 +23,54 @@ const TOKEN_ENV_VARS = Object.freeze({
     bot3: ["BOT_3_TOKEN"]
 });
 
+// Nhãn hiển thị do người vận hành đặt, dùng khi không lấy được tên thật từ Zalo.
+const NAME_ENV_VARS = Object.freeze({
+    bot1: ["BOT_1_NAME"],
+    bot2: ["BOT_2_NAME"],
+    bot3: ["BOT_3_NAME"]
+});
+
+// Tên thật của bot do Zalo trả về (qua getMe) được ưu tiên hơn nhãn cấu hình.
+// Không có cả hai thì dùng chính botId — dashboard luôn có gì đó để hiển thị.
+function resolveBotDisplayName({ botId, verifiedName, configuredName }) {
+    const verified = String(verifiedName == null ? "" : verifiedName).trim();
+    if (verified) return verified;
+    const configured = String(configuredName == null ? "" : configuredName).trim();
+    if (configured) return configured;
+    return normalizeBotId(botId) || LEGACY_BOT_ID;
+}
+
+// Nhãn hiển thị đầy đủ: "Bot Micano · bot2" khi có tên, ngược lại chỉ botId.
+function formatBotLabel(bot) {
+    const botId = normalizeBotId(bot?.botId) || LEGACY_BOT_ID;
+    const name = String(bot?.displayName == null ? "" : bot.displayName).trim();
+    if (!name || name === botId) return botId;
+    return `${name} · ${botId}`;
+}
+
+// Trích tên bot từ phản hồi getMe của Zalo. Hình dạng phản hồi không được tài
+// liệu hoá đầy đủ nên phải chấp nhận nhiều tên trường; không nhận ra thì trả null
+// và nơi gọi sẽ rơi về nhãn cấu hình hoặc botId.
+function extractBotName(response) {
+    const candidates = [
+        response?.name,
+        response?.display_name,
+        response?.displayName,
+        response?.bot_name,
+        response?.botName,
+        response?.title,
+        response?.result?.name,
+        response?.result?.display_name,
+        response?.data?.name,
+        response?.data?.display_name
+    ];
+    for (const candidate of candidates) {
+        const value = String(candidate == null ? "" : candidate).trim();
+        if (value) return value;
+    }
+    return null;
+}
+
 // Cảnh báo hạn mức gửi tin hằng tháng. KHÔNG hard-code rằng hạn mức là theo bot
 // hay theo tài khoản — điều đó chưa xác minh được, nên để cấu hình được và ghi
 // rõ trong tài liệu.
@@ -123,11 +171,18 @@ function resolveBotConfigs(env = process.env) {
         }
         seenTokens.set(token, botId);
 
+        const configuredName = (NAME_ENV_VARS[botId] || [])
+            .map((name) => String(env?.[name] || "").trim())
+            .find((value) => value.length > 0) || null;
+
         bots.push({
             botId,
             token,
             source,
             fingerprint: tokenFingerprint(token),
+            configuredName,
+            verifiedName: null,
+            displayName: resolveBotDisplayName({ botId, configuredName }),
             enabled: true,
             monthlyMessageWarning: monthlyWarning
         });
@@ -171,6 +226,8 @@ function describeBot(bot) {
         enabled: bot.enabled !== false,
         tokenSource: bot.source || null,
         tokenFingerprint: bot.fingerprint || tokenFingerprint(bot.token),
+        displayName: bot.displayName || resolveBotDisplayName({ botId: bot.botId, configuredName: bot.configuredName }),
+        label: formatBotLabel(bot),
         monthlyMessageWarning: normalizeMonthlyWarning(bot.monthlyMessageWarning)
     };
 }
@@ -184,15 +241,19 @@ module.exports = {
     DEFAULT_MONTHLY_MESSAGE_WARNING,
     LEGACY_BOT_ID,
     MAX_BOTS,
+    NAME_ENV_VARS,
     TOKEN_ENV_VARS,
     botIndex,
     describeBot,
     describeBots,
+    extractBotName,
+    formatBotLabel,
     isLegacyBotId,
     isMaskedToken,
     normalizeBotId,
     parseScopedKey,
     resolveBotConfigs,
+    resolveBotDisplayName,
     scopeKey,
     storageKeyPrefix,
     tokenFingerprint
