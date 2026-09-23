@@ -18,6 +18,7 @@ const CATEGORY = {
     ACCESS: "Phân quyền",
     CHAT: "Quản lý chat",
     BROADCAST: "Thông báo chung",
+    UPDATE: "Cập nhật",
     DIAGNOSTICS: "Kiểm tra hệ thống",
     DUTY_VIEW: "Xem lịch trực",
     DUTY_MANAGE: "Quản lý lịch trực",
@@ -379,12 +380,23 @@ const HELP_COMMANDS = [
     },
     {
         command: "thongbao",
-        usage: "/thongbao [Nội dung]",
+        usage: "/thongbao [Nội dung thông báo]",
         group: HELP_GROUPS.ADMIN,
         category: CATEGORY.BROADCAST,
         permission: "owner",
         description: "Gửi thông báo chung tới mọi chat đang hoạt động.",
-        examples: ["/thongbao Hệ thống sẽ bảo trì lúc 22:00"]
+        examples: ["/thongbao Hệ thống sẽ bảo trì lúc 22:00"],
+        note: "Thông báo chung cho mọi chủ đề. Dùng /update khi nội dung là cập nhật sản phẩm hoặc bot."
+    },
+    {
+        command: "update",
+        usage: "/update [Nội dung cập nhật]",
+        group: HELP_GROUPS.ADMIN,
+        category: CATEGORY.UPDATE,
+        permission: "owner",
+        description: "Gửi thông báo cập nhật sản phẩm hoặc bot tới mọi chat đang hoạt động.",
+        examples: ["/update Đã bổ sung tuỳ chọn giờ nhận lịch"],
+        note: "Chỉ dùng cho thông tin cập nhật. Dùng /thongbao cho thông báo chung khác."
     },
     {
         command: "danhsach",
@@ -564,12 +576,19 @@ function groupByCategory(entries) {
     return [...sections.entries()].map(([category, items]) => ({ category, items }));
 }
 
+// Mỗi lệnh là một khối gọn, thống nhất giữa /help, /helpadmin và /help411:
+//   **/find [MSSV]**
+//   Lưu MSSV để dùng cho các lệnh lịch.
+//   (Ví dụ: /find 123000135)
+//   (Lưu ý: ...)
+// Khối được ngăn cách bằng dòng trống nên vẫn chia tin đúng theo sendMessage().
 function renderCommand(entry) {
-    const blocks = [`**${entry.usage}**`, entry.description];
+    const lines = [`**${entry.usage}**`];
+    if (entry.description) lines.push(entry.description);
     const examples = (entry.examples || []).filter(Boolean);
-    if (examples.length > 0) blocks.push(["Ví dụ:", ...examples.map((example) => `\`${example}\``)].join("\n"));
-    if (entry.note) blocks.push(`Lưu ý:\n${entry.note}`);
-    return blocks.join("\n\n");
+    if (examples.length > 0) lines.push(`(Ví dụ: ${examples.join(", ")})`);
+    if (entry.note) lines.push(`(Lưu ý: ${entry.note})`);
+    return lines.join("\n");
 }
 
 function renderSections(entries) {
@@ -601,19 +620,17 @@ ${internalSection}`;
 }
 
 function formatInternalHelp() {
+    const adminEntry = findHelpCommand("helpadmin");
+    const helpSection = adminEntry
+        ? `## {orange}TRỢ GIÚP{/orange}\n\n${renderCommand(adminEntry)}`
+        : "";
     return `# {red}INTERNAL - ROOM 411{/red}
 
 > Khu vực nội bộ. Không hiển thị trong **/help** của người dùng.
 
 ${renderSections(commandsInGroup(HELP_GROUPS.INTERNAL411).filter((entry) => entry.command !== "help411"))}
 
-## {orange}TRỢ GIÚP{/orange}
-
-**/helpadmin**
-Xem hướng dẫn các lệnh quản trị.
-
-Ví dụ:
-\`/helpadmin\``;
+${helpSection}`;
 }
 
 module.exports = {

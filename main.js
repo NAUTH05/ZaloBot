@@ -335,23 +335,34 @@ function getBroadcastTargets(feature = "broadcast") {
     return [...targets.values()].filter((target) => isChatEligible(target.chatId, feature));
 }
 
-async function sendBotAnnouncement(message) {
+// Gửi thông báo tới mọi chat đủ điều kiện. Dùng chung cho /thongbao (thông báo
+// chung) và /update (thông báo cập nhật): cùng cách chọn đích, cùng kiểm tra
+// điều kiện nhận, cùng bảng tổng kết gửi/lỗi. Chỉ khác nhãn ghi log.
+async function sendBotAnnouncement(message, options = {}) {
+    const { operation = "announcement", logLabel = "thông báo chung" } = options;
     const targets = getBroadcastTargets();
     const result = { targets: targets.length, sent: 0, failed: 0 };
     for (const target of targets) {
         try {
-            const delivery = await sendNotification(target.chatId, message, { feature: "broadcast", operation: "announcement" });
+            const delivery = await sendNotification(target.chatId, message, { feature: "broadcast", operation });
             if (delivery.sent) result.sent += 1;
             else if (delivery.failed) {
                 result.failed += 1;
-                logDiscord("ERROR", `Không thể gửi thông báo cập nhật cho chat ${target.chatId}: ${delivery.error.message}`);
+                logDiscord("ERROR", `Không thể gửi ${logLabel} cho chat ${target.chatId}: ${delivery.error.message}`);
             }
         } catch (error) {
             result.failed += 1;
-            logDiscord("ERROR", `Không thể gửi thông báo cập nhật cho chat ${target.chatId}: ${error.message}`);
+            logDiscord("ERROR", `Không thể gửi ${logLabel} cho chat ${target.chatId}: ${error.message}`);
         }
     }
     return result;
+}
+
+function formatBroadcastSummary(title, result) {
+    return `# {green}✓ ${title}{/green}\n\n` +
+        `> **Tổng cuộc trò chuyện:** ${result.targets}\n` +
+        `> **Gửi thành công:** ${result.sent}\n` +
+        `> **Gửi lỗi:** ${result.failed}`;
 }
 
 function formatBirthdayInvitation(year) {
@@ -494,7 +505,8 @@ const COMMAND_EXAMPLES = {
     help: "/help",
     helpadmin: "/helpadmin",
     time: "/time",
-    thongbao: "/thongbao Đã cập nhật tính năng mới",
+    thongbao: "/thongbao Hệ thống sẽ bảo trì lúc 22:00",
+    update: "/update Đã bổ sung tuỳ chọn giờ nhận lịch",
     blockbot: "/blockbot 123456",
     unblockbot: "/unblockbot 123456",
     blockai: "/blockai 123456",
@@ -1231,19 +1243,25 @@ async function handleCommand(msg, parsedCommand) {
         if (!argument) {
             await sendMessage(chatId, formatWarningMessage(
                 "THIẾU NỘI DUNG",
-                "> **Cú pháp:** /thongbao [Nội dung cập nhật]\n> **Ví dụ:** /thongbao Đã cập nhật giờ nhận lịch tùy chọn."
+                "> **Cú pháp:** /thongbao [Nội dung thông báo]\n> **Ví dụ:** /thongbao Hệ thống sẽ bảo trì lúc 22:00.\n> Dùng **/update [Nội dung cập nhật]** nếu đây là thông báo cập nhật sản phẩm hoặc bot."
+            ));
+            return;
+        }
+        const message = `# {green}[THÔNG BÁO CHUNG]{/green}\n\n${escapeMarkdownMultiline(argument)}`;
+        const result = await sendBotAnnouncement(message, { operation: "announcement", logLabel: "thông báo chung" });
+        await sendMessage(chatId, formatBroadcastSummary("ĐÃ GỬI THÔNG BÁO CHUNG", result));
+    } else if (command === "update") {
+        if (!await requireOwner(context)) return;
+        if (!argument) {
+            await sendMessage(chatId, formatWarningMessage(
+                "THIẾU NỘI DUNG",
+                "> **Cú pháp:** /update [Nội dung cập nhật]\n> **Ví dụ:** /update Đã bổ sung tuỳ chọn giờ nhận lịch.\n> Dùng **/thongbao [Nội dung thông báo]** cho thông báo chung không phải cập nhật."
             ));
             return;
         }
         const message = `# {green}[THÔNG BÁO CẬP NHẬT]{/green}\n\n${escapeMarkdownMultiline(argument)}`;
-        const result = await sendBotAnnouncement(message);
-        await sendMessage(
-            chatId,
-            "# {green}✓ ĐÃ GỬI THÔNG BÁO{/green}\n\n" +
-            `> **Tổng cuộc trò chuyện:** ${result.targets}\n` +
-            `> **Gửi thành công:** ${result.sent}\n` +
-            `> **Gửi lỗi:** ${result.failed}`
-        );
+        const result = await sendBotAnnouncement(message, { operation: "update", logLabel: "thông báo cập nhật" });
+        await sendMessage(chatId, formatBroadcastSummary("ĐÃ GỬI THÔNG BÁO CẬP NHẬT", result));
     } else if (command === "myid") {
         await sendMessage(
             chatId,

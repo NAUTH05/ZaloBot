@@ -64,7 +64,7 @@ test("/helpadmin có ví dụ quản trị và trỏ tới /help411", () => {
     const admin = main.formatAdminHelp();
 
     assert.match(admin, /Ví dụ:/);
-    for (const command of ["/blockbot", "/accessmode", "/accesslist", "/quanlychat", "/thongtinch", "/chatfeature", "/thongbao", "/danhsach", "/traloi", "/congbo", "/test6h", "/test6hlichtruc", "/helpadmin", "/help411"]) {
+    for (const command of ["/blockbot", "/accessmode", "/accesslist", "/quanlychat", "/thongtinch", "/chatfeature", "/thongbao", "/update", "/danhsach", "/traloi", "/congbo", "/test6h", "/test6hlichtruc", "/helpadmin", "/help411"]) {
         assert.ok(admin.includes(command), `thiếu lệnh quản trị ${command}`);
     }
     for (const internal of ["/themlichtruc", "/sualichtruc", "/xoalichtruc"]) {
@@ -80,9 +80,48 @@ test("/help411 có tiêu đề nội bộ và đầy đủ lệnh phòng 411 kè
     for (const command of ["/lichtruc", "/danhsachlichtruc", "/dangkylich", "/huydangkylich", "/themlichtruc", "/sualichtruc", "/xoalichtruc"]) {
         assert.ok(internal.includes(command), `thiếu lệnh nội bộ ${command}`);
     }
-    assert.ok(internal.includes("`/themlichtruc 24/09 Thuận - Nhân`"));
-    assert.ok(internal.includes("`/sualichtruc #3 Thuận - Sang`"));
-    assert.ok(internal.includes("`/xoalichtruc #3`"));
+    assert.ok(internal.includes("(Ví dụ: /themlichtruc 24/09 Thuận - Nhân, /themlichtruc 25/09 Thuận - Sang)"));
+    assert.ok(internal.includes("(Ví dụ: /sualichtruc #3 Thuận - Sang, /sualichtruc 24/09 Thuận - Sang)"));
+    assert.ok(internal.includes("(Ví dụ: /xoalichtruc #3, /xoalichtruc 24/09)"));
+});
+
+test("mỗi lệnh trong cả ba trợ giúp là một khối gọn theo cùng một định dạng", () => {
+    const outputs = {
+        "/help": main.formatGeneralHelp(),
+        "/helpadmin": main.formatAdminHelp(),
+        "/help411": main.formatInternal411Help()
+    };
+
+    for (const [name, text] of Object.entries(outputs)) {
+        assert.ok(!text.includes("Ví dụ:\n`"), `${name} còn dùng định dạng ví dụ cũ`);
+        assert.ok(!text.includes("Lưu ý:\n"), `${name} còn dùng định dạng lưu ý cũ`);
+    }
+
+    // /help: mọi lệnh công khai đều là "**usage**" rồi tới "(Ví dụ: ...)".
+    for (const entry of HELP_COMMANDS.filter((item) => item.group === "public")) {
+        const block = outputs["/help"].split("\n\n").find((item) => item.startsWith(`**${entry.usage}**`));
+        assert.ok(block, `/help thiếu khối cho ${entry.usage}`);
+        assert.equal(block.split("\n")[0], `**${entry.usage}**`, `khối ${entry.usage} không bắt đầu bằng cú pháp`);
+        assert.ok(block.includes(`(Ví dụ: ${entry.examples.join(", ")})`), `/help sai dòng ví dụ cho ${entry.usage}`);
+        if (entry.note) assert.ok(block.includes(`(Lưu ý: ${entry.note})`), `/help sai dòng lưu ý cho ${entry.usage}`);
+    }
+
+    // /helpadmin: cùng định dạng, và /update tách khỏi /thongbao.
+    const adminText = outputs["/helpadmin"];
+    assert.ok(adminText.includes("**/update [Nội dung cập nhật]**"));
+    assert.ok(adminText.includes("(Ví dụ: /update Đã bổ sung tuỳ chọn giờ nhận lịch)"));
+    assert.ok(adminText.includes("**/thongbao [Nội dung thông báo]**"));
+    assert.ok(adminText.includes("(Ví dụ: /thongbao Hệ thống sẽ bảo trì lúc 22:00)"));
+    assert.ok(!/thongbao[^\n]*cập nhật/i.test(adminText), "/thongbao không được mô tả như thông báo cập nhật");
+
+    // /help411: khối cuối trỏ tới /helpadmin cũng theo định dạng mới.
+    assert.ok(outputs["/help411"].includes("**/helpadmin**\nXem hướng dẫn các lệnh quản trị.\n(Ví dụ: /helpadmin)"));
+});
+
+test("/update chỉ xuất hiện trong trợ giúp quản trị", () => {
+    assert.ok(!main.formatGeneralHelp().includes("/update"), "/update không được nằm trong /help công khai");
+    assert.ok(!main.formatGeneralHelp().includes("/thongbao"), "/thongbao không được nằm trong /help công khai");
+    assert.ok(main.formatAdminHelp().includes("/update"));
 });
 
 test("người dùng thường không nhận được hướng dẫn nội bộ 411", async () => {

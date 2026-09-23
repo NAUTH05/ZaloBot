@@ -121,3 +121,38 @@ test("command execution derives executor identity from the session", async (t) =
     assert.notEqual(executed.userId, "spoofed");
     assert.equal(executed.target.userId, "target-1");
 });
+
+test("Command console target mapping uses real User IDs and rejects a group Chat ID", async (t) => {
+    preserveRuntimeFiles(t);
+    const oldUsername = process.env.ADMIN_USERNAME; const oldPassword = process.env.ADMIN_PASSWORD;
+    process.env.ADMIN_USERNAME = "target-admin"; process.env.ADMIN_PASSWORD = "test-password";
+    let executed = null;
+    const runtime = createAdminServer({ port: 0, executeCommand: async (payload) => { executed = payload; return { ok: true }; } });
+    await new Promise((resolve) => runtime.server.listen(0, "127.0.0.1", resolve)); const port = runtime.server.address().port;
+    t.after(() => { runtime.server.close(); process.env.ADMIN_USERNAME = oldUsername; process.env.ADMIN_PASSWORD = oldPassword; });
+    const login = await request(port, "POST", "/zalobot/api/admin/auth/login", { username: "target-admin", password: "test-password" });
+    const cookie = String(login.headers["set-cookie"][0]).split(";")[0];
+
+    await request(port, "POST", "/zalobot/api/admin/chats", { chatId: "target-private-chat", chatType: "private", displayName: "Target User One" }, cookie);
+    await request(port, "POST", "/zalobot/api/admin/users", { chatId: "target-private-chat", userId: "target-user-1", displayName: "Target User One", chatTitle: "Target User One", chatType: "private" }, cookie);
+    await request(port, "POST", "/zalobot/api/admin/chats", { chatId: "target-group-chat", chatType: "group", displayName: "Target Group" }, cookie);
+
+    const list = await request(port, "GET", "/zalobot/api/admin/target-users", null, cookie);
+    assert.equal(list.status, 200);
+    const entry = list.body.users.find((item) => item.userId === "target-user-1");
+    assert.ok(entry, "danh sách phải chứa User ID thật đã tương tác");
+    assert.equal(entry.displayName, "Target User One");
+    assert.equal(entry.targetChatId, "target-private-chat");
+    assert.equal(entry.targetChatHint, "private");
+    assert.ok(!list.body.users.some((item) => item.userId === "target-group-chat"), "Chat ID của nhóm không được lọt vào danh sách user");
+
+    const rejected = await request(port, "POST", "/zalobot/api/admin/commands", { command: "/help", targetUserId: "target-group-chat" }, cookie);
+    assert.equal(rejected.status, 400);
+    assert.match(rejected.body.error, /Chat ID của một nhóm/);
+
+    const accepted = await request(port, "POST", "/zalobot/api/admin/commands", { command: "/help", targetUserId: "target-user-1", targetChatId: "target-private-chat" }, cookie);
+    assert.equal(accepted.status, 200);
+    assert.equal(executed.target.userId, "target-user-1");
+    assert.equal(executed.target.chatId, "target-private-chat");
+    assert.equal(executed.target.displayName, "Target User One");
+});

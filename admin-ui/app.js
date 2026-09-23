@@ -7,6 +7,10 @@ let dashboard = null;
 let logs = null;
 let settings = null;
 let commandRegistry = [];
+let targetUsers = [];
+let targetUserMatches = [];
+let targetUserActiveIndex = -1;
+const TARGET_USER_LIMIT = 50;
 const pageState = {};
 const PAGE_SIZES = [10, 20, 25, 50, 100];
 function pageSize() { return Number(settings?.defaultPageSize) || 25; }
@@ -129,10 +133,11 @@ function renderSettings() {
   $("#accessSummary").innerHTML = `<div class="access-modes"><div><span>Bot mode</span><strong>${escapeHtml(access.botMode)}</strong></div><div><span>AI mode</span><strong>${escapeHtml(access.aiMode)}</strong></div></div>${[["Bot blocked", access.botBlocked], ["AI blocked", access.aiBlocked], ["Bot allowlist", access.botAllowlist], ["AI allowlist", access.aiAllowlist]].map(([title, items]) => `<section><h3>${title} <span>${items.length}</span></h3>${items.slice(0, 8).map((item) => `<p>${escapeHtml(item.targetName || item.targetId)} <code>${escapeHtml(item.targetId)}</code></p>`).join("") || `<p class="muted">Trống</p>`}</section>`).join("")}`;
   $$('[data-remove-admin]').forEach((button) => button.addEventListener("click", async () => { await api(`/api/admin/settings/admins?id=${encodeURIComponent(button.dataset.removeAdmin)}`, { method: "DELETE" }); await loadData(); }));
   const select = $("#commandAdminIdentity");
-  if (!select) return;
-  const current = select.value;
-  select.innerHTML = `<option value="">Nhập thủ công</option>${(settings.admins || []).map((admin, index) => `<option value="${index}">${escapeHtml(admin.displayName || admin.userId || admin.chatId)} · ${escapeHtml(admin.userId || "-")}</option>`).join("")}`;
-  select.value = current;
+  if (select) {
+    const current = select.value;
+    select.innerHTML = `<option value="">Nhập thủ công</option>${(settings.admins || []).map((admin, index) => `<option value="${index}">${escapeHtml(admin.displayName || admin.userId || admin.chatId)} · ${escapeHtml(admin.userId || "-")}</option>`).join("")}`;
+    select.value = current;
+  }
   const panel = $("#adminSettingsList")?.closest(".panel");
   if (panel && !$("#defaultPageSize")) {
     const form = document.createElement("form"); form.id = "pageSizeForm"; form.innerHTML = `<label>Default rows per page<select id="defaultPageSize" name="defaultPageSize">${PAGE_SIZES.map((n) => `<option value="${n}" ${n === pageSize() ? "selected" : ""}>${n}</option>`).join("")}</select></label><button class="secondary" type="submit">Save page size</button><p id="pageSizeMessage" class="success"></p>`; panel.appendChild(form);
@@ -147,10 +152,233 @@ function renderCommands() {
   $("#commandRegistryList").innerHTML = result.rows.map((item) => `<article class="stack-item"><strong>${escapeHtml(item.name)}</strong><p>${escapeHtml(item.description)}</p><small>${escapeHtml(item.usage)} · ${escapeHtml(item.category)} · ${escapeHtml(item.permission)}</small></article>`).join("") || `<div class="empty-state">No commands found.</div>`;
   pager("#commandRegistryPagination", "commands", result, renderCommands);
 }
+/* ------------------------------------------------------------------ *
+ * Target User ID combobox
+ *
+ * Khóa của danh sách luôn là User ID thật; Chat ID không bao giờ được
+ * đặt vào ô User ID. Ô Target Chat ID vẫn nhập tay được và chỉ được
+ * điền tự động khi có liên kết đủ tin cậy (một chat riêng tư đang
+ * hoạt động), kèm ghi chú rõ ràng cho người dùng.
+ * ------------------------------------------------------------------ */
+
+function targetUserStatusSuffix(status) {
+  if (status === "disabled") return "đã tắt";
+  if (status === "removed") return "đã xoá";
+  return "";
+}
+
+function normalizeTargetUser(raw) {
+  const userId = String(raw?.userId ?? "").trim();
+  if (!userId) return null;
+  const displayName = String(raw?.displayName || "").trim();
+  return {
+    userId,
+    displayName: displayName || `User ${userId}`,
+    status: ["active", "disabled", "removed"].includes(raw?.status) ? raw.status : "active",
+    chatCount: Number(raw?.chatCount) || 0,
+    studentIds: Array.isArray(raw?.studentIds) ? raw.studentIds.map((id) => String(id)).filter(Boolean) : [],
+    targetChatId: String(raw?.targetChatId || "").trim(),
+    targetChatHint: ["private", "multiple", "unresolved", "none"].includes(raw?.targetChatHint) ? raw.targetChatHint : "none"
+  };
+}
+
+// Khử trùng theo User ID: giữ tên hiển thị thật nhất và nhiều ngữ cảnh chat nhất.
+function mergeTargetUsers(list) {
+  const byUserId = new Map();
+  for (const raw of list || []) {
+    const user = normalizeTargetUser(raw);
+    if (!user) continue;
+    const existing = byUserId.get(user.userId);
+    if (!existing) { byUserId.set(user.userId, user); continue; }
+    const existingIsPlaceholder = existing.displayName === `User ${existing.userId}`;
+    byUserId.set(user.userId, {
+      ...existing,
+      displayName: existingIsPlaceholder ? user.displayName : existing.displayName,
+      status: existing.status === "active" ? existing.status : user.status,
+      chatCount: Math.max(existing.chatCount, user.chatCount),
+      studentIds: [...new Set([...existing.studentIds, ...user.studentIds])],
+      targetChatId: existing.targetChatId || user.targetChatId,
+      targetChatHint: existing.targetChatHint === "none" ? user.targetChatHint : existing.targetChatHint
+    });
+  }
+  return [...byUserId.values()].sort((a, b) => a.displayName.localeCompare(b.displayName, "vi") || a.userId.localeCompare(b.userId));
+}
+
+// Dự phòng khi endpoint target-users không khả dụng: suy ra từ workspace users.
+function targetUsersFromWorkspace(workspace) {
+  return mergeTargetUsers((workspace?.users || []).map((user) => {
+    const contexts = (user.chats || []).filter((chat) => chat.chatId && chat.status === "active" && chat.memberStatus !== "removed");
+    const privateContexts = contexts.filter((chat) => chat.chatType === "private");
+    const reliable = contexts.length === 1 && privateContexts.length === 1;
+    const hint = reliable ? "private" : (!contexts.length ? "none" : (contexts.length === 1 ? "unresolved" : "multiple"));
+    return {
+      userId: user.userId,
+      displayName: user.displayName,
+      status: user.status,
+      chatCount: (user.chats || []).length,
+      studentIds: user.studentIds,
+      targetChatId: reliable ? String(privateContexts[0].chatId) : "",
+      targetChatHint: hint
+    };
+  }));
+}
+
+function targetUserOptionHtml(user, index) {
+  const meta = [`ID ${user.userId}`];
+  if (user.studentIds.length) meta.push(user.studentIds.join(", "));
+  if (user.chatCount) meta.push(`${user.chatCount} chat`);
+  const suffix = targetUserStatusSuffix(user.status);
+  if (suffix) meta.push(suffix);
+  return `<li role="option" id="targetUserOption${index}" class="combobox-option${index === targetUserActiveIndex ? " active" : ""}" aria-selected="${index === targetUserActiveIndex ? "true" : "false"}" data-index="${index}"><span class="combobox-name">${escapeHtml(user.displayName)}</span><span class="combobox-meta">${escapeHtml(meta.join(" · "))}</span></li>`;
+}
+
+function renderTargetUserList(query) {
+  const input = $("#targetUserInput");
+  const list = $("#targetUserList");
+  if (!input || !list) return;
+  const needle = String(query ?? input.value).trim().toLowerCase();
+  targetUserMatches = targetUsers.filter((user) => !needle
+    || user.userId.toLowerCase().includes(needle)
+    || user.displayName.toLowerCase().includes(needle)
+    || user.studentIds.some((id) => id.toLowerCase().includes(needle)));
+  targetUserActiveIndex = targetUserMatches.length ? 0 : -1;
+  if (!targetUsers.length) {
+    list.innerHTML = `<li class="combobox-empty" role="presentation">Chưa có user nào tương tác với bot. Nhập User ID thủ công.</li>`;
+  } else if (!targetUserMatches.length) {
+    list.innerHTML = `<li class="combobox-empty" role="presentation">Không có user khớp “${escapeHtml(needle)}”. Vẫn có thể nhập User ID thủ công.</li>`;
+  } else {
+    const visible = targetUserMatches.slice(0, TARGET_USER_LIMIT);
+    const rest = targetUserMatches.length - visible.length;
+    list.innerHTML = visible.map(targetUserOptionHtml).join("") + (rest > 0 ? `<li class="combobox-empty" role="presentation">Còn ${rest} kết quả — gõ thêm để lọc.</li>` : "");
+  }
+  list.hidden = false;
+  input.setAttribute("aria-expanded", "true");
+}
+
+function openTargetUserList() {
+  renderTargetUserList($("#targetUserInput")?.value || "");
+}
+
+function closeTargetUserList() {
+  const list = $("#targetUserList");
+  const input = $("#targetUserInput");
+  if (list) { list.hidden = true; list.innerHTML = ""; }
+  targetUserMatches = [];
+  targetUserActiveIndex = -1;
+  if (input) { input.setAttribute("aria-expanded", "false"); input.removeAttribute("aria-activedescendant"); }
+}
+
+function highlightTargetUser(index) {
+  const total = Math.min(targetUserMatches.length, TARGET_USER_LIMIT);
+  if (index < 0 || index >= total) return;
+  targetUserActiveIndex = index;
+  $$("#targetUserList .combobox-option").forEach((option) => {
+    const active = Number(option.dataset.index) === index;
+    option.classList.toggle("active", active);
+    option.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  const active = $(`#targetUserList .combobox-option[data-index="${index}"]`);
+  const input = $("#targetUserInput");
+  if (!active || !input) return;
+  input.setAttribute("aria-activedescendant", active.id);
+  active.scrollIntoView({ block: "nearest" });
+}
+
+function moveTargetUserActive(step) {
+  const total = Math.min(targetUserMatches.length, TARGET_USER_LIMIT);
+  if (!total) return;
+  const next = targetUserActiveIndex < 0
+    ? (step > 0 ? 0 : total - 1)
+    : (targetUserActiveIndex + step + total) % total;
+  highlightTargetUser(next);
+}
+
+// Chỉ điền Target Chat ID khi có liên kết đáng tin cậy và không ghi đè giá trị nhập tay.
+function applyTargetChatId(user) {
+  const chatInput = $("#targetChatIdInput");
+  if (!chatInput || !user.targetChatId) return false;
+  if (chatInput.value.trim() && chatInput.dataset.autofilled !== "1") return false;
+  chatInput.value = user.targetChatId;
+  chatInput.dataset.autofilled = "1";
+  return true;
+}
+
+function updateTargetUserHint(user, chatFilled) {
+  const hint = $("#targetUserHint");
+  if (!hint || !user) return;
+  const notes = [];
+  if (chatFilled) notes.push(`Đã điền Chat ID riêng tư ${user.targetChatId} cho user này — bạn vẫn có thể sửa lại.`);
+  else if (user.targetChatHint === "multiple") notes.push(`User này có ${user.chatCount} ngữ cảnh chat nên Chat ID không được điền tự động; hãy nhập thủ công nếu cần.`);
+  else if (user.targetChatHint === "unresolved") notes.push("Ngữ cảnh chat của user này chưa xác định là chat riêng tư nên Chat ID không được điền tự động; hãy nhập thủ công nếu cần.");
+  else notes.push("Không có ngữ cảnh chat đang hoạt động nên chỉ User ID được điền.");
+  const suffix = targetUserStatusSuffix(user.status);
+  if (suffix) notes.push(`Bản ghi ${suffix}.`);
+  hint.textContent = notes.join(" ");
+}
+
+function selectTargetUser(index) {
+  const user = targetUserMatches[index];
+  const input = $("#targetUserInput");
+  if (!user || !input) return;
+  input.value = user.userId;
+  input.dataset.selectedUserId = user.userId;
+  const chatFilled = applyTargetChatId(user);
+  closeTargetUserList();
+  updateTargetUserHint(user, chatFilled);
+  input.focus();
+}
+
+function applyTargetUserState() {
+  const input = $("#targetUserInput");
+  const list = $("#targetUserList");
+  const hint = $("#targetUserHint");
+  if (!input || !hint) return;
+  if (list && !list.hidden) renderTargetUserList(input.value);
+  if (input.dataset.selectedUserId) return;
+  hint.textContent = targetUsers.length
+    ? `${targetUsers.length} user đã tương tác với bot. Gõ để tìm hoặc nhập User ID thủ công.`
+    : "Chưa có user nào tương tác với bot. Nhập User ID thủ công.";
+}
+
 function setupCommandConsole() {
   const form = $("#commandForm"); if (!form || form.dataset.ready) return; form.dataset.ready = "1";
-  form.innerHTML = `<label>Command<input name="command" id="commandInput" list="commandSuggestions" placeholder="/lich" required autocomplete="off" /><datalist id="commandSuggestions"></datalist></label><p class="muted">Executing as: <strong>${escapeHtml("authenticated admin")}</strong></p><label>Target User ID (optional)<input name="targetUserId" placeholder="Only for commands that support a target" /></label><label>Target Chat ID (optional)<input name="targetChatId" placeholder="Defaults to the configured admin chat" /></label><button class="primary" type="submit">Execute command</button><pre id="commandResult" class="command-output">No result yet.</pre>`;
-  const input = $("#commandInput"); input.addEventListener("input", () => { const query = input.value.toLowerCase(); $("#commandSuggestions").innerHTML = commandRegistry.filter((item) => item.name.toLowerCase().startsWith(query || "/")).map((item) => `<option value="${escapeHtml(item.usage)}">`).join(""); });
+  form.innerHTML = `<label>Command<input name="command" id="commandInput" list="commandSuggestions" placeholder="/lich" required autocomplete="off" /><datalist id="commandSuggestions"></datalist></label><p class="muted">Executing as: <strong>${escapeHtml("authenticated admin")}</strong></p><div class="field"><label for="targetUserInput">Target User ID (tuỳ chọn)</label><div class="combobox" data-combobox><input name="targetUserId" id="targetUserInput" role="combobox" aria-expanded="false" aria-controls="targetUserList" aria-autocomplete="list" aria-describedby="targetUserHint" placeholder="Chọn user đã tương tác hoặc nhập User ID" autocomplete="off" /><button type="button" class="combobox-toggle" data-combobox-toggle aria-label="Mở danh sách user" tabindex="-1">▾</button><ul class="combobox-list" id="targetUserList" role="listbox" aria-label="User đã tương tác với bot" hidden></ul></div><p class="field-hint" id="targetUserHint">Chưa tải danh sách user.</p></div><label>Target Chat ID (tuỳ chọn)<input name="targetChatId" id="targetChatIdInput" placeholder="Mặc định là chat của admin đang đăng nhập" autocomplete="off" /></label><button class="primary" type="submit">Execute command</button><pre id="commandResult" class="command-output">No result yet.</pre>`;
+
+  const input = $("#commandInput");
+  input.addEventListener("input", () => { const query = input.value.toLowerCase(); $("#commandSuggestions").innerHTML = commandRegistry.filter((item) => item.name.toLowerCase().startsWith(query || "/")).map((item) => `<option value="${escapeHtml(item.usage)}">`).join(""); });
+
+  const userInput = $("#targetUserInput");
+  const chatInput = $("#targetChatIdInput");
+  const toggle = $("[data-combobox-toggle]");
+
+  userInput.addEventListener("focus", openTargetUserList);
+  userInput.addEventListener("click", openTargetUserList);
+  userInput.addEventListener("input", () => { delete userInput.dataset.selectedUserId; openTargetUserList(); });
+  userInput.addEventListener("keydown", (event) => {
+    const open = !$("#targetUserList").hidden;
+    if (event.key === "ArrowDown") { event.preventDefault(); if (open) moveTargetUserActive(1); else openTargetUserList(); return; }
+    if (event.key === "ArrowUp") { event.preventDefault(); if (open) moveTargetUserActive(-1); else openTargetUserList(); return; }
+    if (event.key === "Home" && open) { event.preventDefault(); highlightTargetUser(0); return; }
+    if (event.key === "End" && open) { event.preventDefault(); highlightTargetUser(Math.min(targetUserMatches.length, TARGET_USER_LIMIT) - 1); return; }
+    if (event.key === "Enter") { if (open && targetUserActiveIndex >= 0) { event.preventDefault(); selectTargetUser(targetUserActiveIndex); } return; }
+    if (event.key === "Escape" && open) { event.preventDefault(); closeTargetUserList(); }
+  });
+  // Đóng khi focus rời khỏi combobox, kể cả khi chọn bằng chuột.
+  userInput.addEventListener("blur", () => window.setTimeout(() => { if (!$("[data-combobox]")?.contains(document.activeElement)) closeTargetUserList(); }, 120));
+  userInput.addEventListener("change", () => {
+    const typed = userInput.value.trim();
+    if (!typed) { $("#targetUserHint").textContent = `${targetUsers.length} user đã tương tác với bot. Gõ để tìm hoặc nhập User ID thủ công.`; return; }
+    if (targetUsers.some((user) => user.userId === typed)) return;
+    $("#targetUserHint").textContent = "User ID nhập thủ công. Chat ID không được điền tự động.";
+  });
+  toggle.addEventListener("click", () => { if ($("#targetUserList").hidden) { userInput.focus(); openTargetUserList(); } else closeTargetUserList(); });
+  $("#targetUserList").addEventListener("mousedown", (event) => {
+    const option = event.target.closest(".combobox-option");
+    if (!option) return;
+    event.preventDefault();
+    selectTargetUser(Number(option.dataset.index));
+  });
+  chatInput.addEventListener("input", () => { delete chatInput.dataset.autofilled; });
 }
 
 function renderLogs() {
@@ -176,8 +404,14 @@ function renderAll() { renderOverview(); renderDirectory(); renderUsers(); rende
 async function loadData() {
   setDataState("loading", "Loading admin data...");
   try {
+    // Danh sách user cho Command console: ưu tiên endpoint đã khử trùng,
+    // dự phòng bằng dữ liệu workspace đã tải.
+    const targetUserRequest = api("/api/admin/target-users").then((data) => (Array.isArray(data.users) ? data.users : null)).catch(() => null);
     [workspace, dashboard, logs, settings, commandRegistry] = await Promise.all([api("/api/admin/workspace"), api("/api/admin/dashboard"), api("/api/admin/logs"), api("/api/admin/settings"), api("/api/admin/commands").then((data) => data.commands || [])]);
+    const remoteTargetUsers = await targetUserRequest;
+    targetUsers = mergeTargetUsers(remoteTargetUsers === null ? targetUsersFromWorkspace(workspace) : remoteTargetUsers);
     renderAll();
+    applyTargetUserState();
     setDataState("success", "Updated just now");
     window.setTimeout(() => setDataState("success", ""), 1800);
   } catch (error) {

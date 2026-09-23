@@ -339,6 +339,17 @@ const HELP_COMMANDS = [
 
 The same metadata feeds `/help`, `/helpadmin`, `/help411`, the dashboard "Available commands" list, and autocomplete, so documentation cannot drift from the code. Every documented command includes syntax, a short description, at least one example, and a short note when useful.
 
+All three help outputs render each command as one compact, consistent block — usage first, then the description, then `(Ví dụ: ...)` and `(Lưu ý: ...)` when present:
+
+```text
+**/find [MSSV]**
+Lưu MSSV để dùng cho các lệnh lịch.
+(Ví dụ: /find 123000135)
+(Lưu ý: Lệnh này chỉ lưu MSSV, không tự bật thông báo.)
+```
+
+Blocks are separated by a blank line so the existing `sendMessage()` chunker still splits long help output on entry boundaries.
+
 Public `/help` is grouped by category:
 
 ```text
@@ -378,6 +389,17 @@ Access control uses the existing owner/management checks; no separate permission
 Public commands: `/start`, `/find`, `/lich`, `/lichtuan`, `/lichthi`, `/lichgv`, `/phongtrong`, `/ai`, `/dangky`, `/danhsachdangky`, `/suadangky`, `/xoadangky`, `/huythongbao`, `/batnhaclich`, `/tatnhaclich`, `/trangthainhaclich`, `/sinhnhat`, `/time`, `/myid`, `/help`. Run `/help` for syntax and examples.
 
 Owner commands cover access control, chat health, birthday Q&A, broadcasts, and delivery tests; `/helpadmin` lists the complete owner-only set, and `/help411` documents the internal Room 411 functions.
+
+### Broadcast versus update announcements
+
+Both commands are owner-only and share the same target selection, eligibility rules, delivery handling, and sent/failed summary (`sendBotAnnouncement`). They differ only in intent and heading:
+
+| Command | Heading | Use it for |
+| --- | --- | --- |
+| `/thongbao [Nội dung thông báo]` | `[THÔNG BÁO CHUNG]` | General broadcasts that are not product or bot updates. |
+| `/update [Nội dung cập nhật]` | `[THÔNG BÁO CẬP NHẬT]` | Product or bot update announcements. |
+
+Neither command bypasses chat preferences: `getBroadcastTargets()` still filters every target through `isChatEligible(chatId, "broadcast")`, and each command sends exactly one message per target. Running one command never triggers the other.
 
 ## Timezone
 

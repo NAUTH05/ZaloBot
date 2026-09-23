@@ -46,6 +46,7 @@ All endpoints below require the HttpOnly `zalobot_admin` session cookie except l
 | `GET /zalobot/api/admin/settings` | List configured admin user/chat identities |
 | `POST /zalobot/api/admin/settings/admins` | Add or update an admin identity |
 | `DELETE /zalobot/api/admin/settings/admins?id=...` | Remove an admin identity |
+| `GET /zalobot/api/admin/target-users` | Deduplicated target-user list for the Command console |
 | `POST /zalobot/api/admin/commands` | Execute an existing bot command with a configured admin context |
 
 State-changing requests require same-origin `Origin` headers when a browser supplies one. The server also applies security headers, request-size limits, and a basic IP rate limit.
@@ -77,7 +78,7 @@ The trailing slash on both `location /zalobot/` and `proxy_pass .../zalobot/` pr
 
 Older `unknown` chat types are enriched from the existing interaction registry. New inbound messages persist `private`/`group`, latest `userId`, chat title, and display name in `chatDirectory`. Command execution remains protected by the existing owner check and requires a user/chat identity from `adminSettings` or `OWNER_USER_ID`/`OWNER_CHAT_ID`.
 
-The web UI is organized into tabs: Overview, Chat directory, Users, Groups, Notifications, Duty, Chat health, Command console, Settings, and Logs/Audit. It defaults to a dark blue theme and has a light-theme toggle. Users are separate from chats: a user can have different MSSV and notification times in different group contexts. Admins can add/edit/remove members, promote an identity to admin, manage chat metadata, and review the creation/update timestamp of every notification time.
+The web UI is organized into tabs: Overview, Chat directory, Users, Groups, Notifications, Duty, Chat health, Command console, Settings, and Logs/Audit. It defaults to a dark theme and has a light-theme toggle. The styling is a single flat/minimal design system driven by CSS custom properties in `admin-ui/styles.css`: one radius, spacing, and type scale, 1px borders instead of shadows, visible focus rings, and `prefers-reduced-motion` support for every transition. `admin-ui/admin-controls.css` holds deployment-specific overrides only. Users are separate from chats: a user can have different MSSV and notification times in different group contexts. Admins can add/edit/remove members, promote an identity to admin, manage chat metadata, and review the creation/update timestamp of every notification time.
 
 ## Deployment checklist
 
@@ -95,3 +96,9 @@ The reproducible Windows Server deployment is documented in [deployment/windows/
 Data-heavy dashboard views use shared pagination controls with first/previous/number/next/last navigation, a displayed range, and rows-per-page values of 10, 20, 25, 50, or 100. Search and filters are applied before pagination, and changing either resets the view to page one. The global default is configured under Settings and persisted with `adminSettings` (25 by default).
 
 The Command console and Available commands section are backed by `commandRegistry.js`. The console suggests registered commands as an administrator types and shows the authenticated session as the executor. No executor user ID is accepted from the browser. A target user or chat can still be supplied separately for commands that support targeting; server-side command handling and owner checks remain authoritative.
+
+`GET /zalobot/api/admin/target-users` returns the searchable list behind the Command console's Target User ID field. It is derived from the same merged workspace data as the rest of the dashboard (`chatDirectory`, the interaction registry, and subscriptions), keyed strictly by **User ID** and deduplicated on it. Manual entry stays available: a value that is not in the directory is accepted unchanged.
+
+The console's Target User ID field is a combobox: type to filter by name, MSSV, or ID, or use `↑`/`↓` + `Enter` to pick an entry, `Esc` to close. Selecting an entry writes the real User ID into `targetUserId`. Target Chat ID stays independently editable and is only auto-filled when the association is unambiguous — exactly one active private chat context. The hint under the field states which case applied, and a manually typed Chat ID is never overwritten.
+
+A Chat ID that belongs to a group is never treated as a User ID: the API rejects it with a clear error and the list never exposes it as a user entry. The list is capped at 50 rendered rows with a "type to narrow" note, and shows an explicit empty state when no user has interacted with the bot yet.

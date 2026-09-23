@@ -35,6 +35,7 @@ const {
     updateDutySchedule
 } = require("./dutyScheduleStore");
 const { buildAdminData } = require("./adminDataService");
+const { buildTargetUserOptions, findTargetUser, resolveTargetUserId } = require("./targetUsers");
 const { getPersistenceStatus, readJsonStore, writeJsonStore } = require("./firestorePersistence");
 const { getSystemLogs } = require("./operationalLog");
 
@@ -459,6 +460,10 @@ async function handleApi(request, response, url, options = {}) {
         catch (error) { return json(response, 400, { error: error.message }); }
     }
     if (url.pathname === `${API_PREFIX}/commands` && request.method === "GET") return json(response, 200, { commands: getCommandRegistry() });
+    if (url.pathname === `${API_PREFIX}/target-users` && request.method === "GET") {
+        // Khóa luôn là User ID thật; targetChatId chỉ có khi liên kết đủ tin cậy.
+        return json(response, 200, { users: buildTargetUserOptions(buildAdminData()) });
+    }
     if (url.pathname === `${API_PREFIX}/settings/admins` && ["POST", "PATCH"].includes(request.method)) {
         let body;
         try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
@@ -477,6 +482,13 @@ async function handleApi(request, response, url, options = {}) {
         let body;
         try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
         try {
+            const workspace = buildAdminData();
+            // Chat ID của nhóm không được lặng lẽ dùng làm User ID.
+            const targetUser = resolveTargetUserId(workspace, body.targetUserId);
+            if (!targetUser.ok) {
+                audit("command.execute", request, { result: "rejected", command: body.command, targetUserId: targetUser.userId });
+                return json(response, 400, { error: targetUser.error });
+            }
             const configured = getConfiguredAdminIds();
             const configuredAdmin = getAdminSettings().admins.find((admin) => admin.displayName && admin.displayName.toLowerCase() === String(request.admin.username).toLowerCase());
             const executor = {
@@ -485,7 +497,9 @@ async function handleApi(request, response, url, options = {}) {
                 role: "owner",
                 displayName: configuredAdmin?.displayName || request.admin.username
             };
-            const target = body.targetUserId || body.targetChatId ? { userId: body.targetUserId || null, chatId: body.targetChatId || null } : null;
+            const target = targetUser.userId || body.targetChatId
+                ? { userId: targetUser.userId || null, chatId: body.targetChatId || null, displayName: findTargetUser(workspace, targetUser.userId)?.displayName || null }
+                : null;
             const result = await options.executeCommand({ command: body.command, userId: executor.userId, chatId: body.chatId || configuredAdmin?.chatId || configured.chatIds[0] || executor.userId, displayName: executor.displayName, executor, target });
             audit("command.execute", request, { result: "success", command: body.command, executor: executor.username, userId: executor.userId, target });
             return json(response, 200, result);
