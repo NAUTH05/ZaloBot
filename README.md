@@ -341,14 +341,13 @@ const HELP_COMMANDS = [
 
 The same metadata feeds `/help`, `/helpadmin`, the dashboard "Available commands" list, and autocomplete, so documentation cannot drift from the code. Every documented command includes syntax, a short description, at least one example, and a short note when useful.
 
-Both help outputs render each command as one compact, consistent block — usage first, then the description, then `(Ví dụ: ...)` and `(Lưu ý: ...)` when present:
+Both help outputs render each command as one compact, consistent block — usage first, then the description, then `(Ví dụ: ...)` and `(Lưu ý: ...)` when present. Only canonical names are shown; compatibility aliases never appear in chat help:
 
 ```text
 **/luumssv [MSSV]**
 Lưu MSSV để dùng cho các lệnh lịch.
 (Ví dụ: /luumssv 123000xxx)
 (Lưu ý: Lệnh này chỉ lưu MSSV, không tự bật thông báo.)
-(Tên cũ vẫn dùng được: /find)
 ```
 
 Blocks are separated by a blank line so the existing `sendMessage()` chunker still splits long help output on entry boundaries.
@@ -466,7 +465,9 @@ The script always writes a timestamped JSON backup under `migration-backups/` fi
 
 ## Command renames
 
-Commands are defined once in `helpContent.js`, which now also holds the alias table (`COMMAND_ALIASES`). `parseCommand()` resolves an alias to its canonical name, so every downstream check, the dashboard command console and typo suggestions work on one name per command. Old names remain usable as compatibility aliases and are listed in help output as `(Tên cũ vẫn dùng được: ...)`.
+Commands are defined once in `helpContent.js`, which now also holds the alias table (`COMMAND_ALIASES`). `parseCommand()` resolves an alias to its canonical name, so every downstream check, the dashboard command console and typo suggestions work on one name per command.
+
+Old names keep working for existing users, but they are **not shown in chat help**: `/help` and `/helpadmin` display canonical names only. The rename table below is the documentation of record for the aliases.
 
 | Old | Canonical | Why |
 | --- | --- | --- |

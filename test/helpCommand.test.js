@@ -245,6 +245,56 @@ test("parseCommand quy tên cũ về tên chính tắc nên không chạy hai l�
     assert.deepEqual(main.parseCommand("/dangky 06:30 homnay"), main.parseCommand("/nhanlich 06:30 homnay"));
 });
 
+test("trợ giúp chỉ hiển thị tên chính tắc, không lộ ghi chú tên cũ", () => {
+    const outputs = { "/help": main.formatGeneralHelp(), "/helpadmin": main.formatAdminHelp() };
+
+    // Không còn dòng ghi chú tên cũ ở bất kỳ đâu. Kiểm tra đúng dạng dòng
+    // "(Tên cũ vẫn dùng được: ...)" chứ không bắt cụm "vẫn dùng được" nói chung —
+    // một số lệnh có ghi chú hợp lệ cũng chứa cụm đó.
+    for (const [label, text] of Object.entries(outputs)) {
+        assert.ok(!/Tên cũ/.test(text), `${label} vẫn còn ghi chú tên cũ`);
+        for (const line of text.split("\n")) {
+            assert.ok(!/^\(.*vẫn dùng được:/.test(line), `${label} vẫn còn dòng ghi chú tên cũ: ${line}`);
+        }
+    }
+
+    // Mọi bí danh trong metadata đều không được render thành lệnh. Quét theo dữ
+    // liệu nên không thể bỏ sót một lệnh nào.
+    const aliases = HELP_COMMANDS.flatMap((entry) => (entry.aliases || []).map((alias) => ({ command: entry.command, alias })));
+    assert.ok(aliases.length > 0, "phải còn bí danh trong metadata để kiểm tra");
+    for (const { command, alias } of aliases) {
+        for (const [label, text] of Object.entries(outputs)) {
+            assert.ok(
+                !new RegExp(`(^|[^\\w/])/${alias}([^\\w]|$)`).test(text),
+                `${label} vẫn hiển thị tên cũ /${alias} của /${command}`
+            );
+        }
+    }
+
+    // Tên chính tắc vẫn hiển thị đầy đủ, đúng nhóm.
+    for (const entry of HELP_COMMANDS) {
+        const output = entry.group === "admin" ? outputs["/helpadmin"] : outputs["/help"];
+        assert.ok(output.includes(`**${entry.usage}**`), `thiếu khối lệnh chính tắc ${entry.usage}`);
+    }
+});
+
+test("mọi bí danh vẫn quy về đúng lệnh chính tắc", () => {
+    const pairs = HELP_COMMANDS.flatMap((entry) => (entry.aliases || []).map((alias) => [alias, entry.command]));
+    assert.ok(pairs.length > 0, "phải còn bí danh để kiểm tra tương thích");
+
+    for (const [alias, canonical] of pairs) {
+        const parsed = main.parseCommand(`/${alias}`);
+        assert.ok(parsed, `/${alias} phải phân tích được`);
+        assert.equal(parsed.command, canonical, `/${alias} phải quy về /${canonical}`);
+    }
+
+    // Tên cũ kèm tham số vẫn hoạt động như tên chính tắc.
+    assert.deepEqual(main.parseCommand("/find 123456789"), main.parseCommand("/luumssv 123456789"));
+    assert.deepEqual(main.parseCommand("/dangky 06:30 homnay"), main.parseCommand("/nhanlich 06:30 homnay"));
+    assert.deepEqual(main.parseCommand("/xoadangky 1"), main.parseCommand("/xoagionhanlich 1"));
+    assert.deepEqual(main.parseCommand("/thongtinch 123456"), main.parseCommand("/chitietchat 123456"));
+});
+
 test("gợi ý gõ sai hướng về tên chính tắc", () => {
     assert.equal(main.suggestCommandCorrection("nhanlich0800"), "/nhanlich 08:00 homnay|homsau");
     assert.equal(main.suggestCommandCorrection("luumssv123456789"), "/luumssv 123456789");

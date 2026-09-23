@@ -461,15 +461,16 @@ function groupByCategory(entries) {
 //   (Ví dụ: /luumssv 123000xxx)
 //   (Lưu ý: ...)
 // Khối được ngăn cách bằng dòng trống nên vẫn chia tin đúng theo sendMessage().
+//
+// Chỉ hiển thị TÊN CHÍNH TẮC. Bí danh vẫn nằm trong `aliases` và
+// COMMAND_ALIASES để lệnh cũ tiếp tục chạy, nhưng không xuất hiện trong trợ
+// giúp chat — tài liệu về tên cũ chỉ để trong README.
 function renderCommand(entry) {
     const lines = [`**${entry.usage}**`];
     if (entry.description) lines.push(entry.description);
     const examples = (entry.examples || []).filter(Boolean);
     if (examples.length > 0) lines.push(`(Ví dụ: ${examples.join(", ")})`);
     if (entry.note) lines.push(`(Lưu ý: ${entry.note})`);
-    // Tên cũ vẫn dùng được, nên nói rõ để người dùng cũ biết đường chuyển.
-    const aliases = (entry.aliases || []).filter(Boolean);
-    if (aliases.length > 0) lines.push(`(Tên cũ vẫn dùng được: ${aliases.map((alias) => `/${alias}`).join(", ")})`);
     return lines.join("\n");
 }
 
