@@ -66,6 +66,11 @@ if (!app.includes('id="targetCount"')) fail("Command console must show the selec
 if (!app.includes('id="batchConfirm"')) fail("Command console must confirm before executing a batch");
 if (!app.includes("progress-track")) fail("Command console must show batch progress");
 
+// Phân loại đích phải lấy từ server (commandRegistry trả kèm `targeting`), không
+// giữ bản sao danh sách lệnh trong giao diện — bản sao sẽ lệch khi lệnh đổi tên.
+if (!app.includes("entry.targeting")) fail("Command console must read targeting from the command registry");
+if (/\bperUserName\b|\bbroadcastNames\b/.test(app)) fail("Command console must not keep a local copy of the per-user/broadcast command lists");
+
 // Ô Target Chat ID rời đã bị bỏ: Chat ID chỉ được suy ra khi liên kết đủ tin cậy,
 // không còn là trường nhập tay không có tác dụng.
 if (app.includes('name="targetChatId"')) fail("Command console must not post a standalone targetChatId");

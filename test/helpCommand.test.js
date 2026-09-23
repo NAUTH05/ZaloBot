@@ -20,7 +20,7 @@ const main = require("../main.js");
 const { HELP_COMMANDS } = require("../helpContent");
 
 const MAIN_SOURCE = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
-const PUBLIC_COMMANDS = ["/start", "/luumssv", "/lich", "/lichtuan", "/lichthi", "/lichgv", "/phongtrong", "/ai", "/nhanlich", "/gionhanlich", "/suagionhanlich", "/xoagionhanlich", "/tatnhanlich", "/batnhaclich", "/tatnhaclich", "/trangthainhaclich", "/sinhnhat", "/time", "/myid", "/help"];
+const PUBLIC_COMMANDS = ["/start", "/luumssv", "/lich", "/lichtuan", "/lichthi", "/lichgv", "/phongtrong", "/ai", "/nhanlich", "/gionhanlich", "/suagionhanlich", "/xoagionhanlich", "/tatnhanlich", "/batnhaclich", "/tatnhaclich", "/trangthainhaclich", "/time", "/myid", "/help"];
 // Phòng 411 đã được tách sang bot riêng: không lệnh nào ở đây được quay lại ZaloBot.
 const EXTRACTED_411_COMMANDS = ["/lichtruc", "/danhsachlichtruc", "/dangkylich", "/huydangkylich", "/themlichtruc", "/sualichtruc", "/xoalichtruc", "/xacnhanlichtruc", "/help411", "/test6hlichtruc"];
 
@@ -65,7 +65,7 @@ test("/helpadmin có ví dụ quản trị và không còn lệnh lịch trực"
     const admin = main.formatAdminHelp();
 
     assert.match(admin, /Ví dụ:/);
-    for (const command of ["/blockbot", "/accessmode", "/accesslist", "/quanlychat", "/chitietchat", "/chatfeature", "/thongbao", "/update", "/danhsachcauhoi", "/traloicauhoi", "/congbocauhoi", "/test6h", "/helpadmin"]) {
+    for (const command of ["/blockbot", "/accessmode", "/accesslist", "/quanlychat", "/chitietchat", "/chatfeature", "/thongbao", "/update", "/test6h", "/helpadmin"]) {
         assert.ok(admin.includes(command), `thiếu lệnh quản trị ${command}`);
     }
     for (const extracted of EXTRACTED_411_COMMANDS) {
@@ -235,7 +235,6 @@ test("parseCommand quy tên cũ về tên chính tắc nên không chạy hai l�
         ["/huythongbao", "tatnhanlich"],
         ["/find 123456789", "luumssv"],
         ["/thongtinch 123", "chitietchat"],
-        ["/congbo", "congbocauhoi"]
     ];
     for (const [input, canonical] of pairs) {
         const parsed = main.parseCommand(input);

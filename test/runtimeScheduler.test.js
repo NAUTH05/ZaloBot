@@ -32,9 +32,12 @@ test("scheduler không còn job lịch trực 06:00 sau khi tách phòng 411", (
     assert.ok(changeJob, "thiếu job kiểm tra thay đổi lịch");
     assert.equal(changeJob.config.tz, "Asia/Ho_Chi_Minh");
 
-    const birthdayJob = jobs.find(({ config }) => config.rule === "5 0 27 8 *");
-    assert.ok(birthdayJob, "thiếu job sinh nhật");
-    assert.equal(birthdayJob.config.tz, "Asia/Ho_Chi_Minh");
+    // Tính năng sinh nhật 27/08 đã bị gỡ: không còn job 00:05 ngày 27/08.
+    assert.equal(
+        jobs.find(({ config }) => config.rule === "5 0 27 8 *"),
+        undefined,
+        "không được còn job sinh nhật 27/08"
+    );
 
     for (const job of jobs) {
         assert.equal(job.config.tz, "Asia/Ho_Chi_Minh", `job ${job.config.rule} phải dùng múi giờ Việt Nam`);

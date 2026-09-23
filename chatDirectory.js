@@ -8,7 +8,7 @@ const STATUSES = new Set(["active", "inactive", "disabled", "removed"]);
 // là tính năng thông báo của bot này. Giá trị `notificationOverrides.duty` cũ
 // (nếu có) vẫn được giữ nguyên trên bản ghi vì normalizeRecord chỉ chuẩn hoá
 // các tính năng nằm trong danh sách này.
-const FEATURES = ["schedule", "birthday", "broadcast"];
+const FEATURES = ["schedule", "broadcast"];
 
 function normalizeChatType(value, fallback = "unknown") {
     const raw = String(value == null ? "" : value).trim().toLowerCase();

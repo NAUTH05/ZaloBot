@@ -83,8 +83,8 @@ test("trợ giúp không còn nhóm nội bộ phòng 411", () => {
     }
 });
 
-test("chatDirectory không còn cờ tính năng duty", () => {
-    assert.deepEqual(FEATURES, ["schedule", "birthday", "broadcast"]);
+test("chatDirectory chỉ còn các cờ tính năng đang dùng", () => {
+    assert.deepEqual(FEATURES, ["schedule", "broadcast"]);
 });
 
 test("main.js không hydrate dutyScheduleData và không còn job 06:00", () => {

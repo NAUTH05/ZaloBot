@@ -5,7 +5,7 @@ ZaloBot is a production-oriented Node.js bot for Lạc Hồng University schedul
 ## Features
 
 - Student, weekly, exam, teacher, and empty-room schedule queries.
-- Daily schedule, schedule-change, class-start, birthday, and broadcast notifications.
+- Daily schedule, schedule-change, class-start, and broadcast notifications.
 - Per-user and per-chat MSSV context with separate private/group records.
 - Firestore-backed persistence with legacy JSON migration support.
 - Authenticated admin dashboard and command console backed by the same bot command engine, with multi-recipient command execution.
@@ -306,7 +306,6 @@ bot_state
 ├── interactions
 ├── scheduleSnapshots
 ├── classStartNotifications
-├── birthdayData
 ├── accessControl
 ├── chatDirectory
 ├── adminAudit
@@ -363,7 +362,6 @@ Public `/help` is grouped by category:
 ## LỊCH HỌC       /lich, /lichtuan, /lichthi, /lichgv, /phongtrong
 ## THÔNG BÁO      /nhanlich, /gionhanlich, /suagionhanlich, /xoagionhanlich,
                   /tatnhanlich, /batnhaclich, /tatnhaclich, /trangthainhaclich
-## SINH NHẬT      /sinhnhat
 ## TIỆN ÍCH       /ai, /time, /myid
 ## TRỢ GIÚP       /help
 ```
@@ -417,6 +415,55 @@ The migration only adds the field. IDs, MSSV, chat/user ownership, enabled state
 
 The dashboard shows the day on every time chip and in the subscription detail, and its add/edit dialog offers the same two choices with the same validation as the chat commands.
 
+## Record IDs
+
+Commands that act on a stored record take a **plain positive integer** ID:
+
+```text
+/suagionhanlich ID hh:mm homnay|homsau
+/suagionhanlich 1 06:00 homnay
+/suagionhanlich 1 homsau
+/xoagionhanlich ID
+/xoagionhanlich 1
+```
+
+- `ID` is written **without** `#`. `/gionhanlich` prints entries as `ID 1 · 06:00`, and the dashboard shows `ID 1 · 06:00` too.
+- The older `#1` form is still accepted as **input**, so existing habits keep working — it is simply no longer used in instructions, examples or errors.
+- `0`, negative numbers, decimals and non-numeric values are rejected with a syntax message.
+- `ID` is a record ID. It is not an MSSV (9 digits), a User ID or a Chat ID.
+
+## Removed: the 27/08 birthday feature
+
+The personal birthday Q&A feature was removed completely:
+
+- the public `/sinhnhat` command;
+- the owner commands `/danhsachcauhoi`, `/themcauhoi`, `/suacauhoi`, `/xoacauhoi`, `/traloicauhoi`, `/congbocauhoi`;
+- all of their old aliases — `/danhsach`, `/them`, `/sua`, `/xoa`, `/traloi`, `/congbo` — so no alias can still trigger birthday behaviour;
+- the invitation and published-answer messages, invitation/result delivery tracking;
+- the `5 0 27 8 *` job (00:05 on 27/08) and the invitation triggered by an incoming chat interaction;
+- `birthdayStore.js`;
+- `birthdayData` from Firestore startup hydration;
+- the `birthday` chat feature flag (`/chatfeature` now accepts `schedule|broadcast` only).
+
+`/thongbao`, `/update` and `/test6h` are unchanged general broadcasts. `test/birthdayRemoval.test.js` fails if any of the above comes back.
+
+### Old storage location
+
+`bot_state/birthdayData` in the shared Firestore database, previously mirrored locally as `birthdayData.json` (gitignored).
+
+The document is **left untouched**. The bot no longer reads or writes it, so nothing changes it from here on.
+
+### Optional cleanup
+
+Run this only after the deployment is verified and you are sure the data is no longer wanted:
+
+```bash
+npm run cleanup:birthday-data              # dry-run: reports what exists, writes a local backup
+npm run cleanup:birthday-data -- --apply   # deletes the document, after the backup succeeds
+```
+
+The script always writes a timestamped JSON backup under `migration-backups/` first and refuses to delete if the backup fails. It never runs automatically and is never called by the bot.
+
 ## Command renames
 
 Commands are defined once in `helpContent.js`, which now also holds the alias table (`COMMAND_ALIASES`). `parseCommand()` resolves an alias to its canonical name, so every downstream check, the dashboard command console and typo suggestions work on one name per command. Old names remain usable as compatibility aliases and are listed in help output as `(Tên cũ vẫn dùng được: ...)`.
@@ -429,18 +476,12 @@ Commands are defined once in `helpContent.js`, which now also holds the alias ta
 | `/suadangky` | `/suagionhanlich` | |
 | `/xoadangky` | `/xoagionhanlich` | |
 | `/huythongbao` | `/tatnhanlich` | Pairs with `/nhanlich`; also accepts `/ngungnhanlich` |
-| `/danhsach` | `/danhsachcauhoi` | `/danhsach` alone did not say what was listed |
-| `/them` | `/themcauhoi` | `/them` alone did not say what was added |
-| `/sua` | `/suacauhoi` | |
-| `/xoa` | `/xoacauhoi` | |
-| `/traloi` | `/traloicauhoi` | |
-| `/congbo` | `/congbocauhoi` | |
 | `/thongtinch` | `/chitietchat` | Abbreviation was typo-prone |
 | `/vohieuchat` | `/tamdungchat` | |
 | `/kichhoatchat` | `/batlaichat` | Pairs with `/tamdungchat` |
 | `/thuchatchat` | `/kiemtrachat` | "thử chat" was vague |
 
-Already-clear commands were deliberately left alone: `/lich`, `/lichtuan`, `/lichthi`, `/lichgv`, `/phongtrong`, `/sinhnhat`, `/ai`, `/time`, `/myid`, `/help`, `/start`, `/batnhaclich`, `/tatnhaclich`, `/trangthainhaclich`, `/xoachat`, `/chatfeature`, `/blockbot`, `/allowbot`, `/blockai`, `/allowai`, `/accessmode`, `/accesslist`, `/thongbao`, `/update`, `/test6h`, `/helpadmin`.
+Already-clear commands were deliberately left alone: `/lich`, `/lichtuan`, `/lichthi`, `/lichgv`, `/phongtrong`, `/ai`, `/time`, `/myid`, `/help`, `/start`, `/batnhaclich`, `/tatnhaclich`, `/trangthainhaclich`, `/xoachat`, `/chatfeature`, `/blockbot`, `/allowbot`, `/blockai`, `/allowai`, `/accessmode`, `/accesslist`, `/thongbao`, `/update`, `/test6h`, `/helpadmin`.
 
 **Note:** `/tatnhanlich` (turn off schedule notifications) and `/tatnhaclich` (turn off class-start reminders) differ by one character. Their help entries cross-reference each other, but if this proves confusing in practice the class-start pair is the better candidate to rename.
 
@@ -450,9 +491,9 @@ The internal Room 411 duty-schedule feature no longer lives in this repository. 
 
 | | ZaloBot (this project) | Room 411 bot |
 | --- | --- | --- |
-| Purpose | LHU class schedules, birthdays, broadcasts, access control, chat management | Room 411 duty roster and the 06:00 daily duty notification |
+| Purpose | LHU class schedules, broadcasts, access control, chat management | Room 411 duty roster and the 06:00 daily duty notification |
 | Firestore | Same project and database | Same project and database |
-| Owns (writes) | `subscriptions`, `interactions`, `scheduleSnapshots`, `classStartNotifications`, `birthdayData`, `accessControl`, `chatDirectory`, `adminAudit`, `adminLogs`, `adminSettings` | `dutyScheduleData` |
+| Owns (writes) | `subscriptions`, `interactions`, `scheduleSnapshots`, `classStartNotifications`, `accessControl`, `chatDirectory`, `adminAudit`, `adminLogs`, `adminSettings` | `dutyScheduleData` |
 | Reads | Its own stores | `chatDirectory` (read-only) |
 
 This bot does not read or write `dutyScheduleData`, does not schedule any 06:00 duty job, and does not expose duty endpoints or a Duty dashboard tab. Existing Room 411 records in Firestore are left untouched for the new bot to pick up.
@@ -461,9 +502,9 @@ Migration, cutover order, and rollback steps are documented in the Room 411 bot'
 
 ## Bot commands
 
-Public commands: `/start`, `/luumssv`, `/lich`, `/lichtuan`, `/lichthi`, `/lichgv`, `/phongtrong`, `/ai`, `/nhanlich`, `/gionhanlich`, `/suagionhanlich`, `/xoagionhanlich`, `/tatnhanlich`, `/batnhaclich`, `/tatnhaclich`, `/trangthainhaclich`, `/sinhnhat`, `/time`, `/myid`, `/help`. Run `/help` for syntax and examples.
+Public commands: `/start`, `/luumssv`, `/lich`, `/lichtuan`, `/lichthi`, `/lichgv`, `/phongtrong`, `/ai`, `/nhanlich`, `/gionhanlich`, `/suagionhanlich`, `/xoagionhanlich`, `/tatnhanlich`, `/batnhaclich`, `/tatnhaclich`, `/trangthainhaclich`, `/time`, `/myid`, `/help`. Run `/help` for syntax and examples.
 
-Owner commands cover access control, chat health, birthday Q&A, broadcasts, and delivery tests; `/helpadmin` lists the complete owner-only set.
+Owner commands cover access control, chat health, broadcasts, and delivery tests; `/helpadmin` lists the complete owner-only set.
 
 ### Broadcast versus update announcements
 

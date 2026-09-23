@@ -10,6 +10,7 @@ const {
     normalizeCommandName,
     resolveCommandTargeting
 } = require("../commandTargeting");
+const { findCommand } = require("../commandRegistry");
 const { HELP_COMMANDS } = require("../helpContent");
 
 test("lệnh theo từng người được phân loại đúng", () => {
@@ -27,11 +28,9 @@ test("lệnh broadcast được tách riêng và có giải thích phạm vi", (
         assert.equal(isBroadcastCommand(name), true);
     }
     // Các lệnh gửi tới mọi chat phải nằm trong nhóm broadcast.
-    for (const name of ["thongbao", "update", "congbocauhoi", "test6h"]) {
+    for (const name of ["thongbao", "update", "test6h"]) {
         assert.ok(BROADCAST_COMMANDS.has(name), `/${name} phải được coi là broadcast`);
     }
-    // Tên cũ vẫn được phân loại y như tên chính tắc.
-    assert.equal(resolveCommandTargeting("congbo").mode, TARGETING.BROADCAST);
 });
 
 test("lệnh toàn cục bị từ chối kèm lý do cụ thể", () => {
@@ -62,19 +61,27 @@ test("tên cũ được quy về tên chính tắc trước khi phân loại", (
         ["thongtinch", "chitietchat"],
         ["vohieuchat", "tamdungchat"],
         ["kichhoatchat", "batlaichat"],
-        ["thuchatchat", "kiemtrachat"],
-        ["danhsach", "danhsachcauhoi"],
-        ["them", "themcauhoi"],
-        ["sua", "suacauhoi"],
-        ["xoa", "xoacauhoi"],
-        ["traloi", "traloicauhoi"],
-        ["congbo", "congbocauhoi"]
+        ["thuchatchat", "kiemtrachat"]
     ];
     for (const [alias, canonical] of pairs) {
         const aliasResult = resolveCommandTargeting(alias);
         const canonicalResult = resolveCommandTargeting(canonical);
         assert.equal(aliasResult.command, canonical, `/${alias} phải quy về /${canonical}`);
         assert.equal(aliasResult.mode, canonicalResult.mode, `/${alias} và /${canonical} phải cùng nhóm`);
+    }
+});
+
+test("lệnh sinh nhật và mọi bí danh cũ của chúng đã bị gỡ hoàn toàn", () => {
+    const removed = ["sinhnhat", "danhsachcauhoi", "themcauhoi", "suacauhoi", "xoacauhoi", "traloicauhoi", "congbocauhoi", "danhsach", "them", "sua", "xoa", "traloi", "congbo"];
+    for (const name of removed) {
+        // Không còn lệnh, không còn bí danh.
+        assert.equal(findCommand(name), null, `/${name} vẫn còn trong sổ lệnh`);
+        // Và không thể chạy qua Command console.
+        assert.equal(resolveCommandTargeting(name).mode, TARGETING.NONE, `/${name} vẫn chọn được đích`);
+    }
+    // Các lệnh broadcast dùng chung vẫn hoạt động.
+    for (const name of ["thongbao", "update", "test6h"]) {
+        assert.equal(resolveCommandTargeting(name).mode, TARGETING.BROADCAST, `/${name} phải vẫn là broadcast`);
     }
 });
 

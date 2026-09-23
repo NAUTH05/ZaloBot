@@ -29,3 +29,7 @@ recent_json/
 adminAudit.json
 adminLogs.json
 adminSettings.json
+
+# Sao lưu cục bộ do scripts/migrateNotificationTargetDays.js và
+# scripts/cleanupBirthdayData.js ghi ra trước khi thay đổi dữ liệu.
+migration-backups/

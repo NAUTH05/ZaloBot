@@ -38,7 +38,6 @@ const PER_USER_COMMANDS = new Set([
     "batnhaclich",
     "tatnhaclich",
     "trangthainhaclich",
-    "sinhnhat",
     "ai",
     "help"
 ]);
@@ -47,7 +46,6 @@ const PER_USER_COMMANDS = new Set([
 const BROADCAST_COMMANDS = new Set([
     "thongbao",
     "update",
-    "congbocauhoi",
     "test6h"
 ]);
 
@@ -72,11 +70,6 @@ const NOT_TARGETABLE_REASONS = {
     kiemtrachat: "gửi tin kiểm tra tới một CHAT — hãy dùng Target Chat ID.",
     xoachat: "xóa mềm một CHAT — hãy dùng Target Chat ID.",
     chatfeature: "ghi đè tính năng của một CHAT — hãy dùng Target Chat ID.",
-    danhsachcauhoi: "chỉ liệt kê câu hỏi sinh nhật.",
-    themcauhoi: "quản lý ngân hàng câu hỏi sinh nhật, không gắn với một người.",
-    suacauhoi: "quản lý ngân hàng câu hỏi sinh nhật, không gắn với một người.",
-    xoacauhoi: "quản lý ngân hàng câu hỏi sinh nhật, không gắn với một người.",
-    traloicauhoi: "quản lý ngân hàng câu hỏi sinh nhật, không gắn với một người.",
     helpadmin: "chỉ hiển thị trợ giúp quản trị cho chính người gõ lệnh."
 };
 

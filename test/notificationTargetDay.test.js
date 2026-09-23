@@ -355,3 +355,117 @@ test("đăng ký cùng giờ cho hai ngày đích tạo hai mốc riêng", () =>
     const afterThird = normalizeNotificationTimes(require("../subscriptions").getSubscription(context));
     assert.equal(afterThird.length, 2);
 });
+
+/* -------------------------------------------------------------------------- */
+/* ID dạng số trần là chính tắc, "#ID" chỉ còn là tương thích                 */
+/* -------------------------------------------------------------------------- */
+
+async function runCommand(command, chatId = "chat-a", userId = "user-a") {
+    sent.length = 0;
+    const parsed = main.parseCommand(command);
+    await main.handleCommand(
+        { text: command, chat: { id: chatId, type: "private" }, from: { id: userId, display_name: "Người thử" } },
+        parsed
+    );
+    return sent.map((item) => item.text).join("\n");
+}
+
+// Các mốc hiện có của một ngữ cảnh, đã chuẩn hoá.
+function times(context) {
+    return normalizeNotificationTimes(require("../subscriptions").getSubscription(context));
+}
+
+test("parseRecordId chấp nhận số trần và tiền tố #, từ chối mọi giá trị sai", () => {
+    assert.equal(main.parseRecordId("1"), 1);
+    assert.equal(main.parseRecordId("#1"), 1);
+    assert.equal(main.parseRecordId(" 12 "), 12);
+    assert.equal(main.parseRecordId("#42"), 42);
+
+    for (const bad of ["0", "#0", "-1", "#-1", "1.5", "-1.5", "abc", "", "   ", "#", "1a", "a1", "1 2", "0x1", null, undefined]) {
+        assert.equal(main.parseRecordId(bad), null, `parseRecordId(${JSON.stringify(bad)}) phải bị từ chối`);
+    }
+});
+
+test("cú pháp sửa giờ nhận cả ID trần lẫn #ID", () => {
+    assert.deepEqual(main.parseSuaGioNhanLichArgument("1 06:00 homnay"), { id: 1, notificationTime: "06:00", targetDayOffset: 0 });
+    assert.deepEqual(main.parseSuaGioNhanLichArgument("#1 06:00 homnay"), { id: 1, notificationTime: "06:00", targetDayOffset: 0 });
+    assert.deepEqual(main.parseSuaGioNhanLichArgument("1 homsau"), { id: 1, notificationTime: null, targetDayOffset: 1 });
+    assert.deepEqual(main.parseSuaGioNhanLichArgument("#2 homsau"), { id: 2, notificationTime: null, targetDayOffset: 1 });
+
+    assert.equal(main.parseSuaGioNhanLichArgument("0 06:00 homnay").error, "id");
+    assert.equal(main.parseSuaGioNhanLichArgument("#0 06:00 homnay").error, "id");
+    assert.equal(main.parseSuaGioNhanLichArgument("-1 06:00 homnay").error, "syntax");
+    assert.equal(main.parseSuaGioNhanLichArgument("1.5 06:00 homnay").error, "syntax");
+});
+
+test("/suagionhanlich 1 06:00 homnay sửa đúng bản ghi, #1 vẫn tương thích", async () => {
+    const context = seed({
+        times: [
+            { id: 1, time: "06:00", targetDayOffset: 0 },
+            { id: 2, time: "21:00", targetDayOffset: 1 }
+        ]
+    });
+
+    const plain = await runCommand("/suagionhanlich 1 06:30 homnay");
+    assert.match(plain, /ĐÃ CẬP NHẬT/);
+    assert.deepEqual(times(context).map((item) => [item.id, item.time, item.targetDayOffset]), [[1, "06:30", 0], [2, "21:00", 1]]);
+
+    // Dạng #ID cũ trỏ đúng cùng bản ghi.
+    const hashed = await runCommand("/suagionhanlich #1 08:00 homsau");
+    assert.match(hashed, /ĐÃ CẬP NHẬT/);
+    assert.equal(times(context)[0].time, "08:00");
+    assert.equal(times(context)[0].targetDayOffset, 1);
+    // Bản ghi ID 2 không bị đụng tới.
+    assert.equal(times(context)[1].time, "21:00");
+    assert.equal(times(context)[1].targetDayOffset, 1);
+});
+
+test("sửa chỉ ngày đích bằng ID trần không đổi giờ", async () => {
+    const context = seed({ times: [{ id: 1, time: "06:30", targetDayOffset: 0 }] });
+
+    const output = await runCommand("/suagionhanlich 1 homsau");
+    assert.match(output, /ĐÃ CẬP NHẬT/);
+    assert.equal(times(context)[0].time, "06:30");
+    assert.equal(times(context)[0].targetDayOffset, 1);
+});
+
+test("/xoagionhanlich 1 và #1 trỏ đúng cùng một ID", async () => {
+    const context = seed({
+        times: [
+            { id: 1, time: "06:00", targetDayOffset: 0 },
+            { id: 2, time: "06:00", targetDayOffset: 1 }
+        ]
+    });
+
+    const hashed = await runCommand("/xoagionhanlich #2");
+    assert.match(hashed, /ĐÃ XÓA/);
+    assert.deepEqual(times(context).map((item) => item.id), [1]);
+
+    const plain = await runCommand("/xoagionhanlich 1");
+    assert.match(plain, /ĐÃ XÓA/);
+    assert.equal(times(context).length, 0);
+});
+
+test("ID 0, số âm, số thập phân và chuỗi rác bị từ chối, không đụng bản ghi", async () => {
+    const context = seed({ times: [{ id: 1, time: "06:00", targetDayOffset: 0 }] });
+
+    for (const bad of ["0", "#0", "-1", "1.5", "abc", "#", "1a"]) {
+        const edit = await runCommand(`/suagionhanlich ${bad} 06:00 homnay`);
+        assert.match(edit, /SAI CÚ PHÁP/, `sửa với ID "${bad}" phải bị từ chối`);
+
+        const remove = await runCommand(`/xoagionhanlich ${bad}`);
+        assert.match(remove, /SAI CÚ PHÁP/, `xoá với ID "${bad}" phải bị từ chối`);
+    }
+
+    // Không bản ghi nào bị thay đổi hay xoá.
+    assert.deepEqual(times(context).map((item) => [item.id, item.time, item.targetDayOffset]), [[1, "06:00", 0]]);
+});
+
+test("danh sách giờ hiển thị ID không có dấu #", async () => {
+    seed({ times: [{ id: 1, time: "06:00", targetDayOffset: 0 }, { id: 2, time: "20:00", targetDayOffset: 1 }] });
+
+    const output = await runCommand("/gionhanlich");
+    assert.match(output, /ID 1/);
+    assert.match(output, /ID 2/);
+    assert.ok(!/#1|#2/.test(output), "danh sách không được hiển thị #1/#2");
+});

@@ -11,7 +11,8 @@
     "migrate:target-day": "node scripts/migrateNotificationTargetDays.js",
     "verify:firebase-admin": "node scripts/verifyFirebaseAdmin.js",
     "build:admin": "node scripts/verifyAdminUi.js",
-    "test": "node --test --test-force-exit"
+    "test": "node --test --test-force-exit",
+    "cleanup:birthday-data": "node scripts/cleanupBirthdayData.js"
   },
   "dependencies": {
     "dotenv": "^17.2.1",

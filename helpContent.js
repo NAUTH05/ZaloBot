@@ -12,7 +12,6 @@ const CATEGORY = {
     SCHEDULE: "Lịch học",
     NOTIFY: "Thông báo",
     UTILITY: "Tiện ích",
-    BIRTHDAY: "Sinh nhật",
     HELP: "Trợ giúp",
     ACCESS: "Phân quyền",
     CHAT: "Quản lý chat",
@@ -118,23 +117,23 @@ const HELP_COMMANDS = [
     {
         command: "suagionhanlich",
         aliases: ["suadangky"],
-        usage: "/suagionhanlich #ID hh:mm homnay|homsau",
+        usage: "/suagionhanlich ID hh:mm homnay|homsau",
         group: HELP_GROUPS.PUBLIC,
         category: CATEGORY.NOTIFY,
         permission: "user",
         description: "Đổi giờ và ngày đích của một mốc nhận lịch đã lưu.",
-        examples: ["/suagionhanlich #1 06:30 homnay", "/suagionhanlich #2 21:00 homsau", "/suagionhanlich #2 homsau"],
+        examples: ["/suagionhanlich 1 06:30 homnay", "/suagionhanlich 2 21:00 homsau", "/suagionhanlich 2 homsau"],
         note: "Đổi được cả giờ lẫn ngày đích; chỉ nhập homnay|homsau nếu chỉ muốn đổi ngày. Dùng /gionhanlich để xem ID."
     },
     {
         command: "xoagionhanlich",
         aliases: ["xoadangky"],
-        usage: "/xoagionhanlich #ID",
+        usage: "/xoagionhanlich ID",
         group: HELP_GROUPS.PUBLIC,
         category: CATEGORY.NOTIFY,
         permission: "user",
         description: "Xóa một mốc nhận lịch đã lưu.",
-        examples: ["/xoagionhanlich #1"],
+        examples: ["/xoagionhanlich 1"],
         note: "Dùng /gionhanlich để xem ID cần xóa."
     },
     {
@@ -175,16 +174,6 @@ const HELP_COMMANDS = [
         permission: "user",
         description: "Xem trạng thái nhắc giờ bắt đầu tiết học.",
         examples: ["/trangthainhaclich"]
-    },
-    {
-        command: "sinhnhat",
-        usage: "/sinhnhat [Câu hỏi]",
-        group: HELP_GROUPS.PUBLIC,
-        category: CATEGORY.BIRTHDAY,
-        permission: "user",
-        description: "Gửi câu hỏi cho phần hỏi đáp sinh nhật 27/08.",
-        examples: ["/sinhnhat Điều bạn mong chờ nhất ở tuổi mới là gì?"],
-        note: "Chỉ nhận câu hỏi trong ngày 27/08 theo giờ Việt Nam."
     },
     {
         command: "ai",
@@ -377,7 +366,7 @@ const HELP_COMMANDS = [
     },
     {
         command: "chatfeature",
-        usage: "/chatfeature [Chat ID] [schedule|birthday|broadcast] [on|off|auto]",
+        usage: "/chatfeature [Chat ID] [schedule|broadcast] [on|off|auto]",
         group: HELP_GROUPS.ADMIN,
         category: CATEGORY.CHAT,
         permission: "owner",
@@ -403,67 +392,6 @@ const HELP_COMMANDS = [
         description: "Gửi thông báo cập nhật sản phẩm hoặc bot tới mọi chat đang hoạt động.",
         examples: ["/update Đã bổ sung tuỳ chọn giờ nhận lịch"],
         note: "Chỉ dùng cho thông tin cập nhật. Dùng /thongbao cho thông báo chung khác."
-    },
-    {
-        command: "danhsachcauhoi",
-        aliases: ["danhsach"],
-        usage: "/danhsachcauhoi [Năm]",
-        group: HELP_GROUPS.ADMIN,
-        category: CATEGORY.BIRTHDAY,
-        permission: "owner",
-        description: "Xem danh sách câu hỏi sinh nhật.",
-        examples: ["/danhsachcauhoi", "/danhsachcauhoi 2026"]
-    },
-    {
-        command: "themcauhoi",
-        aliases: ["them"],
-        usage: "/themcauhoi [Câu hỏi]",
-        group: HELP_GROUPS.ADMIN,
-        category: CATEGORY.BIRTHDAY,
-        permission: "owner",
-        description: "Thêm một câu hỏi sinh nhật thủ công.",
-        examples: ["/themcauhoi Điều bạn muốn hỏi tôi là gì?"]
-    },
-    {
-        command: "suacauhoi",
-        aliases: ["sua"],
-        usage: "/suacauhoi [ID] [Câu hỏi mới]",
-        group: HELP_GROUPS.ADMIN,
-        category: CATEGORY.BIRTHDAY,
-        permission: "owner",
-        description: "Sửa nội dung một câu hỏi sinh nhật.",
-        examples: ["/suacauhoi 1 Nội dung câu hỏi mới"]
-    },
-    {
-        command: "xoacauhoi",
-        aliases: ["xoa"],
-        usage: "/xoacauhoi [ID]",
-        group: HELP_GROUPS.ADMIN,
-        category: CATEGORY.BIRTHDAY,
-        permission: "owner",
-        description: "Xóa một câu hỏi sinh nhật.",
-        examples: ["/xoacauhoi 1"]
-    },
-    {
-        command: "traloicauhoi",
-        aliases: ["traloi"],
-        usage: "/traloicauhoi [ID] [Câu trả lời]",
-        group: HELP_GROUPS.ADMIN,
-        category: CATEGORY.BIRTHDAY,
-        permission: "owner",
-        description: "Trả lời một câu hỏi sinh nhật.",
-        examples: ["/traloicauhoi 1 Nội dung trả lời"]
-    },
-    {
-        command: "congbocauhoi",
-        aliases: ["congbo"],
-        usage: "/congbocauhoi [Năm]",
-        group: HELP_GROUPS.ADMIN,
-        category: CATEGORY.BIRTHDAY,
-        permission: "owner",
-        description: "Công bố hỏi đáp sinh nhật tới mọi chat.",
-        examples: ["/congbocauhoi", "/congbocauhoi 2026"],
-        note: "Bỏ trống năm để dùng năm hiện tại. Bản công bố không đổi sẽ không gửi trùng."
     },
     {
         command: "test6h",

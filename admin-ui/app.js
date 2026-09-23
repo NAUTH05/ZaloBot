@@ -60,7 +60,7 @@ function targetDayText(targetDayOffset) {
 
 function timeChips(times = []) {
   return times.length
-    ? `<div class="chip-list">${times.map((item) => `<span class="time-chip"><strong>#${escapeHtml(item.id)} · ${escapeHtml(item.time)}</strong><small>${escapeHtml(targetDayLabel(item.targetDayOffset))} · ${escapeHtml(formatDate(item.createdAt))}</small></span>`).join("")}</div>`
+    ? `<div class="chip-list">${times.map((item) => `<span class="time-chip"><strong>ID ${escapeHtml(item.id)} · ${escapeHtml(item.time)}</strong><small>${escapeHtml(targetDayLabel(item.targetDayOffset))} · ${escapeHtml(formatDate(item.createdAt))}</small></span>`).join("")}</div>`
     : `<span class="muted">Chưa có giờ nhận lịch</span>`;
 }
 
@@ -634,17 +634,11 @@ function setupCommandConsole() {
     const entry = commandRegistry.find((item) => item.name.slice(1) === name || (item.aliases || []).includes(name));
     if (!entry) { $("#commandResult").textContent = `Không nhận diện được lệnh “/${name}”.`; return; }
 
-    // Cùng quy tắc với commandTargeting.js: chỉ dẫn hướng trước, server vẫn là
-    // nơi quyết định cuối cùng.
-    const broadcastNames = ["thongbao", "update", "congbo", "test6h"];
-    const perUserName = ["start", "find", "lich", "lichtuan", "lichthi", "lichgv", "phongtrong", "dangky", "danhsachdangky", "suadangky", "xoadangky", "huythongbao", "batnhaclich", "tatnhaclich", "trangthainhaclich", "sinhnhat", "ai", "help"];
-    let targeting;
-    if (broadcastNames.includes(name)) {
-      targeting = { mode: "broadcast", broadcastScope: "Lệnh này gửi tới mọi chat đang hoạt động, nên hệ thống chỉ chạy đúng một lần dù bạn chọn bao nhiêu người." };
-    } else if (perUserName.includes(name)) {
-      targeting = { mode: "per-user" };
-    } else {
-      $("#commandResult").textContent = `Lệnh /${name} không chạy theo từng người được nên không thể chọn nhiều người nhận.`;
+    // Phân loại đích lấy từ server (commandTargeting.js) để dashboard không giữ
+    // bản sao danh sách lệnh của riêng nó. Server vẫn là nơi quyết định cuối cùng.
+    const targeting = entry.targeting;
+    if (!targeting || targeting.mode === "none") {
+      $("#commandResult").textContent = targeting?.reason || `Lệnh /${name} không chạy theo từng người được nên không thể chọn nhiều người nhận.`;
       return;
     }
 
@@ -726,7 +720,7 @@ async function openChat(chatId) {
 
 function openSubscription(key) {
   const item = workspace.subscriptions.find((entry) => entry.key === key); if (!item) return;
-  showDialog(`${item.studentId || "Đăng ký nhận lịch"} · ${item.chatName}`, `<div class="detail-grid"><div class="detail"><span>Người dùng</span><strong>${escapeHtml(item.userDisplayName || item.userId || "Bản ghi cũ")}</strong><code>${escapeHtml(item.userId || "-")}</code></div><div class="detail"><span>Chat</span><strong>${escapeHtml(item.chatName)}</strong><code>${escapeHtml(item.chatId)}</code></div><div class="detail"><span>Loại chat</span><strong>${escapeHtml(item.chatType)}</strong></div><div class="detail"><span>Cập nhật bản ghi</span><strong>${escapeHtml(formatDate(item.updatedAt))}</strong></div></div>${item.schema === "legacy" ? `<div class="warning-box">Bản ghi cũ không có userId rõ ràng; chỉ nên xem hoặc xóa.</div>` : `<form id="subscriptionMetaForm"><div class="form-grid"><label>MSSV<input name="studentId" value="${escapeHtml(item.studentId)}" /></label><label>Tên sinh viên<input name="studentName" value="${escapeHtml(item.studentName)}" /></label><label>Tên người dùng<input name="userDisplayName" value="${escapeHtml(item.userDisplayName)}" /></label></div><button class="primary" type="submit">Lưu thông tin</button></form><h3>Giờ nhận lịch</h3><div class="stack">${item.notificationTimes.map((time) => `<article class="stack-item horizontal"><div><strong>#${time.id} · ${escapeHtml(time.time)}</strong><small>${escapeHtml(targetDayText(time.targetDayOffset))} · đăng ký ${escapeHtml(formatDate(time.createdAt))} · cập nhật ${escapeHtml(formatDate(time.updatedAt))}</small></div><div class="row-actions"><button data-time-edit="${time.id}">Sửa</button><button class="danger-text" data-time-remove="${time.id}">Xóa</button></div></article>`).join("") || `<div class="empty-state">Chưa có giờ nhận lịch.</div>`}<button class="secondary" id="addTimeButton">Thêm giờ</button></div><div class="action-bar"><button data-sub-action="${item.notificationsEnabled ? "disable" : "enable"}">${item.notificationsEnabled ? "Tắt nhận lịch" : "Bật nhận lịch"}</button><button class="danger-text" data-sub-action="delete">Xóa đăng ký</button></div>`}`);
+  showDialog(`${item.studentId || "Đăng ký nhận lịch"} · ${item.chatName}`, `<div class="detail-grid"><div class="detail"><span>Người dùng</span><strong>${escapeHtml(item.userDisplayName || item.userId || "Bản ghi cũ")}</strong><code>${escapeHtml(item.userId || "-")}</code></div><div class="detail"><span>Chat</span><strong>${escapeHtml(item.chatName)}</strong><code>${escapeHtml(item.chatId)}</code></div><div class="detail"><span>Loại chat</span><strong>${escapeHtml(item.chatType)}</strong></div><div class="detail"><span>Cập nhật bản ghi</span><strong>${escapeHtml(formatDate(item.updatedAt))}</strong></div></div>${item.schema === "legacy" ? `<div class="warning-box">Bản ghi cũ không có userId rõ ràng; chỉ nên xem hoặc xóa.</div>` : `<form id="subscriptionMetaForm"><div class="form-grid"><label>MSSV<input name="studentId" value="${escapeHtml(item.studentId)}" /></label><label>Tên sinh viên<input name="studentName" value="${escapeHtml(item.studentName)}" /></label><label>Tên người dùng<input name="userDisplayName" value="${escapeHtml(item.userDisplayName)}" /></label></div><button class="primary" type="submit">Lưu thông tin</button></form><h3>Giờ nhận lịch</h3><div class="stack">${item.notificationTimes.map((time) => `<article class="stack-item horizontal"><div><strong>ID ${time.id} · ${escapeHtml(time.time)}</strong><small>${escapeHtml(targetDayText(time.targetDayOffset))} · đăng ký ${escapeHtml(formatDate(time.createdAt))} · cập nhật ${escapeHtml(formatDate(time.updatedAt))}</small></div><div class="row-actions"><button data-time-edit="${time.id}">Sửa</button><button class="danger-text" data-time-remove="${time.id}">Xóa</button></div></article>`).join("") || `<div class="empty-state">Chưa có giờ nhận lịch.</div>`}<button class="secondary" id="addTimeButton">Thêm giờ</button></div><div class="action-bar"><button data-sub-action="${item.notificationsEnabled ? "disable" : "enable"}">${item.notificationsEnabled ? "Tắt nhận lịch" : "Bật nhận lịch"}</button><button class="danger-text" data-sub-action="delete">Xóa đăng ký</button></div>`}`);
   if (item.schema === "legacy") return;
   $("#subscriptionMetaForm").addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); await updateSubscription(item, { action: "metadata", ...Object.fromEntries(form.entries()) }); });
   $("#addTimeButton").addEventListener("click", () => openTimeDialog({ item }));
@@ -739,7 +733,7 @@ function openSubscription(key) {
 // chat: homnay (0) hoặc homsau (1).
 function openTimeDialog({ item, time }) {
   const isEdit = Boolean(time);
-  showDialog(isEdit ? `Sửa mốc #${time.id}` : "Thêm giờ nhận lịch", `
+  showDialog(isEdit ? `Sửa mốc ID ${time.id}` : "Thêm giờ nhận lịch", `
     <form id="timeForm">
       <div class="form-grid">
         <label>Giờ nhận lịch (HH:mm)

@@ -109,9 +109,11 @@ Every command is classified in `commandTargeting.js`:
 
 | Mode | Behaviour | Examples |
 | --- | --- | --- |
-| `per-user` | Runs once per recipient, with that recipient's context. | `/luumssv`, `/lich`, `/lichtuan`, `/nhanlich`, `/xoagionhanlich`, `/tatnhanlich`, `/batnhaclich`, `/sinhnhat`, `/ai`, `/help` |
-| `broadcast` | Sends to every active chat, so it runs **exactly once** regardless of how many recipients are selected. The confirmation explains this. | `/thongbao`, `/update`, `/congbocauhoi`, `/test6h` |
+| `per-user` | Runs once per recipient, with that recipient's context. | `/luumssv`, `/lich`, `/lichtuan`, `/nhanlich`, `/xoagionhanlich`, `/tatnhanlich`, `/batnhaclich`, `/ai`, `/help` |
+| `broadcast` | Sends to every active chat, so it runs **exactly once** regardless of how many recipients are selected. The confirmation explains this. | `/thongbao`, `/update`, `/test6h` |
 | `none` | Not meaningful per user. The batch is rejected with a specific reason **before anything runs**. | `/quanlychat`, `/accessmode`, `/accesslist`, `/chitietchat`, `/chatfeature`, `/myid`, `/time`, `/helpadmin` |
+
+The dashboard does not keep its own copy of these lists: `GET /api/admin/commands` returns a `targeting` block per command, produced by `commandTargeting.js`, and the console uses it directly. That is why a renamed command cannot silently become untargetable in the UI.
 
 A command that is not in either explicit list defaults to `none`, so a new command is never silently targetable. Old command names (for example `/dangky`) resolve to the same canonical name before classification, so an alias and its canonical form behave identically and a recipient is never processed twice.
 
