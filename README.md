@@ -5,7 +5,7 @@ ZaloBot is a production-oriented Node.js bot for Lạc Hồng University schedul
 ## Features
 
 - Student, weekly, exam, teacher, and empty-room schedule queries.
-- Daily schedule, schedule-change, class-start, duty, birthday, and broadcast notifications.
+- Daily schedule, schedule-change, class-start, birthday, and broadcast notifications.
 - Per-user and per-chat MSSV context with separate private/group records.
 - Firestore-backed persistence with legacy JSON migration support.
 - Authenticated admin dashboard and command console backed by the same bot command engine.
@@ -269,7 +269,7 @@ The runtime handles `SIGINT` and `SIGTERM` (what `pm2 restart` / `pm2 stop` send
 
 ## Admin dashboard
 
-The dashboard listens only on `127.0.0.1:${ADMIN_PORT}${ADMIN_BASE_PATH}/` and is protected by an HttpOnly, SameSite session cookie. It provides overview health, chat directory, users and MSSV, subscriptions, duty schedules, command execution, settings, logs, and audit history. The console calls the same backend command engine; it does not duplicate business logic.
+The dashboard listens only on `127.0.0.1:${ADMIN_PORT}${ADMIN_BASE_PATH}/` and is protected by an HttpOnly, SameSite session cookie. It provides overview health, chat directory, users and MSSV, subscriptions, command execution, settings, logs, and audit history. The console calls the same backend command engine; it does not duplicate business logic.
 
 Dashboard sessions are kept in memory. A PM2 restart requires signing in again, which is expected.
 
@@ -304,7 +304,6 @@ bot_state
 ├── interactions
 ├── scheduleSnapshots
 ├── classStartNotifications
-├── dutyScheduleData
 ├── birthdayData
 ├── accessControl
 ├── chatDirectory
@@ -315,12 +314,13 @@ bot_state
 
 Each document stores `{ payload: "<json>", updatedAt: "<iso>" }`. Writes are serialized through a queue and retried three times; failures are surfaced in the dashboard persistence status and in the logs. `flushPersistenceWrites()` awaits the queue and is called during normal shutdown.
 
+`bot_state/dutyScheduleData` is **not** listed above: the Room 411 duty feature was extracted into a separate bot that now owns that document exclusively. This bot neither hydrates nor writes it, and `importJsonDirectory()` skips it so a JSON migration can never overwrite the extracted data. See [Room 411 bot](#room-411-bot-separate-project).
+
 ## Help command structure
 
 ```text
 /help       normal user commands
 /helpadmin  management commands (owner only)
-/help411    internal Room 411 functions (owner only)
 ```
 
 All help content lives in `helpContent.js` as reusable metadata:
@@ -337,9 +337,9 @@ const HELP_COMMANDS = [
 ];
 ```
 
-The same metadata feeds `/help`, `/helpadmin`, `/help411`, the dashboard "Available commands" list, and autocomplete, so documentation cannot drift from the code. Every documented command includes syntax, a short description, at least one example, and a short note when useful.
+The same metadata feeds `/help`, `/helpadmin`, the dashboard "Available commands" list, and autocomplete, so documentation cannot drift from the code. Every documented command includes syntax, a short description, at least one example, and a short note when useful.
 
-All three help outputs render each command as one compact, consistent block — usage first, then the description, then `(Ví dụ: ...)` and `(Lưu ý: ...)` when present:
+Both help outputs render each command as one compact, consistent block — usage first, then the description, then `(Ví dụ: ...)` and `(Lưu ý: ...)` when present:
 
 ```text
 **/find [MSSV]**
@@ -364,31 +364,26 @@ Public `/help` is grouped by category:
 ## TRỢ GIÚP       /help
 ```
 
-## Internal Room 411 functions
+## Room 411 bot (separate project)
 
-Room 411 duty features are internal. Their commands are **not** listed in `/help` or in any public onboarding message. Owners read them with `/help411`:
+The internal Room 411 duty-schedule feature no longer lives in this repository. It was extracted into a separate, self-contained bot that runs as its own process with its own codebase, package, PM2 entry and tests.
 
-```text
-# INTERNAL - ROOM 411
-```
+| | ZaloBot (this project) | Room 411 bot |
+| --- | --- | --- |
+| Purpose | LHU class schedules, birthdays, broadcasts, access control, chat management | Room 411 duty roster and the 06:00 daily duty notification |
+| Firestore | Same project and database | Same project and database |
+| Owns (writes) | `subscriptions`, `interactions`, `scheduleSnapshots`, `classStartNotifications`, `birthdayData`, `accessControl`, `chatDirectory`, `adminAudit`, `adminLogs`, `adminSettings` | `dutyScheduleData` |
+| Reads | Its own stores | `chatDirectory` (read-only) |
 
-| Command | Purpose |
-| --- | --- |
-| `/lichtruc` | View today's duty assignment. |
-| `/danhsachlichtruc` | View the full duty list. |
-| `/dangkylich` | Enable the daily 06:00 duty notification. |
-| `/huydangkylich` | Disable the daily duty notification. |
-| `/themlichtruc [dd/mm] [Tên 1 - Tên 2]` | Add one or more duty rows. |
-| `/sualichtruc [ID hoặc dd/mm] [Nội dung mới]` | Edit a duty row. |
-| `/xoalichtruc [ID hoặc dd/mm]` | Delete a duty row. |
+This bot does not read or write `dutyScheduleData`, does not schedule any 06:00 duty job, and does not expose duty endpoints or a Duty dashboard tab. Existing Room 411 records in Firestore are left untouched for the new bot to pick up.
 
-Access control uses the existing owner/management checks; no separate permission system exists. Room 411 logic itself is unchanged — only its visibility in help output.
+Migration, cutover order, and rollback steps are documented in the Room 411 bot's `docs/CUTOVER.md`; data ownership rules are in its `docs/DATA_OWNERSHIP.md`.
 
 ## Bot commands
 
 Public commands: `/start`, `/find`, `/lich`, `/lichtuan`, `/lichthi`, `/lichgv`, `/phongtrong`, `/ai`, `/dangky`, `/danhsachdangky`, `/suadangky`, `/xoadangky`, `/huythongbao`, `/batnhaclich`, `/tatnhaclich`, `/trangthainhaclich`, `/sinhnhat`, `/time`, `/myid`, `/help`. Run `/help` for syntax and examples.
 
-Owner commands cover access control, chat health, birthday Q&A, broadcasts, and delivery tests; `/helpadmin` lists the complete owner-only set, and `/help411` documents the internal Room 411 functions.
+Owner commands cover access control, chat health, birthday Q&A, broadcasts, and delivery tests; `/helpadmin` lists the complete owner-only set.
 
 ### Broadcast versus update announcements
 

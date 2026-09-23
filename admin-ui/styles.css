@@ -567,34 +567,6 @@ td code { margin-top: 0; }
 .member-preview small { color: var(--muted); font-size: var(--fs-xs); }
 .context-line { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; padding: 2px 0; }
 
-/* ---------------------------------------------------------------- duty ---- */
-
-.schedule-item {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    gap: var(--s-3);
-    align-items: center;
-    padding: var(--s-3);
-    border: 1px solid var(--border);
-    border-radius: var(--r-md);
-    background: var(--surface-2);
-}
-
-.schedule-item > div > strong, .schedule-item > div > small { display: block; }
-.schedule-item small { margin-top: 2px; color: var(--muted); font-size: var(--fs-xs); }
-
-.date-box {
-    width: 58px;
-    padding: var(--s-2);
-    border-radius: var(--r-md);
-    background: var(--accent-soft);
-    color: var(--accent);
-    text-align: center;
-    font-size: var(--fs-sm);
-}
-
-.date-box small { font-size: var(--fs-xs); }
-
 /* -------------------------------------------------------------- console --- */
 
 .command-form { display: grid; gap: var(--s-4); }
@@ -836,8 +808,6 @@ dialog h3:first-of-type { margin-top: var(--s-4); }
     table { min-width: 720px; }
     .horizontal { align-items: flex-start; flex-wrap: wrap; }
 
-    .schedule-item { grid-template-columns: auto minmax(0, 1fr); }
-    .schedule-item .row-actions { grid-column: 1 / -1; }
 
     .combobox-list { max-height: 220px; }
     dialog { width: calc(100% - 2 * var(--s-3)); padding: var(--s-4); }

@@ -21,7 +21,8 @@ const { HELP_COMMANDS } = require("../helpContent");
 
 const MAIN_SOURCE = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
 const PUBLIC_COMMANDS = ["/start", "/find", "/lich", "/lichtuan", "/lichthi", "/lichgv", "/phongtrong", "/ai", "/dangky", "/danhsachdangky", "/suadangky", "/xoadangky", "/huythongbao", "/batnhaclich", "/tatnhaclich", "/trangthainhaclich", "/sinhnhat", "/time", "/myid", "/help"];
-const ROOM_411_COMMANDS = ["/lichtruc", "/danhsachlichtruc", "/dangkylich", "/huydangkylich", "/themlichtruc", "/sualichtruc", "/xoalichtruc", "/help411"];
+// Phòng 411 đã được tách sang bot riêng: không lệnh nào ở đây được quay lại ZaloBot.
+const EXTRACTED_411_COMMANDS = ["/lichtruc", "/danhsachlichtruc", "/dangkylich", "/huydangkylich", "/themlichtruc", "/sualichtruc", "/xoalichtruc", "/xacnhanlichtruc", "/help411", "/test6hlichtruc"];
 
 function message(userId = "regular-user", chatId = "regular-chat") {
     return { text: "", chat: { id: chatId, type: "private" }, from: { id: userId, display_name: "Người dùng" } };
@@ -42,54 +43,41 @@ test("/help có ví dụ, có lệnh người dùng và không chứa phòng 411
     for (const command of PUBLIC_COMMANDS) {
         assert.ok(help.includes(command), `thiếu lệnh công khai ${command}`);
     }
-    for (const internal of ROOM_411_COMMANDS) {
-        assert.ok(!help.includes(internal), `không được để ${internal} trong /help`);
+    for (const extracted of EXTRACTED_411_COMMANDS) {
+        assert.ok(!help.includes(extracted), `không được để ${extracted} trong /help`);
     }
     assert.ok(!help.includes("/helpadmin"), "không được để /helpadmin trong /help");
     assert.ok(!help.includes("/blockbot"), "không được để lệnh quản trị trong /help");
     assert.ok(!help.includes("411"), "không được nhắc tới phòng 411 trong /help");
 });
 
-test("gợi ý khi gõ sai lệnh không lộ lệnh nội bộ phòng 411", () => {
-    for (const typo of ["lichtru", "themlichtru", "xoalichtru", "dangkylich", "huydangkylich", "danhsachlichtru", "help41"]) {
+test("gợi ý khi gõ sai lệnh không lộ lệnh phòng 411 đã tách", () => {
+    for (const typo of ["lichtru", "themlichtru", "xoalichtru", "dangkylich", "huydangkylich", "danhsachlichtru", "help41", "test6hlichtru"]) {
         const suggestion = main.suggestCommandCorrection(typo);
         assert.ok(
-            !/lichtruc|dangkylich|huydangkylich|help411/.test(suggestion),
-            `${typo} gợi ý lộ lệnh nội bộ: ${suggestion}`
+            !/lichtruc|dangkylich|huydangkylich|help411|test6hlichtruc|xacnhanlichtruc/.test(suggestion),
+            `${typo} gợi ý lệnh đã tách sang bot khác: ${suggestion}`
         );
     }
 });
 
-test("/helpadmin có ví dụ quản trị và trỏ tới /help411", () => {
+test("/helpadmin có ví dụ quản trị và không còn lệnh lịch trực", () => {
     const admin = main.formatAdminHelp();
 
     assert.match(admin, /Ví dụ:/);
-    for (const command of ["/blockbot", "/accessmode", "/accesslist", "/quanlychat", "/thongtinch", "/chatfeature", "/thongbao", "/update", "/danhsach", "/traloi", "/congbo", "/test6h", "/test6hlichtruc", "/helpadmin", "/help411"]) {
+    for (const command of ["/blockbot", "/accessmode", "/accesslist", "/quanlychat", "/thongtinch", "/chatfeature", "/thongbao", "/update", "/danhsach", "/traloi", "/congbo", "/test6h", "/helpadmin"]) {
         assert.ok(admin.includes(command), `thiếu lệnh quản trị ${command}`);
     }
-    for (const internal of ["/themlichtruc", "/sualichtruc", "/xoalichtruc"]) {
-        assert.ok(!admin.includes(internal), `${internal} chỉ nên nằm trong /help411`);
+    for (const extracted of EXTRACTED_411_COMMANDS) {
+        assert.ok(!admin.includes(extracted), `${extracted} đã được tách sang bot khác`);
     }
+    assert.ok(!admin.includes("411"), "không được nhắc tới phòng 411 trong /helpadmin");
 });
 
-test("/help411 có tiêu đề nội bộ và đầy đủ lệnh phòng 411 kèm ví dụ", () => {
-    const internal = main.formatInternal411Help();
-
-    assert.match(internal, /INTERNAL - ROOM 411/);
-    assert.match(internal, /Ví dụ:/);
-    for (const command of ["/lichtruc", "/danhsachlichtruc", "/dangkylich", "/huydangkylich", "/themlichtruc", "/sualichtruc", "/xoalichtruc"]) {
-        assert.ok(internal.includes(command), `thiếu lệnh nội bộ ${command}`);
-    }
-    assert.ok(internal.includes("(Ví dụ: /themlichtruc 24/09 Thuận - Nhân, /themlichtruc 25/09 Thuận - Sang)"));
-    assert.ok(internal.includes("(Ví dụ: /sualichtruc #3 Thuận - Sang, /sualichtruc 24/09 Thuận - Sang)"));
-    assert.ok(internal.includes("(Ví dụ: /xoalichtruc #3, /xoalichtruc 24/09)"));
-});
-
-test("mỗi lệnh trong cả ba trợ giúp là một khối gọn theo cùng một định dạng", () => {
+test("/help và /helpadmin dùng cùng một định dạng khối gọn", () => {
     const outputs = {
         "/help": main.formatGeneralHelp(),
-        "/helpadmin": main.formatAdminHelp(),
-        "/help411": main.formatInternal411Help()
+        "/helpadmin": main.formatAdminHelp()
     };
 
     for (const [name, text] of Object.entries(outputs)) {
@@ -97,13 +85,13 @@ test("mỗi lệnh trong cả ba trợ giúp là một khối gọn theo cùng m
         assert.ok(!text.includes("Lưu ý:\n"), `${name} còn dùng định dạng lưu ý cũ`);
     }
 
-    // /help: mọi lệnh công khai đều là "**usage**" rồi tới "(Ví dụ: ...)".
-    for (const entry of HELP_COMMANDS.filter((item) => item.group === "public")) {
-        const block = outputs["/help"].split("\n\n").find((item) => item.startsWith(`**${entry.usage}**`));
-        assert.ok(block, `/help thiếu khối cho ${entry.usage}`);
+    for (const entry of HELP_COMMANDS) {
+        const output = entry.group === "admin" ? outputs["/helpadmin"] : outputs["/help"];
+        const block = output.split("\n\n").find((item) => item.startsWith(`**${entry.usage}**`));
+        assert.ok(block, `thiếu khối cho ${entry.usage}`);
         assert.equal(block.split("\n")[0], `**${entry.usage}**`, `khối ${entry.usage} không bắt đầu bằng cú pháp`);
-        assert.ok(block.includes(`(Ví dụ: ${entry.examples.join(", ")})`), `/help sai dòng ví dụ cho ${entry.usage}`);
-        if (entry.note) assert.ok(block.includes(`(Lưu ý: ${entry.note})`), `/help sai dòng lưu ý cho ${entry.usage}`);
+        assert.ok(block.includes(`(Ví dụ: ${entry.examples.join(", ")})`), `sai dòng ví dụ cho ${entry.usage}`);
+        if (entry.note) assert.ok(block.includes(`(Lưu ý: ${entry.note})`), `sai dòng lưu ý cho ${entry.usage}`);
     }
 
     // /helpadmin: cùng định dạng, và /update tách khỏi /thongbao.
@@ -113,9 +101,6 @@ test("mỗi lệnh trong cả ba trợ giúp là một khối gọn theo cùng m
     assert.ok(adminText.includes("**/thongbao [Nội dung thông báo]**"));
     assert.ok(adminText.includes("(Ví dụ: /thongbao Hệ thống sẽ bảo trì lúc 22:00)"));
     assert.ok(!/thongbao[^\n]*cập nhật/i.test(adminText), "/thongbao không được mô tả như thông báo cập nhật");
-
-    // /help411: khối cuối trỏ tới /helpadmin cũng theo định dạng mới.
-    assert.ok(outputs["/help411"].includes("**/helpadmin**\nXem hướng dẫn các lệnh quản trị.\n(Ví dụ: /helpadmin)"));
 });
 
 test("/update chỉ xuất hiện trong trợ giúp quản trị", () => {
@@ -124,17 +109,13 @@ test("/update chỉ xuất hiện trong trợ giúp quản trị", () => {
     assert.ok(main.formatAdminHelp().includes("/update"));
 });
 
-test("người dùng thường không nhận được hướng dẫn nội bộ 411", async () => {
-    const messages = await run("help411");
-    assert.equal(messages.length, 1);
-    assert.match(messages[0], /KHÔNG CÓ QUYỀN/);
-    assert.ok(!messages[0].includes("INTERNAL - ROOM 411"));
-    assert.ok(!messages[0].includes("/themlichtruc"));
-});
-
-test("quản trị viên nhận được hướng dẫn nội bộ 411", async () => {
-    const messages = await run("help411", { owner: true });
-    assert.ok(messages.join("\n").includes("INTERNAL - ROOM 411"));
+test("các lệnh phòng 411 đã tách không còn được xử lý", async () => {
+    for (const command of EXTRACTED_411_COMMANDS.map((item) => item.slice(1))) {
+        const messages = await run(command, { owner: true });
+        assert.equal(messages.length, 1, `/${command} phải trả về đúng một tin`);
+        assert.match(messages[0], /LỆNH KHÔNG HỢP LỆ/, `/${command} không được còn được xử lý`);
+        assert.ok(!messages[0].includes("LỊCH TRỰC"), `/${command} không được trả về nội dung lịch trực`);
+    }
 });
 
 test("/help và /helpadmin gửi được qua cơ chế chia tin hiện tại", async () => {
@@ -177,10 +158,6 @@ test("mọi lệnh trong trợ giúp đều được main.js xử lý", () => {
     }
 });
 
-test("/help411 dùng đúng kiểm tra quyền hiện có", () => {
-    assert.match(MAIN_SOURCE, /command === "help411"[\s\S]{0,200}requireOwner\(context\)/);
-});
-
 test("parse giờ đăng ký lịch học tùy chọn", () => {
     assert.deepEqual(main.parseDangKyArgument("05:30", "123456789"), {
         studentId: "123456789",
@@ -198,7 +175,6 @@ test("parse giờ đăng ký lịch học tùy chọn", () => {
 
 test("parseCommand bóc tách lệnh chính xác với mọi định dạng mention Zalo trong nhóm", () => {
     assert.deepEqual(main.parseCommand("/help"), { command: "help", argument: "" });
-    assert.deepEqual(main.parseCommand("/help411"), { command: "help411", argument: "" });
     assert.deepEqual(main.parseCommand("/helpadmin"), { command: "helpadmin", argument: "" });
     assert.deepEqual(main.parseCommand("/help @Bot MrYukitoBoBo"), { command: "help", argument: "" });
     assert.deepEqual(main.parseCommand("/help@Bot MrYukitoBoBo"), { command: "help", argument: "" });

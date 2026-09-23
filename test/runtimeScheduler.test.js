@@ -5,7 +5,7 @@ process.env.BOT_TOKEN ||= "test-token";
 
 const { registerRuntimeJobs } = require("../main");
 
-test("scheduler đăng ký gửi lịch trực phòng 411 lúc 06:00 giờ Việt Nam", () => {
+test("scheduler không còn job lịch trực 06:00 sau khi tách phòng 411", () => {
     const jobs = [];
     const scheduler = {
         scheduleJob(config, handler) {
@@ -15,13 +15,28 @@ test("scheduler đăng ký gửi lịch trực phòng 411 lúc 06:00 giờ Việ
 
     registerRuntimeJobs(scheduler);
 
-    const dutyJob = jobs.find(({ config }) => config.rule === "0 6 * * *");
-    assert.ok(dutyJob, "thiếu job gửi lịch trực 411 lúc 06:00");
-    assert.equal(dutyJob.config.tz, "Asia/Ho_Chi_Minh");
-    assert.equal(typeof dutyJob.handler, "function");
+    // Lịch trực phòng 411 đã được tách sang bot riêng nên job 06:00 không còn ở đây.
+    // Hai bot không bao giờ được gửi cùng một thông báo lịch trực.
+    assert.equal(
+        jobs.find(({ config }) => config.rule === "0 6 * * *"),
+        undefined,
+        "ZaloBot không được còn job gửi lịch trực 06:00"
+    );
 
     const minuteJob = jobs.find(({ config }) => config.rule === "* * * * *");
     assert.ok(minuteJob, "thiếu scheduler trung tâm chạy mỗi phút");
     assert.equal(minuteJob.config.tz, "Asia/Ho_Chi_Minh");
     assert.equal(typeof minuteJob.handler, "function");
+
+    const changeJob = jobs.find(({ config }) => config.rule === "*/15 * * * *");
+    assert.ok(changeJob, "thiếu job kiểm tra thay đổi lịch");
+    assert.equal(changeJob.config.tz, "Asia/Ho_Chi_Minh");
+
+    const birthdayJob = jobs.find(({ config }) => config.rule === "5 0 27 8 *");
+    assert.ok(birthdayJob, "thiếu job sinh nhật");
+    assert.equal(birthdayJob.config.tz, "Asia/Ho_Chi_Minh");
+
+    for (const job of jobs) {
+        assert.equal(job.config.tz, "Asia/Ho_Chi_Minh", `job ${job.config.rule} phải dùng múi giờ Việt Nam`);
+    }
 });

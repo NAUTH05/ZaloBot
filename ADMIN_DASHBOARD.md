@@ -28,17 +28,17 @@ All endpoints below require the HttpOnly `zalobot_admin` session cookie except l
 | `POST /zalobot/api/admin/auth/login` | Start an admin session; rate limited after failed attempts |
 | `POST /zalobot/api/admin/auth/logout` | Revoke the current session |
 | `GET /zalobot/api/admin/dashboard` | Health, counts, invalid chats, errors, and recent audit events |
-| `GET /zalobot/api/admin/workspace` | Unified users, groups, chats, MSSV subscriptions, notification times, duty data, and access summary |
+| `GET /zalobot/api/admin/workspace` | Unified users, groups, chats, MSSV subscriptions, notification times, and access summary |
 | `GET /zalobot/api/admin/chats` | Filter users/groups by `status` and `type` |
 | `GET /zalobot/api/admin/users` | Unified user/member records, MSSV, chat contexts, and notification status |
 | `POST /zalobot/api/admin/users` | Add a user/member to a private chat or group |
 | `PATCH /zalobot/api/admin/users/:userId` | Update display name or active/disabled/removed membership state in a chat |
 | `DELETE /zalobot/api/admin/users/:userId?chatId=...` | Remove a member; add `hard=1` to also delete that chat-specific subscription |
 | `GET /zalobot/api/admin/groups` | Registered group chats |
-| `GET /zalobot/api/admin/chats/:chatId` | Chat detail, subscriptions, and duty registration |
+| `GET /zalobot/api/admin/chats/:chatId` | Chat detail and subscriptions |
 | `PATCH /zalobot/api/admin/chats/:chatId` | Change status or a feature override |
 | `POST /zalobot/api/admin/chats/:chatId/retry` | Send a test through the existing `sendNotification()` path |
-| `GET /zalobot/api/admin/notifications` | Active schedule/duty registrations and duty schedule data |
+| `GET /zalobot/api/admin/notifications` | Active schedule registrations |
 | `GET /zalobot/api/admin/audit` | Recent administrative and authentication events |
 | `GET /zalobot/api/admin/logs` | Bot warnings/errors, delivery errors, and audit events |
 | `POST /zalobot/api/admin/chats` | Add or update a chat-directory record |
@@ -78,7 +78,7 @@ The trailing slash on both `location /zalobot/` and `proxy_pass .../zalobot/` pr
 
 Older `unknown` chat types are enriched from the existing interaction registry. New inbound messages persist `private`/`group`, latest `userId`, chat title, and display name in `chatDirectory`. Command execution remains protected by the existing owner check and requires a user/chat identity from `adminSettings` or `OWNER_USER_ID`/`OWNER_CHAT_ID`.
 
-The web UI is organized into tabs: Overview, Chat directory, Users, Groups, Notifications, Duty, Chat health, Command console, Settings, and Logs/Audit. It defaults to a dark theme and has a light-theme toggle. The styling is a single flat/minimal design system driven by CSS custom properties in `admin-ui/styles.css`: one radius, spacing, and type scale, 1px borders instead of shadows, visible focus rings, and `prefers-reduced-motion` support for every transition. `admin-ui/admin-controls.css` holds deployment-specific overrides only. Users are separate from chats: a user can have different MSSV and notification times in different group contexts. Admins can add/edit/remove members, promote an identity to admin, manage chat metadata, and review the creation/update timestamp of every notification time.
+The web UI is organized into tabs: Overview, Chat directory, Users, Groups, Notifications, Chat health, Command console, Settings, and Logs/Audit. The Room 411 duty tab and its `/api/admin/duty/*` endpoints were removed together with the extracted feature; the Room 411 bot manages duty data through its own Zalo commands. It defaults to a dark theme and has a light-theme toggle. The styling is a single flat/minimal design system driven by CSS custom properties in `admin-ui/styles.css`: one radius, spacing, and type scale, 1px borders instead of shadows, visible focus rings, and `prefers-reduced-motion` support for every transition. `admin-ui/admin-controls.css` holds deployment-specific overrides only. Users are separate from chats: a user can have different MSSV and notification times in different group contexts. Admins can add/edit/remove members, promote an identity to admin, manage chat metadata, and review the creation/update timestamp of every notification time.
 
 ## Deployment checklist
 

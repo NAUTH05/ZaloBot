@@ -1,11 +1,10 @@
-// Nguồn dữ liệu duy nhất cho trợ giúp (/help, /helpadmin, /help411) và cho
+// Nguồn dữ liệu duy nhất cho trợ giúp (/help, /helpadmin) và cho
 // danh mục lệnh hiển thị trên dashboard. Mọi cú pháp ở đây đã được đối chiếu
 // với parser thật trong main.js.
 
 const HELP_GROUPS = {
     PUBLIC: "public",
-    ADMIN: "admin",
-    INTERNAL411: "internal411"
+    ADMIN: "admin"
 };
 
 const CATEGORY = {
@@ -19,10 +18,7 @@ const CATEGORY = {
     CHAT: "Quản lý chat",
     BROADCAST: "Thông báo chung",
     UPDATE: "Cập nhật",
-    DIAGNOSTICS: "Kiểm tra hệ thống",
-    DUTY_VIEW: "Xem lịch trực",
-    DUTY_MANAGE: "Quản lý lịch trực",
-    DUTY_NOTIFY: "Thông báo lịch trực"
+    DIAGNOSTICS: "Kiểm tra hệ thống"
 };
 
 // Thứ tự khai báo quyết định thứ tự mục trong từng nhóm trợ giúp.
@@ -371,12 +367,12 @@ const HELP_COMMANDS = [
     },
     {
         command: "chatfeature",
-        usage: "/chatfeature [Chat ID] [schedule|duty|birthday|broadcast] [on|off|auto]",
+        usage: "/chatfeature [Chat ID] [schedule|birthday|broadcast] [on|off|auto]",
         group: HELP_GROUPS.ADMIN,
         category: CATEGORY.CHAT,
         permission: "owner",
         description: "Ghi đè tính năng thông báo cho một chat.",
-        examples: ["/chatfeature 123456789 schedule off", "/chatfeature 123456789 duty auto"]
+        examples: ["/chatfeature 123456789 schedule off", "/chatfeature 123456789 broadcast auto"]
     },
     {
         command: "thongbao",
@@ -463,15 +459,6 @@ const HELP_COMMANDS = [
         examples: ["/test6h"]
     },
     {
-        command: "test6hlichtruc",
-        usage: "/test6hlichtruc",
-        group: HELP_GROUPS.ADMIN,
-        category: CATEGORY.DIAGNOSTICS,
-        permission: "owner",
-        description: "Chạy thử gửi lịch trực phòng 411.",
-        examples: ["/test6hlichtruc"]
-    },
-    {
         command: "helpadmin",
         usage: "/helpadmin",
         group: HELP_GROUPS.ADMIN,
@@ -479,82 +466,6 @@ const HELP_COMMANDS = [
         permission: "owner",
         description: "Xem hướng dẫn các lệnh quản trị.",
         examples: ["/helpadmin"]
-    },
-
-    // ------------------------------------------------------- nội bộ phòng 411
-    {
-        command: "lichtruc",
-        usage: "/lichtruc",
-        group: HELP_GROUPS.INTERNAL411,
-        category: CATEGORY.DUTY_VIEW,
-        permission: "user",
-        description: "Xem phân công trực nhật hôm nay.",
-        examples: ["/lichtruc"],
-        note: "Nếu hôm nay chưa có phân công, trợ lý gửi toàn bộ danh sách."
-    },
-    {
-        command: "danhsachlichtruc",
-        usage: "/danhsachlichtruc",
-        group: HELP_GROUPS.INTERNAL411,
-        category: CATEGORY.DUTY_VIEW,
-        permission: "user",
-        description: "Xem toàn bộ danh sách phân công trực nhật.",
-        examples: ["/danhsachlichtruc"]
-    },
-    {
-        command: "dangkylich",
-        usage: "/dangkylich",
-        group: HELP_GROUPS.INTERNAL411,
-        category: CATEGORY.DUTY_NOTIFY,
-        permission: "user",
-        description: "Bật nhận lịch trực lúc 06:00 hằng ngày.",
-        examples: ["/dangkylich"]
-    },
-    {
-        command: "huydangkylich",
-        usage: "/huydangkylich",
-        group: HELP_GROUPS.INTERNAL411,
-        category: CATEGORY.DUTY_NOTIFY,
-        permission: "user",
-        description: "Tắt nhận lịch trực hằng ngày.",
-        examples: ["/huydangkylich"]
-    },
-    {
-        command: "themlichtruc",
-        usage: "/themlichtruc [dd/mm] [Tên 1 - Tên 2]",
-        group: HELP_GROUPS.INTERNAL411,
-        category: CATEGORY.DUTY_MANAGE,
-        permission: "owner",
-        description: "Thêm một hoặc nhiều lịch trực.",
-        examples: ["/themlichtruc 24/09 Thuận - Nhân", "/themlichtruc 25/09 Thuận - Sang"],
-        note: "Có thể gửi nhiều dòng, mỗi dòng một lịch trực."
-    },
-    {
-        command: "sualichtruc",
-        usage: "/sualichtruc [ID hoặc dd/mm] [Nội dung mới]",
-        group: HELP_GROUPS.INTERNAL411,
-        category: CATEGORY.DUTY_MANAGE,
-        permission: "owner",
-        description: "Sửa một lịch trực theo ID hoặc theo ngày.",
-        examples: ["/sualichtruc #3 Thuận - Sang", "/sualichtruc 24/09 Thuận - Sang"]
-    },
-    {
-        command: "xoalichtruc",
-        usage: "/xoalichtruc [ID hoặc dd/mm]",
-        group: HELP_GROUPS.INTERNAL411,
-        category: CATEGORY.DUTY_MANAGE,
-        permission: "owner",
-        description: "Xóa một lịch trực theo ID hoặc theo ngày.",
-        examples: ["/xoalichtruc #3", "/xoalichtruc 24/09"]
-    },
-    {
-        command: "help411",
-        usage: "/help411",
-        group: HELP_GROUPS.INTERNAL411,
-        category: CATEGORY.HELP,
-        permission: "owner",
-        description: "Xem hướng dẫn các lệnh nội bộ phòng 411.",
-        examples: ["/help411"]
     }
 ];
 
@@ -576,7 +487,7 @@ function groupByCategory(entries) {
     return [...sections.entries()].map(([category, items]) => ({ category, items }));
 }
 
-// Mỗi lệnh là một khối gọn, thống nhất giữa /help, /helpadmin và /help411:
+// Mỗi lệnh là một khối gọn, thống nhất giữa /help và /helpadmin:
 //   **/find [MSSV]**
 //   Lưu MSSV để dùng cho các lệnh lịch.
 //   (Ví dụ: /find 123000135)
@@ -606,31 +517,11 @@ ${renderSections(commandsInGroup(HELP_GROUPS.PUBLIC))}`;
 }
 
 function formatAdminHelp() {
-    const internalEntry = findHelpCommand("help411");
-    const internalSection = internalEntry
-        ? `## {orange}NỘI BỘ{/orange}\n\n${renderCommand(internalEntry)}\n\n> Các lệnh nội bộ phòng 411 chỉ hiển thị trong **/help411**.`
-        : "";
     return `# {orange}[ADMIN] LỆNH QUẢN TRỊ{/orange}
 
 > Chỉ tài khoản quản trị dùng được các lệnh bên dưới.
 
-${renderSections(commandsInGroup(HELP_GROUPS.ADMIN))}
-
-${internalSection}`;
-}
-
-function formatInternalHelp() {
-    const adminEntry = findHelpCommand("helpadmin");
-    const helpSection = adminEntry
-        ? `## {orange}TRỢ GIÚP{/orange}\n\n${renderCommand(adminEntry)}`
-        : "";
-    return `# {red}INTERNAL - ROOM 411{/red}
-
-> Khu vực nội bộ. Không hiển thị trong **/help** của người dùng.
-
-${renderSections(commandsInGroup(HELP_GROUPS.INTERNAL411).filter((entry) => entry.command !== "help411"))}
-
-${helpSection}`;
+${renderSections(commandsInGroup(HELP_GROUPS.ADMIN))}`;
 }
 
 module.exports = {
@@ -639,6 +530,5 @@ module.exports = {
     commandsInGroup,
     findHelpCommand,
     formatAdminHelp,
-    formatInternalHelp,
     formatPublicHelp
 };

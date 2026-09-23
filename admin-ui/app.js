@@ -71,8 +71,7 @@ function renderOverview() {
     ["Groups", workspace.groups.length, `${workspace.groups.reduce((sum, item) => sum + item.memberCount, 0)} member records`, "groups"],
     ["Chats", workspace.chats.length, `${workspace.chats.filter((item) => item.chatType === "unknown").length} unknown type`, "directory"],
     ["Nhận lịch", activeSubs, `${workspace.subscriptions.length} bản ghi`, "notifications"],
-    ["Invalid chats", invalid, `${dashboard.notifications.failedDeliveries} failed deliveries`, "health"],
-    ["Lịch trực", workspace.duty.schedules.length, `${workspace.duty.subscriptions.filter((item) => item.enabled).length} chat đăng ký`, "duty"]
+    ["Invalid chats", invalid, `${dashboard.notifications.failedDeliveries} failed deliveries`, "health"]
   ].map(([label, value, note, tab]) => `<button class="metric" data-jump="${tab}"><span>${label}</span><strong>${value}</strong><small>${note}</small></button>`).join("");
   $$('[data-jump]').forEach((button) => button.addEventListener("click", () => switchTab(button.dataset.jump)));
   const errors = [...(logs.system || []).slice(0, 5).map((item) => ({ title: `${item.level} · System`, detail: item.message, at: item.at })), ...(dashboard.recentErrors || []).slice(0, 5).map((item) => ({ title: item.displayName || item.chatId, detail: item.lastError?.message, at: item.lastError?.at }))];
@@ -110,14 +109,6 @@ function renderNotifications() {
   const list = workspace.subscriptions.filter((item) => filter === "all" || (filter === "enabled" && item.notificationsEnabled) || (filter === "disabled" && !item.notificationsEnabled) || (filter === "legacy" && item.schema === "legacy"));
   $("#notificationRows").innerHTML = list.map((item) => `<tr><td><strong>${escapeHtml(item.userDisplayName || item.userId || "Bản ghi cũ")}</strong><code>${escapeHtml(item.userId || "-")}</code><div>${badge(item.studentId || "Chưa có MSSV", item.studentId ? "info" : "neutral")} ${escapeHtml(item.studentName)}</div></td><td><strong>${escapeHtml(item.chatName)}</strong><code>${escapeHtml(item.chatId)}</code></td><td>${badge(item.chatType, item.chatType === "group" ? "info" : "neutral")}</td><td>${timeChips(item.notificationTimes)}</td><td>${badge(item.schema, item.schema === "current" ? "success" : "warning")} ${badge(item.notificationsEnabled ? "Đang bật" : "Đang tắt", item.notificationsEnabled ? "success" : "neutral")}</td><td><button class="table-action" data-subscription="${escapeHtml(item.key)}">Quản lý</button></td></tr>`).join("") || emptyRow(6, "Không có đăng ký phù hợp.");
   $$('[data-subscription]').forEach((button) => button.addEventListener("click", () => openSubscription(button.dataset.subscription)));
-}
-
-function renderDuty() {
-  $("#dutyScheduleList").innerHTML = workspace.duty.schedules.map((item) => `<article class="schedule-item"><div class="date-box"><strong>${escapeHtml(item.dateStr)}</strong><small>#${escapeHtml(item.id)}</small></div><div><strong>${escapeHtml(item.assigned)}</strong><small>Cập nhật ${escapeHtml(formatDate(item.updatedAt))}</small></div><div class="row-actions"><button data-duty-edit="${item.id}">Sửa</button><button class="danger-text" data-duty-delete="${item.id}">Xóa</button></div></article>`).join("") || `<div class="empty-state">Chưa có lịch trực.</div>`;
-  $("#dutySubscriptionList").innerHTML = workspace.duty.subscriptions.map((item) => `<article class="stack-item horizontal"><div><strong>${escapeHtml(item.chatTitle || item.chatId)}</strong><p><code>${escapeHtml(item.chatId)}</code> · ${escapeHtml(item.chatType)} · ${escapeHtml(item.chatStatus)}</p></div><button class="toggle-button ${item.enabled ? "on" : ""}" data-duty-sub="${escapeHtml(item.chatId)}" data-enabled="${item.enabled ? "false" : "true"}">${item.enabled ? "Tắt" : "Bật"}</button></article>`).join("") || `<div class="empty-state">Chưa có chat đăng ký lịch trực.</div>`;
-  $$('[data-duty-edit]').forEach((button) => button.addEventListener("click", () => editDuty(button.dataset.dutyEdit)));
-  $$('[data-duty-delete]').forEach((button) => button.addEventListener("click", () => deleteDuty(button.dataset.dutyDelete)));
-  $$('[data-duty-sub]').forEach((button) => button.addEventListener("click", async () => { await api("/api/admin/duty/subscriptions", { method: "PATCH", body: JSON.stringify({ chatId: button.dataset.dutySub, enabled: button.dataset.enabled === "true" }) }); await loadData(); }));
 }
 
 function renderHealth() {
@@ -387,7 +378,7 @@ function renderLogs() {
 }
 
 function ensurePaginationViews() {
-  [["#directoryRows", "directory"], ["#userRows", "users"], ["#groupCards", "groups"], ["#notificationRows", "notifications"], ["#healthRows", "health"], ["#dutyScheduleList", "dutySchedules"], ["#dutySubscriptionList", "dutySubscriptions"], ["#systemLogList", "systemLogs"], ["#deliveryLogList", "deliveryLogs"]].forEach(([selector, key]) => {
+  [["#directoryRows", "directory"], ["#userRows", "users"], ["#groupCards", "groups"], ["#notificationRows", "notifications"], ["#healthRows", "health"], ["#systemLogList", "systemLogs"], ["#deliveryLogList", "deliveryLogs"]].forEach(([selector, key]) => {
     const anchor = $(selector); if (!anchor) return; const id = `${key}Pagination`; if (!document.getElementById(id)) { const el = document.createElement("div"); el.id = id; anchor.closest(".panel")?.appendChild(el) || anchor.parentElement.appendChild(el); }
   });
 }
@@ -398,8 +389,8 @@ function paginateRendered(selector, key) {
   pageState[key] = { page, size }; items.forEach((item, index) => { item.hidden = index < (page - 1) * size || index >= page * size; });
   pager(`#${key}Pagination`, key, { page, size, totalPages, total: items.length }, applyPaginationViews);
 }
-function applyPaginationViews() { ensurePaginationViews(); paginateRendered("#directoryRows", "directory"); paginateRendered("#userRows", "users"); paginateRendered("#groupCards", "groups"); paginateRendered("#notificationRows", "notifications"); paginateRendered("#healthRows", "health"); paginateRendered("#dutyScheduleList", "dutySchedules"); paginateRendered("#dutySubscriptionList", "dutySubscriptions"); paginateRendered("#systemLogList", "systemLogs"); paginateRendered("#deliveryLogList", "deliveryLogs"); }
-function renderAll() { renderOverview(); renderDirectory(); renderUsers(); renderGroups(); renderNotifications(); renderDuty(); renderHealth(); renderSettings(); renderLogs(); setupCommandConsole(); renderCommands(); ensurePaginationViews(); applyPaginationViews(); $("#healthPill").textContent = `${dashboard.bot.status} · ${dashboard.bot.health}`; $("#generatedAt").textContent = formatDate(workspace.generatedAt); }
+function applyPaginationViews() { ensurePaginationViews(); paginateRendered("#directoryRows", "directory"); paginateRendered("#userRows", "users"); paginateRendered("#groupCards", "groups"); paginateRendered("#notificationRows", "notifications"); paginateRendered("#healthRows", "health"); paginateRendered("#systemLogList", "systemLogs"); paginateRendered("#deliveryLogList", "deliveryLogs"); }
+function renderAll() { renderOverview(); renderDirectory(); renderUsers(); renderGroups(); renderNotifications(); renderHealth(); renderSettings(); renderLogs(); setupCommandConsole(); renderCommands(); ensurePaginationViews(); applyPaginationViews(); $("#healthPill").textContent = `${dashboard.bot.status} · ${dashboard.bot.health}`; $("#generatedAt").textContent = formatDate(workspace.generatedAt); }
 
 async function loadData() {
   setDataState("loading", "Loading admin data...");
@@ -465,8 +456,6 @@ function openSubscription(key) {
 }
 
 async function updateSubscription(item, changes) { await api("/api/admin/subscriptions", { method: "PATCH", body: JSON.stringify({ chatId: item.chatId, userId: item.userId, userDisplayName: item.userDisplayName, ...changes }) }); $("#detailDialog").close(); await loadData(); }
-async function editDuty(id) { const item = workspace.duty.schedules.find((entry) => String(entry.id) === String(id)); const input = prompt("Nội dung mới: dd/mm Tên người trực", `${item.dateStr} ${item.assigned}`); if (!input) return; await api("/api/admin/duty/schedules", { method: "PATCH", body: JSON.stringify({ target: id, input }) }); await loadData(); }
-async function deleteDuty(id) { if (!confirm(`Xóa lịch trực #${id}?`)) return; await api("/api/admin/duty/schedules", { method: "DELETE", body: JSON.stringify({ target: id }) }); await loadData(); }
 
 $("#loginForm").addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); try { await api("/api/admin/auth/login", { method: "POST", body: JSON.stringify(Object.fromEntries(form.entries())) }); showAuthenticated(true); await loadData(); } catch (error) { $("#loginError").textContent = error.message; } });
 $("#logoutButton").addEventListener("click", async () => { await api("/api/admin/auth/logout", { method: "POST" }); showAuthenticated(false); });
@@ -476,7 +465,6 @@ const rerender = (fn, key) => { pageState[key] = { ...(pageState[key] || {}), pa
 $("#userSearch").addEventListener("input", () => rerender(renderUsers, "users")); $("#groupSearch").addEventListener("input", () => rerender(renderGroups, "groups")); $("#notificationFilter").addEventListener("change", () => rerender(renderNotifications, "notifications")); $("#healthFilter").addEventListener("change", () => rerender(renderHealth, "health")); $("#healthType").addEventListener("change", () => rerender(renderHealth, "health"));
 $("#directorySearch").addEventListener("input", () => rerender(renderDirectory, "directory")); $("#directoryType").addEventListener("change", () => rerender(renderDirectory, "directory")); $("#addChatButton").addEventListener("click", openCreateChat);
 $("#addUserButton").addEventListener("click", openCreateUser);
-$("#addDutyButton").addEventListener("click", async () => { const input = prompt("Nhập một hoặc nhiều dòng: dd/mm Tên người trực"); if (!input) return; await api("/api/admin/duty/schedules", { method: "POST", body: JSON.stringify({ input }) }); await loadData(); });
 $("#adminForm").addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); try { await api("/api/admin/settings/admins", { method: "POST", body: JSON.stringify(Object.fromEntries(form.entries())) }); event.currentTarget.reset(); $("#adminFormMessage").textContent = "Đã lưu."; await loadData(); } catch (error) { $("#adminFormMessage").textContent = error.message; } });
 $("#commandForm").addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); $("#commandResult").textContent = "Đang thực thi..."; try { const result = await api("/api/admin/commands", { method: "POST", body: JSON.stringify(Object.fromEntries(form.entries())) }); $("#commandResult").textContent = (result.messages || []).map((item) => item.text).join("\n\n") || `Đã gửi phản hồi tới ${result.deliveredToChatId}`; await loadData(); } catch (error) { $("#commandResult").textContent = error.message; } });
 $("#commandAdminIdentity")?.addEventListener("change", () => {});

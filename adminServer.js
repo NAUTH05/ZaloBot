@@ -25,15 +25,6 @@ const {
     updateNotificationTime,
     updateSubscriptionMetadata
 } = require("./subscriptions");
-const {
-    addDutySchedules,
-    deleteDutySchedule,
-    disableDutyNotifications,
-    enableDutyNotifications,
-    getDutySubscriptions,
-    readDutyData,
-    updateDutySchedule
-} = require("./dutyScheduleStore");
 const { buildAdminData } = require("./adminDataService");
 const { buildTargetUserOptions, findTargetUser, resolveTargetUserId } = require("./targetUsers");
 const { getPersistenceStatus, readJsonStore, writeJsonStore } = require("./firestorePersistence");
@@ -219,7 +210,6 @@ function dashboardSummary() {
     const workspace = buildAdminData();
     const chats = workspace.chats;
     const subscriptions = Object.values(getEnabledSubscriptions());
-    const duty = getDutySubscriptions();
     return {
         bot: { status: "online", health: "healthy", checkedAt: new Date().toISOString() },
         persistence: getPersistenceStatus(),
@@ -235,7 +225,6 @@ function dashboardSummary() {
         },
         notifications: {
             activeSubscriptions: subscriptions.length,
-            dutySubscriptions: duty.length,
             failedDeliveries: chats.reduce((sum, chat) => sum + (Array.isArray(chat.deliveryHistory) ? chat.deliveryHistory.filter((item) => item.result === "failed").length : 0), 0)
         },
         invalidChats: chats.filter((chat) => chat.status === "inactive"),
@@ -262,8 +251,7 @@ function detailForChat(chatId) {
         chat: publicChat(chat),
         deliveryHistory: Array.isArray(chat.deliveryHistory) ? chat.deliveryHistory.slice(-50).reverse() : [],
         subscriptions: workspace.subscriptions.filter((item) => String(item.chatId) === String(chatId)),
-        members: workspace.users.filter((user) => user.chats.some((item) => String(item.chatId) === String(chatId))),
-        duty: workspace.duty.subscriptions.filter((item) => String(item.chatId) === String(chatId))
+        members: workspace.users.filter((user) => user.chats.some((item) => String(item.chatId) === String(chatId)))
     };
 }
 
@@ -403,9 +391,7 @@ async function handleApi(request, response, url, options = {}) {
     }
     if (url.pathname === `${API_PREFIX}/notifications` && request.method === "GET") {
         return json(response, 200, {
-            schedule: Object.values(getEnabledSubscriptions()).filter((item) => isChatEligible(item.chatId, "schedule")),
-            duty: getDutySubscriptions().filter((item) => isChatEligible(item.chatId, "duty")),
-            dutySchedules: readDutyData().schedules || []
+            schedule: Object.values(getEnabledSubscriptions()).filter((item) => isChatEligible(item.chatId, "schedule"))
         });
     }
     if (url.pathname === `${API_PREFIX}/subscriptions` && request.method === "PATCH") {
@@ -429,28 +415,6 @@ async function handleApi(request, response, url, options = {}) {
             audit(`subscription.${body.action || "update"}`, request, { result: "failed", error: error.message });
             return json(response, 400, { error: error.message });
         }
-    }
-    if (url.pathname === `${API_PREFIX}/duty/schedules` && ["POST", "PATCH", "DELETE"].includes(request.method)) {
-        let body;
-        try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
-        try {
-            let result;
-            if (request.method === "POST") result = addDutySchedules(body.input);
-            else if (request.method === "PATCH") result = updateDutySchedule(body.target, body.input);
-            else result = deleteDutySchedule(body.target);
-            if (!result) return json(response, 404, { error: "Duty schedule not found" });
-            audit(`duty_schedule.${request.method.toLowerCase()}`, request, { result: "success", target: body.target || null });
-            return json(response, 200, { ok: true, result });
-        } catch (error) { return json(response, 400, { error: error.message }); }
-    }
-    if (url.pathname === `${API_PREFIX}/duty/subscriptions` && request.method === "PATCH") {
-        let body;
-        try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
-        const context = { chatId: body.chatId, chatTitle: body.chatTitle, userDisplayName: body.chatTitle };
-        const result = body.enabled === true ? enableDutyNotifications(context) : disableDutyNotifications(context);
-        if (!result) return json(response, 404, { error: "Duty subscription not found" });
-        audit("duty_subscription.update", request, { result: "success", chatId: body.chatId, enabled: body.enabled === true });
-        return json(response, 200, { ok: true, result });
     }
     if (url.pathname === `${API_PREFIX}/settings` && request.method === "GET") return json(response, 200, getAdminSettings());
     if (url.pathname === `${API_PREFIX}/settings` && request.method === "PATCH") {

@@ -4,7 +4,11 @@ const { readJsonStore, writeJsonStore } = require("./firestorePersistence");
 const FILE_PATH = path.join(__dirname, "chatDirectory.json");
 const SCHEMA_VERSION = 2;
 const STATUSES = new Set(["active", "inactive", "disabled", "removed"]);
-const FEATURES = ["schedule", "duty", "birthday", "broadcast"];
+// Lịch trực phòng 411 đã được tách sang bot riêng (Room411Bot) nên không còn
+// là tính năng thông báo của bot này. Giá trị `notificationOverrides.duty` cũ
+// (nếu có) vẫn được giữ nguyên trên bản ghi vì normalizeRecord chỉ chuẩn hoá
+// các tính năng nằm trong danh sách này.
+const FEATURES = ["schedule", "birthday", "broadcast"];
 
 function normalizeChatType(value, fallback = "unknown") {
     const raw = String(value == null ? "" : value).trim().toLowerCase();

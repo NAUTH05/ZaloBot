@@ -1,5 +1,5 @@
 const { escapeMarkdown } = require("./richText");
-const { formatAdminHelp, formatInternalHelp, formatPublicHelp } = require("./helpContent");
+const { formatAdminHelp, formatPublicHelp } = require("./helpContent");
 
 const GENERIC_ERROR_MESSAGE = "Đã xảy ra lỗi khi xử lý yêu cầu. Bạn thử lại sau ít phút nhé.";
 
@@ -39,14 +39,10 @@ Xin chào **${escapeMarkdown(displayName || "bạn")}**!
 {orange}Dùng **/help** để xem danh sách lệnh.{/orange}`;
 }
 
-// Nội dung trợ giúp được quản lý tập trung trong helpContent.js để /help,
-// /helpadmin và /help411 luôn khớp với parser thật.
+// Nội dung trợ giúp được quản lý tập trung trong helpContent.js để /help và
+// /helpadmin luôn khớp với parser thật.
 function formatGeneralHelp() {
     return formatPublicHelp();
-}
-
-function formatInternal411Help() {
-    return formatInternalHelp();
 }
 
 function formatStudentSavedMessage(scheduleData, subscription) {
@@ -101,8 +97,6 @@ module.exports = {
     formatDailyNotificationEnabled,
     formatErrorMessage,
     formatGeneralHelp,
-    formatInternal411Help,
-    formatInternalHelp,
     formatMissingStudentIdMessage,
     formatStudentSavedMessage,
     formatSuccessMessage,

@@ -62,7 +62,6 @@ const {
     formatDailyNotificationEnabled,
     formatErrorMessage,
     formatGeneralHelp,
-    formatInternal411Help,
     formatMissingStudentIdMessage,
     formatStudentSavedMessage,
     formatSuccessMessage,
@@ -110,19 +109,6 @@ const {
     wasInvitationSent,
     wasResultSent
 } = require("./birthdayStore");
-const {
-    addDutySchedule,
-    addDutySchedules,
-    deleteDutySchedule,
-    disableDutyNotifications,
-    enableDutyNotifications,
-    formatDutyList,
-    formatDutyNotification,
-    getDutyScheduleForDate,
-    getDutySchedules,
-    getDutySubscriptions,
-    updateDutySchedule
-} = require("./dutyScheduleStore");
 
 const isTestEnv = process.env.NODE_ENV === "test" || require.main !== module;
 const BIRTH_YEAR = 2005;
@@ -295,11 +281,6 @@ async function requireOwner(context) {
 function parseQuestionIdAndText(argument) {
     const match = String(argument || "").match(/^#?(\d+)(?:\s*\|\s*|\s+)([\s\S]+)$/);
     return match ? { id: Number(match[1]), text: match[2].trim() } : null;
-}
-
-function parseDutyIdOrDateAndText(argument) {
-    const match = String(argument || "").trim().match(/^(\[?\d{1,2}\/\d{1,2}\]?|#?\d+)(?:\s*\|\s*|\s+)([\s\S]+)$/);
-    return match ? { target: match[1], text: match[2].trim() } : null;
 }
 
 function resolveQuestionYear(argument, date = new Date()) {
@@ -481,8 +462,7 @@ function parseNotificationTimeEditArgument(argument) {
     return { id: Number(match[1]), notificationTime: normalizeNotificationTime(match[2]) };
 }
 
-// Dùng cho gợi ý khi người dùng gõ sai lệnh. Các lệnh nội bộ phòng 411
-// không nằm ở đây để gợi ý công khai không lộ tính năng nội bộ.
+// Dùng cho gợi ý khi người dùng gõ sai lệnh.
 const COMMAND_EXAMPLES = {
     start: "/start",
     find: "/find 123456789",
@@ -530,8 +510,7 @@ const COMMAND_EXAMPLES = {
     xoa: "/xoa 1",
     traloi: "/traloi 1 Nội dung trả lời",
     congbo: "/congbo 2026",
-    test6h: "/test6h",
-    test6hlichtruc: "/test6hlichtruc"
+    test6h: "/test6h"
 };
 
 function editDistance(left, right) {
@@ -638,10 +617,6 @@ function syncChatDirectoryFromLegacyStores() {
             upsertChat({ chatId, chatType: subscription.chatType || "unknown", displayName: subscription.chatTitle || subscription.userDisplayName || "" });
             syncedChatIds.add(String(chatId));
         }
-    }
-    for (const subscription of getDutySubscriptions()) {
-        upsertChat({ chatId: subscription.chatId, chatType: subscription.chatType || "unknown", displayName: subscription.chatTitle || "" });
-        syncedChatIds.add(String(subscription.chatId));
     }
     return syncedChatIds.size;
 }
@@ -1114,7 +1089,7 @@ async function handleCommand(msg, parsedCommand) {
         if (!await requireOwner(context)) return;
         const [targetId, feature, mode] = String(argument || "").trim().split(/\s+/);
         if (!targetId || !feature || !["on", "off", "auto"].includes(String(mode || "").toLowerCase())) {
-            await sendMessage(chatId, formatWarningMessage("SAI CÚ PHÁP", "> **Cú pháp:** /chatfeature [Chat ID] [schedule|duty|birthday|broadcast] [on|off|auto]"));
+            await sendMessage(chatId, formatWarningMessage("SAI CÚ PHÁP", "> **Cú pháp:** /chatfeature [Chat ID] [schedule|birthday|broadcast] [on|off|auto]"));
             return;
         }
         try {
@@ -1269,117 +1244,8 @@ async function handleCommand(msg, parsedCommand) {
             `> **User ID:** ${escapeMarkdown(context.userId)}\n` +
             `> **Chat ID:** ${escapeMarkdown(context.chatId)}`
         );
-    } else if (command === "lichtruc") {
-        const todayDuties = getDutyScheduleForDate();
-        if (todayDuties && todayDuties.length > 0) {
-            await sendMessage(chatId, formatDutyNotification(todayDuties));
-        } else {
-            await sendMessage(chatId, formatDutyList(getDutySchedules()));
-        }
-    } else if (command === "themlichtruc" || command === "addlichtruc") {
-        if (!await requireOwner(context)) return;
-        if (!argument) {
-            await sendMessage(
-                chatId,
-                formatWarningMessage(
-                    "SAI CÚ PHÁP",
-                    "> **Cú pháp:** /themlichtruc [dd/mm] [Tên 1 - Tên 2]\n> **Ví dụ một dòng:** /themlichtruc 25/08 Nhân - Sang\n> **Nhiều dòng:** gửi mỗi lịch trên một dòng sau lệnh."
-                )
-            );
-            return;
-        }
-        try {
-            const items = argument.includes("\n")
-                ? addDutySchedules(argument)
-                : [addDutySchedule(argument)];
-            const summary = items.map((item) =>
-                `> **#${item.id}** \`[${escapeMarkdown(item.dateStr)}]\` — \`${escapeMarkdown(item.assigned)}\``
-            ).join("\n");
-            await sendMessage(chatId, `# {green}✓ ĐÃ THÊM ${items.length} LỊCH TRỰC NHẬT PHÒNG 411{/green}\n\n${summary}`);
-        } catch (error) {
-            await sendMessage(chatId, formatWarningMessage("KHÔNG THỂ THÊM LỊCH TRỰC NHẬT PHÒNG 411", `> ${escapeMarkdown(error.message)}`));
-        }
-    } else if (command === "sualichtruc" || command === "editlichtruc") {
-        if (!await requireOwner(context)) return;
-        const parsed = parseDutyIdOrDateAndText(argument);
-        if (!parsed) {
-            await sendMessage(
-                chatId,
-                formatWarningMessage(
-                    "SAI CÚ PHÁP",
-                    "> **Cú pháp:** /sualichtruc [ID hoặc dd/mm] [Nội dung mới]\n> **Ví dụ:** /sualichtruc #1 [25/08] [Nguyễn Văn A - Võ Văn E]"
-                )
-            );
-            return;
-        }
-        try {
-            const item = updateDutySchedule(parsed.target, parsed.text);
-            await sendMessage(
-                chatId,
-                item
-                    ? `# {green}✓ ĐÃ SỬA LỊCH TRỰC NHẬT PHÒNG 411 #${item.id}{/green}\n\n` +
-                      `> **Ngày:** \`[${escapeMarkdown(item.dateStr)}]\`\n` +
-                      `> **Phân công:** \`[${escapeMarkdown(item.assigned)}]\``
-                    : formatWarningMessage("KHÔNG TÌM THẤY", `> Không tìm thấy lịch trực nhật phòng 411 **${escapeMarkdown(parsed.target)}**.`)
-            );
-        } catch (error) {
-            await sendMessage(chatId, formatWarningMessage("KHÔNG THỂ SỬA LỊCH TRỰC NHẬT PHÒNG 411", `> ${escapeMarkdown(error.message)}`));
-        }
-    } else if (command === "xoalichtruc" || command === "dellichtruc") {
-        if (!await requireOwner(context)) return;
-        const target = String(argument || "").trim();
-        if (!target) {
-            await sendMessage(
-                chatId,
-                formatWarningMessage(
-                    "SAI CÚ PHÁP",
-                    "> **Cú pháp:** /xoalichtruc [ID hoặc dd/mm]\n> **Ví dụ:** /xoalichtruc #1 hoặc /xoalichtruc 25/08"
-                )
-            );
-            return;
-        }
-        const deleted = deleteDutySchedule(target);
-        await sendMessage(
-            chatId,
-            deleted
-                ? `# {green}✓ ĐÃ XÓA LỊCH TRỰC NHẬT PHÒNG 411 #${deleted.id}{/green}\n\n` +
-                  `> **Ngày:** \`[${escapeMarkdown(deleted.dateStr)}]\`\n` +
-                  `> **Phân công:** \`[${escapeMarkdown(deleted.assigned)}]\``
-                : formatWarningMessage("KHÔNG TÌM THẤY", `> Không tìm thấy lịch trực nhật phòng 411 **${escapeMarkdown(target)}**.`)
-        );
-    } else if (command === "danhsachlichtruc") {
-        const items = getDutySchedules();
-        await sendMessage(chatId, formatDutyList(items));
-    } else if (command === "dangkylich") {
-        enableDutyNotifications(context);
-        await sendMessage(
-            chatId,
-            "# {green}✓ ĐÃ BẬT THÔNG BÁO LỊCH TRỰC{/green}\n\n" +
-            "> **Giờ nhận lịch:** 06:00 hằng ngày\n\n" +
-            "Dùng **/huydangkylich** để tắt thông báo."
-        );
-    } else if (command === "huydangkylich" || command === "huylichtruc") {
-        if (disableDutyNotifications(context)) {
-            await sendMessage(
-                chatId,
-                "# {green}✓ ĐÃ TẮT THÔNG BÁO LỊCH TRỰC{/green}\n\n" +
-                "> Cuộc trò chuyện này sẽ không còn nhận lịch trực nhật lúc 06:00."
-            );
-        } else {
-            await sendMessage(
-                chatId,
-                formatWarningMessage(
-                    "THÔNG BÁO LỊCH TRỰC ĐANG TẮT",
-                    "> Dùng **/dangkylich** để nhận lịch trực nhật phòng 411 lúc 06:00 hằng ngày."
-                )
-            );
-        }
     } else if (command === "help") {
         await sendMessage(chatId, formatGeneralHelp());
-    } else if (command === "help411") {
-        // Trợ giúp nội bộ phòng 411 chỉ dành cho quản trị viên.
-        if (!await requireOwner(context)) return;
-        await sendMessage(chatId, formatInternal411Help());
     } else if (command === "helpadmin") {
         if (!await requireOwner(context)) return;
         await sendMessage(chatId, formatAdminHelp());
@@ -1397,16 +1263,6 @@ Lịch học và thông báo đều dùng múi giờ này.`;
         await sendMessage(chatId, "# {orange}[ADMIN TEST] GỬI LỊCH 06:00{/orange}\n\nĐang chạy kiểm tra gửi lịch học.");
         await sendDailySchedulesAtSix();
         await sendMessage(chatId, "# {green}✓ ĐÃ HOÀN TẤT KIỂM TRA GỬI LỊCH 06:00{/green}");
-    } else if (command === "test6hlichtruc") {
-        if (!await requireOwner(context)) return;
-        await sendMessage(chatId, "# {orange}[ADMIN TEST] GỬI LỊCH TRỰC 06:00{/orange}\n\nĐang chạy kiểm tra gửi lịch trực nhật phòng 411.");
-        const result = await sendDailyDutyNotificationAtSix();
-        await sendMessage(
-            chatId,
-            `# {green}✓ ĐÃ HOÀN TẤT KIỂM TRA GỬI LỊCH TRỰC 06:00{/green}\n\n` +
-            `> **Đã gửi:** ${result.sent}\n` +
-            `> **Lỗi:** ${result.failed}`
-        );
     } else {
         const suggestion = suggestCommandCorrection(command);
         await sendMessage(
@@ -1591,37 +1447,6 @@ async function sendScheduledDailySchedules(date = new Date()) {
     return sendDailySchedulesAtTime(notificationTime, date);
 }
 
-async function sendDailyDutyNotificationAtSix(date = new Date()) {
-    const todayDuties = getDutyScheduleForDate(date);
-    if (!todayDuties || todayDuties.length === 0) {
-        console.log("[06:00] Không có lịch trực nhật phòng 411 cho ngày hôm nay.");
-        return { sent: 0, skipped: 0, failed: 0 };
-    }
-
-    const message = formatDutyNotification(todayDuties, date);
-    if (!message) return { sent: 0, skipped: 0, failed: 0 };
-
-    const subscriptions = getDutySubscriptions().filter((subscription) => isChatEligible(subscription.chatId, "duty"));
-    if (subscriptions.length === 0) {
-        console.log("[06:00] Chưa có cuộc trò chuyện nào sử dụng /dangkylich.");
-        return { sent: 0, skipped: 0, failed: 0 };
-    }
-
-    console.log(`[06:00] Gửi thông báo lịch trực nhật phòng 411 tới ${subscriptions.length} cuộc trò chuyện đã đăng ký...`);
-    const result = { sent: 0, skipped: 0, failed: 0 };
-
-    for (const sub of subscriptions) {
-        const delivery = await sendNotification(sub.chatId, message, { feature: "duty", operation: "daily_duty" });
-        if (delivery.sent) {
-            result.sent += 1;
-        } else if (delivery.failed) {
-            result.failed += 1;
-            logDiscord("ERROR", `Không thể gửi thông báo lịch trực nhật phòng 411 cho chat ${sub.chatId}: ${delivery.error.message}`);
-        }
-    }
-    return result;
-}
-
 function registerRuntimeJobs(scheduler = schedule) {
     if (scheduler && typeof scheduler === "object") {
         if (registeredSchedulers.has(scheduler)) return [];
@@ -1636,11 +1461,6 @@ function registerRuntimeJobs(scheduler = schedule) {
         const dailyResult = await sendScheduledDailySchedules();
         const classStartResult = await sendClassStartNotifications();
         if (dailyResult.processed || classStartResult.processed) await flushPersistenceWrites();
-    })));
-    // Lịch trực phòng 411 có mốc cố định 06:00, độc lập với các giờ nhận lịch học.
-    jobs.push(scheduler.scheduleJob({ rule: "0 6 * * *", tz: TIME_ZONE }, asyncCommand(async () => {
-        await sendDailyDutyNotificationAtSix();
-        await flushPersistenceWrites();
     })));
     jobs.push(scheduler.scheduleJob({ rule: "5 0 27 8 *", tz: TIME_ZONE }, asyncCommand(async () => {
         await sendBirthdayInvitations();
@@ -1713,7 +1533,6 @@ async function startRuntime() {
                 "adminSettings",
                 "birthdayData",
                 "chatDirectory",
-                "dutyScheduleData",
                 "interactions",
                 "classStartNotifications",
                 "scheduleSnapshots",
@@ -1864,7 +1683,6 @@ module.exports = {
     formatBirthdayResults,
     formatGeneralHelp,
     formatAdminHelp,
-    formatInternal411Help,
     registerShutdownHandlers,
     stopZaloPolling,
     getBroadcastTargets,
@@ -1880,7 +1698,6 @@ module.exports = {
     sendBirthdayInvitations,
     sendBotAnnouncement,
     sendClassStartNotifications,
-    sendDailyDutyNotificationAtSix,
     sendDailySchedulesAtSix,
     sendDailySchedulesAtTime,
     sendScheduledDailySchedules,

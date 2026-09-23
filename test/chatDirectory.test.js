@@ -51,7 +51,9 @@ test("admin status and feature overrides preserve chat history", (t) => {
     upsertChat({ chatId: "group-1", chatType: "group", displayName: "Class Group", lastInboundInteractionAt: "2026-08-21T00:00:00.000Z" }, filePath);
     setFeatureOverride("group-1", "schedule", false, filePath);
     assert.equal(isChatEligible("group-1", "schedule", filePath), false);
-    assert.equal(isChatEligible("group-1", "duty", filePath), true);
+    assert.equal(isChatEligible("group-1", "broadcast", filePath), true);
+    // Lịch trực đã được tách sang bot khác nên không còn là tính năng ghi đè được.
+    assert.throws(() => setFeatureOverride("group-1", "duty", false, filePath), /Tính năng không hợp lệ/);
     setChatStatus("group-1", "removed", "admin", "cleanup", filePath);
     recordDeliveryFailure("group-1", { code: "EZALO", message: "EZALO: 410 The chat_id is invalid" }, {}, filePath);
     const record = getChat("group-1", filePath);

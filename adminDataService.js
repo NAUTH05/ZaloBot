@@ -1,7 +1,6 @@
 const { getAllChats, getChat } = require("./chatDirectory");
 const { getInteractionTargets } = require("./interactionRegistry");
 const { getAllSubscriptions, isCurrentSubscription, normalizeNotificationTimes } = require("./subscriptions");
-const { readDutyData } = require("./dutyScheduleStore");
 const { getAccessSummary } = require("./accessControl");
 
 function normalizeType(value) {
@@ -31,7 +30,6 @@ function buildAdminData() {
     const rawChats = getAllChats();
     const interactions = getInteractionTargets();
     const rawSubscriptions = Object.entries(getAllSubscriptions());
-    const dutyData = readDutyData();
     const interactionByChat = new Map(interactions.map((item) => [String(item.chatId), item]));
     const subscriptionsByChat = new Map();
     const users = new Map();
@@ -64,8 +62,7 @@ function buildAdminData() {
     const allChatIds = new Set([
         ...rawChats.map((chat) => String(chat.chatId)),
         ...interactions.map((item) => String(item.chatId)),
-        ...subscriptions.map((item) => item.chatId).filter(Boolean),
-        ...Object.keys(dutyData.subscriptions || {})
+        ...subscriptions.map((item) => item.chatId).filter(Boolean)
     ]);
 
     const chats = [...allChatIds].map((chatId) => {
@@ -106,8 +103,7 @@ function buildAdminData() {
             enabledSubscriptionCount: chatSubscriptions.filter((item) => item.notificationsEnabled).length,
             studentIds: [...new Set(chatSubscriptions.map((item) => item.studentId).filter(Boolean))],
             lastInboundInteractionAt: chat.lastInboundInteractionAt || interaction?.lastInteractionAt || null,
-            firstInteractionAt: chat.firstInteractionAt || interaction?.firstInteractionAt || null,
-            dutySubscription: dutyData.subscriptions?.[chatId] || null
+            firstInteractionAt: chat.firstInteractionAt || interaction?.firstInteractionAt || null
         };
 
         for (const userId of memberIds) {
@@ -166,14 +162,6 @@ function buildAdminData() {
         users: [...users.values()].sort((a, b) => a.displayName.localeCompare(b.displayName)),
         groups,
         subscriptions: normalizedSubscriptions,
-        duty: {
-            schedules: [...(dutyData.schedules || [])].sort((a, b) => Number(a.month) - Number(b.month) || Number(a.day) - Number(b.day) || Number(a.id) - Number(b.id)),
-            subscriptions: Object.values(dutyData.subscriptions || {}).map((item) => ({
-                ...item,
-                chatType: chatById.get(String(item.chatId))?.chatType || "unknown",
-                chatStatus: chatById.get(String(item.chatId))?.status || "active"
-            }))
-        },
         access: getAccessSummary()
     };
 }

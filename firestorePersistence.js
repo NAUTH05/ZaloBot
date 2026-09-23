@@ -22,6 +22,10 @@ let writeQueue = Promise.resolve();
 let lastPersistenceError = null;
 let lastPersistenceWriteAt = null;
 
+// Store do bot khác sở hữu. Bot này không hydrate, không ghi và không được
+// nhập lại từ JSON, để không bao giờ ghi đè dữ liệu của bot kia.
+const RESERVED_STORE_IDS = new Set(["dutyScheduleData"]);
+
 function clone(value) {
     return value == null ? value : JSON.parse(JSON.stringify(value));
 }
@@ -133,6 +137,16 @@ async function initializeFirestorePersistence(options = {}) {
     };
 }
 
+// Liệt kê các file JSON có thể nhập từ một thư mục. Store do bot khác sở hữu bị
+// loại bỏ ở đây để mọi đường nhập dữ liệu đều không thể ghi đè dữ liệu đã tách.
+function listImportableStoreFiles(sourceDirectory) {
+    return fs.readdirSync(sourceDirectory)
+        .filter((name) => name.toLowerCase().endsWith(".json"))
+        .map((name) => ({ fileName: name, storeId: storeIdFromPath(name) }))
+        .filter((item) => !RESERVED_STORE_IDS.has(item.storeId))
+        .sort((left, right) => left.fileName.localeCompare(right.fileName));
+}
+
 async function importJsonDirectory(sourceDirectory, options = {}) {
     const resolvedSource = path.resolve(String(sourceDirectory || ""));
     if (!sourceDirectory || !fs.existsSync(resolvedSource)) {
@@ -142,7 +156,7 @@ async function importJsonDirectory(sourceDirectory, options = {}) {
         throw new Error(`Đường dẫn nguồn migrate không phải thư mục: ${resolvedSource}`);
     }
 
-    const files = fs.readdirSync(resolvedSource).filter((name) => name.toLowerCase().endsWith(".json")).sort();
+    const files = listImportableStoreFiles(resolvedSource);
     if (files.length === 0) {
         return { sourceDirectory: resolvedSource, items: [] };
     }
@@ -150,8 +164,7 @@ async function importJsonDirectory(sourceDirectory, options = {}) {
     connectFirestore(options);
 
     const items = [];
-    for (const fileName of files) {
-        const storeId = storeIdFromPath(fileName);
+    for (const { fileName, storeId } of files) {
         const absoluteFile = path.join(resolvedSource, fileName);
         let value;
         try {
@@ -187,11 +200,13 @@ function getPersistenceStatus() {
 }
 
 module.exports = {
+    RESERVED_STORE_IDS,
     connectFirestore,
     flushPersistenceWrites,
     getPersistenceStatus,
     importJsonDirectory,
     initializeFirestorePersistence,
+    listImportableStoreFiles,
     normalizePrivateKey,
     readJsonStore,
     writeJsonStore

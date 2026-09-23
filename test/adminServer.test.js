@@ -56,7 +56,7 @@ test("admin server protects API and serves the dashboard under /zalobot", async 
     assert.ok(Array.isArray(workspace.body.users));
     assert.ok(Array.isArray(workspace.body.groups));
     assert.ok(Array.isArray(workspace.body.subscriptions));
-    assert.ok(workspace.body.duty && Array.isArray(workspace.body.duty.schedules));
+    assert.equal(workspace.body.duty, undefined, "dữ liệu lịch trực đã được tách sang bot khác");
     const page = await new Promise((resolve, reject) => http.get({ hostname: "127.0.0.1", port, path: "/zalobot/" }, (response) => { let body = ""; response.on("data", (chunk) => { body += chunk; }); response.on("end", () => resolve({ status: response.statusCode, body })); }).on("error", reject));
     assert.equal(page.status, 200);
     assert.match(page.body, /ZaloBot Admin/);
