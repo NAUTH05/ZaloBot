@@ -20,7 +20,7 @@ const main = require("../main.js");
 const { HELP_COMMANDS } = require("../helpContent");
 
 const MAIN_SOURCE = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
-const PUBLIC_COMMANDS = ["/start", "/find", "/lich", "/lichtuan", "/lichthi", "/lichgv", "/phongtrong", "/ai", "/dangky", "/danhsachdangky", "/suadangky", "/xoadangky", "/huythongbao", "/batnhaclich", "/tatnhaclich", "/trangthainhaclich", "/sinhnhat", "/time", "/myid", "/help"];
+const PUBLIC_COMMANDS = ["/start", "/luumssv", "/lich", "/lichtuan", "/lichthi", "/lichgv", "/phongtrong", "/ai", "/nhanlich", "/gionhanlich", "/suagionhanlich", "/xoagionhanlich", "/tatnhanlich", "/batnhaclich", "/tatnhaclich", "/trangthainhaclich", "/sinhnhat", "/time", "/myid", "/help"];
 // Phòng 411 đã được tách sang bot riêng: không lệnh nào ở đây được quay lại ZaloBot.
 const EXTRACTED_411_COMMANDS = ["/lichtruc", "/danhsachlichtruc", "/dangkylich", "/huydangkylich", "/themlichtruc", "/sualichtruc", "/xoalichtruc", "/xacnhanlichtruc", "/help411", "/test6hlichtruc"];
 
@@ -65,7 +65,7 @@ test("/helpadmin có ví dụ quản trị và không còn lệnh lịch trực"
     const admin = main.formatAdminHelp();
 
     assert.match(admin, /Ví dụ:/);
-    for (const command of ["/blockbot", "/accessmode", "/accesslist", "/quanlychat", "/thongtinch", "/chatfeature", "/thongbao", "/update", "/danhsach", "/traloi", "/congbo", "/test6h", "/helpadmin"]) {
+    for (const command of ["/blockbot", "/accessmode", "/accesslist", "/quanlychat", "/chitietchat", "/chatfeature", "/thongbao", "/update", "/danhsachcauhoi", "/traloicauhoi", "/congbocauhoi", "/test6h", "/helpadmin"]) {
         assert.ok(admin.includes(command), `thiếu lệnh quản trị ${command}`);
     }
     for (const extracted of EXTRACTED_411_COMMANDS) {
@@ -125,8 +125,8 @@ test("/help và /helpadmin gửi được qua cơ chế chia tin hiện tại", 
         assert.ok(text.length > 0 && text.length <= 750, `tin vượt giới hạn chia tin: ${text.length}`);
     }
     const joined = publicMessages.join("\n");
-    assert.ok(joined.includes("/find"));
-    assert.ok(joined.includes("/dangky"));
+    assert.ok(joined.includes("/luumssv"));
+    assert.ok(joined.includes("/nhanlich"));
 
     const adminMessages = await run("helpadmin", { owner: true });
     assert.ok(adminMessages.length >= 1);
@@ -158,19 +158,58 @@ test("mọi lệnh trong trợ giúp đều được main.js xử lý", () => {
     }
 });
 
-test("parse giờ đăng ký lịch học tùy chọn", () => {
-    assert.deepEqual(main.parseDangKyArgument("05:30", "123456789"), {
+test("parse cú pháp /nhanlich: bắt buộc chọn homnay hoặc homsau", () => {
+    // Có MSSV đã lưu, chỉ nhập giờ và ngày đích.
+    assert.deepEqual(main.parseNhanLichArgument("06:30 homnay", "123456789"), {
         studentId: "123456789",
-        notificationTime: "05:30"
+        notificationTime: "06:30",
+        targetDayOffset: 0
     });
-    assert.deepEqual(main.parseDangKyArgument("123456789 23:59", null), {
-        studentId: "123456789",
-        notificationTime: "23:59"
+    // MSSV truyền trực tiếp, thứ tự thống nhất: MSSV -> giờ -> ngày đích.
+    assert.deepEqual(main.parseNhanLichArgument("123000135 06:30 homsau", null), {
+        studentId: "123000135",
+        notificationTime: "06:30",
+        targetDayOffset: 1
     });
-    assert.deepEqual(main.parseDangKyArgument("24:00", "123456789"), {
-        studentId: "123456789",
-        notificationTime: null
+    // Chấp nhận hoa thường và dạng có dấu / có khoảng trắng.
+    for (const token of ["homnay", "HOMNAY", "hôm nay", "Hom Nay"]) {
+        assert.equal(main.parseNhanLichArgument(`06:30 ${token}`, "123456789").targetDayOffset, 0, token);
+    }
+    for (const token of ["homsau", "HOMSAU", "hôm sau"]) {
+        assert.equal(main.parseNhanLichArgument(`06:30 ${token}`, "123456789").targetDayOffset, 1, token);
+    }
+    // Giới hạn giờ.
+    assert.equal(main.parseNhanLichArgument("00:00 homnay", "123456789").notificationTime, "00:00");
+    assert.equal(main.parseNhanLichArgument("23:59 homsau", "123456789").notificationTime, "23:59");
+    assert.equal(main.parseNhanLichArgument("24:00 homnay", "123456789").error, "time");
+    assert.equal(main.parseNhanLichArgument("06:60 homnay", "123456789").error, "time");
+});
+
+test("thiếu ngày đích thì báo lỗi chứ không đoán", () => {
+    assert.equal(main.parseNhanLichArgument("06:30", "123456789").error, "day");
+    assert.equal(main.parseNhanLichArgument("123000135 06:30", null).error, "day");
+    assert.equal(main.parseNhanLichArgument("mai", "123456789").error, "day");
+    assert.equal(main.parseNhanLichArgument("", "123456789").error, "empty");
+    // Chưa có MSSV và không truyền MSSV.
+    assert.equal(main.parseNhanLichArgument("06:30 homnay", null).error, "student");
+    // Quá nhiều tham số.
+    assert.equal(main.parseNhanLichArgument("123000135 06:30 homnay homnay", null).error, "syntax");
+});
+
+test("parse cú pháp /suagionhanlich: đổi được cả giờ lẫn ngày đích", () => {
+    assert.deepEqual(main.parseSuaGioNhanLichArgument("#1 06:30 homnay"), {
+        id: 1, notificationTime: "06:30", targetDayOffset: 0
     });
+    assert.deepEqual(main.parseSuaGioNhanLichArgument("2 21:00 homsau"), {
+        id: 2, notificationTime: "21:00", targetDayOffset: 1
+    });
+    // Chỉ đổi ngày đích.
+    assert.deepEqual(main.parseSuaGioNhanLichArgument("#2 homsau"), {
+        id: 2, notificationTime: null, targetDayOffset: 1
+    });
+    assert.equal(main.parseSuaGioNhanLichArgument("#1 06:30").error, "day");
+    assert.equal(main.parseSuaGioNhanLichArgument("#1").error, "syntax");
+    assert.equal(main.parseSuaGioNhanLichArgument("#1 99:99 homnay").error, "time");
 });
 
 test("parseCommand bóc tách lệnh chính xác với mọi định dạng mention Zalo trong nhóm", () => {
@@ -179,13 +218,38 @@ test("parseCommand bóc tách lệnh chính xác với mọi định dạng ment
     assert.deepEqual(main.parseCommand("/help @Bot MrYukitoBoBo"), { command: "help", argument: "" });
     assert.deepEqual(main.parseCommand("/help@Bot MrYukitoBoBo"), { command: "help", argument: "" });
     assert.deepEqual(main.parseCommand("@Bot MrYukitoBoBo /help"), { command: "help", argument: "" });
-    assert.deepEqual(main.parseCommand("@Bot MrYukitoBoBo /find 123456789"), { command: "find", argument: "123456789" });
+    assert.deepEqual(main.parseCommand("@Bot MrYukitoBoBo /luumssv 123456789"), { command: "luumssv", argument: "123456789" });
     assert.deepEqual(main.parseCommand("/lich@botname 123456789"), { command: "lich", argument: "123456789" });
     assert.deepEqual(main.parseCommand("/themlichtruc\n19/08 Nhân – Sang\n20/08 Thuận – Cường"), {
         command: "themlichtruc",
         argument: "19/08 Nhân – Sang\n20/08 Thuận – Cường"
     });
-    assert.equal(main.suggestCommandCorrection("dangky0800"), "/dangky 08:00");
-    assert.equal(main.suggestCommandCorrection("find123456789"), "/find 123456789");
+});
+
+test("parseCommand quy tên cũ về tên chính tắc nên không chạy hai lần", () => {
+    const pairs = [
+        ["/dangky 06:30 homnay", "nhanlich"],
+        ["/danhsachdangky", "gionhanlich"],
+        ["/suadangky #1 06:30 homnay", "suagionhanlich"],
+        ["/xoadangky #1", "xoagionhanlich"],
+        ["/huythongbao", "tatnhanlich"],
+        ["/find 123456789", "luumssv"],
+        ["/thongtinch 123", "chitietchat"],
+        ["/congbo", "congbocauhoi"]
+    ];
+    for (const [input, canonical] of pairs) {
+        const parsed = main.parseCommand(input);
+        assert.equal(parsed.command, canonical, `${input} phải quy về ${canonical}`);
+        // Mỗi tên chỉ sinh ra một lệnh duy nhất.
+        assert.equal(typeof parsed.command, "string");
+    }
+    assert.deepEqual(main.parseCommand("/dangky 06:30 homnay"), main.parseCommand("/nhanlich 06:30 homnay"));
+});
+
+test("gợi ý gõ sai hướng về tên chính tắc", () => {
+    assert.equal(main.suggestCommandCorrection("nhanlich0800"), "/nhanlich 08:00 homnay|homsau");
+    assert.equal(main.suggestCommandCorrection("luumssv123456789"), "/luumssv 123456789");
     assert.equal(main.suggestCommandCorrection("batnhaclic"), "/batnhaclich");
+    // Tên cũ không còn được gợi ý ra nữa.
+    assert.ok(!main.suggestCommandCorrection("dangky0800").includes("/dangky"));
 });

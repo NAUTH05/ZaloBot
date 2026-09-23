@@ -49,7 +49,20 @@ function formatDate(value) { if (!value) return "-"; const date = new Date(value
 function badge(value, tone = "neutral") { return `<span class="badge badge-${tone}">${escapeHtml(value)}</span>`; }
 function statusTone(status) { return status === "active" ? "success" : status === "inactive" ? "danger" : status === "disabled" ? "warning" : "neutral"; }
 function emptyRow(cols, text) { return `<tr><td colspan="${cols}" class="empty-state">${escapeHtml(text)}</td></tr>`; }
-function timeChips(times = []) { return times.length ? `<div class="chip-list">${times.map((item) => `<span class="time-chip"><strong>#${escapeHtml(item.id)} · ${escapeHtml(item.time)}</strong><small>${escapeHtml(formatDate(item.createdAt))}</small></span>`).join("")}</div>` : `<span class="muted">Chưa có giờ nhận lịch</span>`; }
+// Nhãn ngày đích: 0 = homnay, 1 = homsau. Dùng thống nhất với chat.
+function targetDayLabel(targetDayOffset) {
+  return Number(targetDayOffset) === 1 ? "homsau" : "homnay";
+}
+
+function targetDayText(targetDayOffset) {
+  return Number(targetDayOffset) === 1 ? "Lịch hôm sau" : "Lịch hôm nay";
+}
+
+function timeChips(times = []) {
+  return times.length
+    ? `<div class="chip-list">${times.map((item) => `<span class="time-chip"><strong>#${escapeHtml(item.id)} · ${escapeHtml(item.time)}</strong><small>${escapeHtml(targetDayLabel(item.targetDayOffset))} · ${escapeHtml(formatDate(item.createdAt))}</small></span>`).join("")}</div>`
+    : `<span class="muted">Chưa có giờ nhận lịch</span>`;
+}
 
 function switchTab(name) {
   $$(".tab-button").forEach((button) => button.classList.toggle("active", button.dataset.tab === name));
@@ -144,13 +157,16 @@ function renderCommands() {
   pager("#commandRegistryPagination", "commands", result, renderCommands);
 }
 /* ------------------------------------------------------------------ *
- * Target User ID combobox
+ * Command console: chọn nhiều người nhận
  *
- * Khóa của danh sách luôn là User ID thật; Chat ID không bao giờ được
- * đặt vào ô User ID. Ô Target Chat ID vẫn nhập tay được và chỉ được
- * điền tự động khi có liên kết đủ tin cậy (một chat riêng tư đang
- * hoạt động), kèm ghi chú rõ ràng cho người dùng.
+ * Khóa của lựa chọn luôn là User ID thật. Chat ID chỉ được suy ra khi có
+ * đúng một ngữ cảnh chat riêng tư đang hoạt động — cùng quy tắc với
+ * targetUsers.js ở server. Người không suy ra được Chat ID vẫn chọn được
+ * nhưng sẽ bị bỏ qua khi chạy, và điều đó được nói rõ trước khi xác nhận.
  * ------------------------------------------------------------------ */
+
+let selectedTargets = [];
+let batchPollTimer = null;
 
 function targetUserStatusSuffix(status) {
   if (status === "disabled") return "đã tắt";
@@ -214,29 +230,53 @@ function targetUsersFromWorkspace(workspace) {
   }));
 }
 
+function isTargetSelected(userId) {
+  return selectedTargets.some((item) => item.userId === userId);
+}
+
+function targetDeliveryNote(target) {
+  if (target.targetChatId) return `Gửi tới chat ${target.targetChatId}`;
+  if (target.targetChatHint === "multiple") return "Nhiều ngữ cảnh chat — sẽ bỏ qua";
+  if (target.targetChatHint === "unresolved") return "Chưa xác định được chat riêng tư — sẽ bỏ qua";
+  return "Chưa có chat đang hoạt động — sẽ bỏ qua";
+}
+
 function targetUserOptionHtml(user, index) {
   const meta = [`ID ${user.userId}`];
   if (user.studentIds.length) meta.push(user.studentIds.join(", "));
   if (user.chatCount) meta.push(`${user.chatCount} chat`);
   const suffix = targetUserStatusSuffix(user.status);
   if (suffix) meta.push(suffix);
-  return `<li role="option" id="targetUserOption${index}" class="combobox-option${index === targetUserActiveIndex ? " active" : ""}" aria-selected="${index === targetUserActiveIndex ? "true" : "false"}" data-index="${index}"><span class="combobox-name">${escapeHtml(user.displayName)}</span><span class="combobox-meta">${escapeHtml(meta.join(" · "))}</span></li>`;
+  if (!user.targetChatId) meta.push("không gửi được");
+  const selected = isTargetSelected(user.userId);
+  return `<li role="option" id="targetUserOption${index}" class="combobox-option${index === targetUserActiveIndex ? " active" : ""}${selected ? " selected" : ""}" aria-selected="${index === targetUserActiveIndex ? "true" : "false"}" data-index="${index}"><span class="combobox-name">${escapeHtml(user.displayName)}</span><span class="combobox-meta">${escapeHtml(meta.join(" · "))}</span>${selected ? `<span class="combobox-check" aria-label="đã chọn">✓</span>` : ""}</li>`;
 }
 
-function renderTargetUserList(query) {
+// Ứng viên hiện tại: đã lọc theo từ khóa, bỏ những người đã chọn.
+function currentTargetUserMatches() {
+  const input = $("#targetUserInput");
+  const needle = String(input?.value || "").trim().toLowerCase();
+  return targetUsers.filter((user) => {
+    if (isTargetSelected(user.userId)) return false;
+    if (!needle) return true;
+    return user.userId.toLowerCase().includes(needle)
+      || user.displayName.toLowerCase().includes(needle)
+      || user.studentIds.some((id) => id.toLowerCase().includes(needle));
+  });
+}
+
+function renderTargetUserList() {
   const input = $("#targetUserInput");
   const list = $("#targetUserList");
   if (!input || !list) return;
-  const needle = String(query ?? input.value).trim().toLowerCase();
-  targetUserMatches = targetUsers.filter((user) => !needle
-    || user.userId.toLowerCase().includes(needle)
-    || user.displayName.toLowerCase().includes(needle)
-    || user.studentIds.some((id) => id.toLowerCase().includes(needle)));
+  const needle = String(input.value || "").trim().toLowerCase();
+  targetUserMatches = currentTargetUserMatches();
   targetUserActiveIndex = targetUserMatches.length ? 0 : -1;
+
   if (!targetUsers.length) {
-    list.innerHTML = `<li class="combobox-empty" role="presentation">Chưa có user nào tương tác với bot. Nhập User ID thủ công.</li>`;
+    list.innerHTML = `<li class="combobox-empty" role="presentation">Chưa có user nào tương tác với bot. Nhập User ID thủ công rồi nhấn Enter.</li>`;
   } else if (!targetUserMatches.length) {
-    list.innerHTML = `<li class="combobox-empty" role="presentation">Không có user khớp “${escapeHtml(needle)}”. Vẫn có thể nhập User ID thủ công.</li>`;
+    list.innerHTML = `<li class="combobox-empty" role="presentation">${needle ? `Không có user khớp “${escapeHtml(needle)}”. Nhấn Enter để thêm User ID thủ công.` : "Đã chọn hết user khớp. Nhập User ID thủ công nếu cần."}</li>`;
   } else {
     const visible = targetUserMatches.slice(0, TARGET_USER_LIMIT);
     const rest = targetUserMatches.length - visible.length;
@@ -246,9 +286,7 @@ function renderTargetUserList(query) {
   input.setAttribute("aria-expanded", "true");
 }
 
-function openTargetUserList() {
-  renderTargetUserList($("#targetUserInput")?.value || "");
-}
+function openTargetUserList() { renderTargetUserList(); }
 
 function closeTargetUserList() {
   const list = $("#targetUserList");
@@ -284,92 +322,334 @@ function moveTargetUserActive(step) {
   highlightTargetUser(next);
 }
 
-// Chỉ điền Target Chat ID khi có liên kết đáng tin cậy và không ghi đè giá trị nhập tay.
-function applyTargetChatId(user) {
-  const chatInput = $("#targetChatIdInput");
-  if (!chatInput || !user.targetChatId) return false;
-  if (chatInput.value.trim() && chatInput.dataset.autofilled !== "1") return false;
-  chatInput.value = user.targetChatId;
-  chatInput.dataset.autofilled = "1";
-  return true;
+// Thêm một người vào lựa chọn. Chấp nhận cả User ID nhập tay không có trong gợi ý.
+function addTargetUser(raw) {
+  const user = typeof raw === "string"
+    ? { userId: String(raw).trim(), displayName: "", status: "active", chatCount: 0, studentIds: [], targetChatId: "", targetChatHint: "none" }
+    : raw;
+  const userId = String(user?.userId || "").trim();
+  if (!userId) return { ok: false, error: "User ID không hợp lệ." };
+  if (isTargetSelected(userId)) return { ok: false, error: `Đã có ${userId} trong danh sách chọn.` };
+
+  const known = targetUsers.find((item) => item.userId === userId);
+  const source = known || user;
+  selectedTargets.push({
+    userId,
+    displayName: source.displayName || `User ${userId}`,
+    status: source.status || "active",
+    targetChatId: source.targetChatId || "",
+    targetChatHint: source.targetChatHint || "none",
+    known: Boolean(known)
+  });
+  renderTargetSelection();
+  return { ok: true };
 }
 
-function updateTargetUserHint(user, chatFilled) {
-  const hint = $("#targetUserHint");
-  if (!hint || !user) return;
-  const notes = [];
-  if (chatFilled) notes.push(`Đã điền Chat ID riêng tư ${user.targetChatId} cho user này — bạn vẫn có thể sửa lại.`);
-  else if (user.targetChatHint === "multiple") notes.push(`User này có ${user.chatCount} ngữ cảnh chat nên Chat ID không được điền tự động; hãy nhập thủ công nếu cần.`);
-  else if (user.targetChatHint === "unresolved") notes.push("Ngữ cảnh chat của user này chưa xác định là chat riêng tư nên Chat ID không được điền tự động; hãy nhập thủ công nếu cần.");
-  else notes.push("Không có ngữ cảnh chat đang hoạt động nên chỉ User ID được điền.");
-  const suffix = targetUserStatusSuffix(user.status);
-  if (suffix) notes.push(`Bản ghi ${suffix}.`);
-  hint.textContent = notes.join(" ");
+function removeTargetUser(userId) {
+  selectedTargets = selectedTargets.filter((item) => item.userId !== userId);
+  renderTargetSelection();
 }
 
-function selectTargetUser(index) {
-  const user = targetUserMatches[index];
-  const input = $("#targetUserInput");
-  if (!user || !input) return;
-  input.value = user.userId;
-  input.dataset.selectedUserId = user.userId;
-  const chatFilled = applyTargetChatId(user);
-  closeTargetUserList();
-  updateTargetUserHint(user, chatFilled);
-  input.focus();
+function clearTargetSelection() {
+  selectedTargets = [];
+  renderTargetSelection();
+}
+
+function selectAllFilteredTargets() {
+  const matches = currentTargetUserMatches();
+  let added = 0;
+  for (const user of matches) {
+    if (isTargetSelected(user.userId)) continue;
+    selectedTargets.push({
+      userId: user.userId,
+      displayName: user.displayName,
+      status: user.status,
+      targetChatId: user.targetChatId,
+      targetChatHint: user.targetChatHint,
+      known: true
+    });
+    added += 1;
+  }
+  renderTargetSelection();
+  return added;
+}
+
+function renderTargetSelection() {
+  const chips = $("#targetChips");
+  const count = $("#targetCount");
+  const sendable = selectedTargets.filter((item) => item.targetChatId).length;
+  const skipped = selectedTargets.length - sendable;
+
+  if (count) {
+    count.textContent = selectedTargets.length === 0
+      ? "Chưa chọn người nhận nào"
+      : `Đã chọn ${selectedTargets.length} người · ${sendable} gửi được${skipped ? ` · ${skipped} sẽ bỏ qua` : ""}`;
+  }
+
+  if (chips) {
+    chips.innerHTML = selectedTargets.map((target) => `
+      <span class="chip${target.targetChatId ? "" : " chip-warning"}">
+        <span class="chip-text"><strong>${escapeHtml(target.displayName)}</strong><code>${escapeHtml(target.userId)}</code></span>
+        <span class="chip-note">${escapeHtml(targetDeliveryNote(target))}</span>
+        <button type="button" class="chip-remove" data-remove-target="${escapeHtml(target.userId)}" aria-label="Bỏ ${escapeHtml(target.displayName)}">×</button>
+      </span>`).join("");
+    $$("#targetChips [data-remove-target]").forEach((button) => button.addEventListener("click", () => removeTargetUser(button.dataset.removeTarget)));
+  }
+
+  const list = $("#targetUserList");
+  if (list && !list.hidden) renderTargetUserList();
 }
 
 function applyTargetUserState() {
-  const input = $("#targetUserInput");
-  const list = $("#targetUserList");
   const hint = $("#targetUserHint");
-  if (!input || !hint) return;
-  if (list && !list.hidden) renderTargetUserList(input.value);
-  if (input.dataset.selectedUserId) return;
-  hint.textContent = targetUsers.length
-    ? `${targetUsers.length} user đã tương tác với bot. Gõ để tìm hoặc nhập User ID thủ công.`
-    : "Chưa có user nào tương tác với bot. Nhập User ID thủ công.";
+  if (hint) {
+    hint.textContent = targetUsers.length
+      ? `${targetUsers.length} user đã tương tác với bot. Gõ để tìm theo tên, User ID hoặc MSSV; nhấn Enter để thêm User ID nhập tay.`
+      : "Chưa có user nào tương tác với bot. Nhập User ID thủ công rồi nhấn Enter.";
+  }
+  renderTargetSelection();
+}
+
+/* ------------------------------------------------------------------ *
+ * Xác nhận, tiến độ và kết quả
+ * ------------------------------------------------------------------ */
+
+function hideBatchConfirm() {
+  const block = $("#batchConfirm");
+  if (block) { block.hidden = true; block.innerHTML = ""; }
+}
+
+function showBatchConfirm({ command, targets, targeting }) {
+  const block = $("#batchConfirm");
+  if (!block) return;
+  const isBroadcast = targeting?.mode === "broadcast";
+  const sendable = targets.filter((item) => item.targetChatId);
+  const skipped = targets.length - sendable.length;
+  const willSend = isBroadcast || sendable.length > 0;
+
+  block.hidden = false;
+  block.innerHTML = `
+    <div class="panel-heading"><h2>Xác nhận trước khi chạy</h2></div>
+    <div class="detail-grid">
+      <div class="detail"><span>Lệnh</span><code>${escapeHtml(command)}</code></div>
+      <div class="detail"><span>Người nhận</span><strong>${isBroadcast ? "Mọi chat đang hoạt động" : `${targets.length} người (${new Set(targets.map((item) => item.userId)).size} User ID không trùng)`}</strong></div>
+      <div class="detail"><span>Sẽ gửi tin nhắn</span><strong>${willSend ? "Có" : "Không"}</strong></div>
+      <div class="detail"><span>Bỏ qua</span><strong>${isBroadcast ? 0 : skipped}</strong></div>
+    </div>
+    ${isBroadcast ? `<p class="notice">${escapeHtml(targeting.broadcastScope || "")} Danh sách người nhận không làm thay đổi phạm vi gửi.</p>` : ""}
+    ${!isBroadcast && skipped > 0 ? `<p class="warning-box">${skipped} người chưa xác định được chat riêng tư đang hoạt động nên sẽ bị bỏ qua, không gửi tin.</p>` : ""}
+    <div class="row-actions">
+      <button type="button" class="primary" id="batchConfirmRun">Chạy lệnh</button>
+      <button type="button" class="secondary" id="batchConfirmCancel">Hủy</button>
+    </div>`;
+
+  $("#batchConfirmRun").addEventListener("click", () => startBatchRun({ command, targets, targeting }));
+  $("#batchConfirmCancel").addEventListener("click", () => {
+    hideBatchConfirm();
+    $("#commandResult").textContent = "Đã hủy. Không có lệnh nào được chạy.";
+  });
+}
+
+function batchStatusBadge(status) {
+  if (status === "delivered") return `<span class="badge badge-success">Đã gửi</span>`;
+  if (status === "failed") return `<span class="badge badge-danger">Lỗi</span>`;
+  return `<span class="badge badge-warning">Bỏ qua</span>`;
+}
+
+function renderBatchProgress(state) {
+  const output = $("#commandResult");
+  if (!output) return;
+  const { phase, progress, summary, results = [], error, note } = state;
+  const total = progress?.total || 0;
+  const completed = progress?.completed || 0;
+  const percent = total ? Math.round((completed / total) * 100) : 0;
+
+  const rows = results.map((item) => `
+    <tr>
+      <td><strong>${escapeHtml(item.displayName || item.userId || "Mọi chat")}</strong><code>${escapeHtml(item.userId || "-")}</code></td>
+      <td>${escapeHtml(item.chatId || "-")}</td>
+      <td>${batchStatusBadge(item.status)}</td>
+      <td>${item.messageCount ? `${item.messageCount} tin` : ""}${item.error ? escapeHtml(item.error) : ""}</td>
+    </tr>`).join("");
+
+  output.innerHTML = `
+    <div class="batch-progress">
+      <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="${total}" aria-valuenow="${completed}"><span style="width:${percent}%"></span></div>
+      <p class="muted">${phase === "running" ? "Đang chạy" : phase === "failed" ? "Dừng vì lỗi" : "Hoàn tất"}: ${completed}/${total} · thành công ${summary?.delivered ?? 0} · lỗi ${summary?.failed ?? 0} · bỏ qua ${summary?.skipped ?? 0}${summary?.duplicates ? ` · ${summary.duplicates} User ID trùng đã gộp` : ""}</p>
+      ${note ? `<p class="notice">${escapeHtml(note)}</p>` : ""}
+      ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
+    </div>
+    ${rows ? `<div class="table-wrap"><table><thead><tr><th>Người nhận</th><th>Chat</th><th>Trạng thái</th><th>Ghi chú</th></tr></thead><tbody>${rows}</tbody></table></div>` : ""}`;
+}
+
+async function startBatchRun({ command, targets, targeting }) {
+  const runButton = $("#batchConfirmRun");
+  if (runButton) runButton.disabled = true;
+  hideBatchConfirm();
+
+  const isBroadcast = targeting?.mode === "broadcast";
+  const payload = { command, targetUserIds: targets.map((item) => item.userId) };
+  renderBatchProgress({
+    phase: "running",
+    progress: { completed: 0, total: isBroadcast ? 1 : targets.length },
+    summary: { delivered: 0, failed: 0, skipped: 0 },
+    results: []
+  });
+
+  try {
+    const started = await api("/api/admin/commands/batch", { method: "POST", body: JSON.stringify(payload) });
+    if (batchPollTimer) { window.clearInterval(batchPollTimer); batchPollTimer = null; }
+
+    const poll = async () => {
+      try {
+        const state = await api(`/api/admin/commands/batch/${encodeURIComponent(started.jobId)}`);
+        renderBatchProgress({
+          phase: state.status === "running" ? "running" : state.status === "failed" ? "failed" : "done",
+          progress: state.progress,
+          summary: state.summary,
+          results: state.results,
+          error: state.error,
+          note: isBroadcast ? targeting?.broadcastScope : null
+        });
+        if (state.status !== "running") {
+          if (batchPollTimer) { window.clearInterval(batchPollTimer); batchPollTimer = null; }
+          await loadData();
+        }
+      } catch (error) {
+        if (batchPollTimer) { window.clearInterval(batchPollTimer); batchPollTimer = null; }
+        renderBatchProgress({ phase: "failed", progress: { completed: 0, total: targets.length }, summary: {}, results: [], error: error.message });
+      }
+    };
+
+    await poll();
+    batchPollTimer = window.setInterval(poll, 600);
+  } catch (error) {
+    renderBatchProgress({
+      phase: "failed",
+      progress: { completed: 0, total: isBroadcast ? 1 : targets.length },
+      summary: {},
+      results: [],
+      error: error.message
+    });
+  } finally {
+    if (runButton) runButton.disabled = false;
+  }
 }
 
 function setupCommandConsole() {
   const form = $("#commandForm"); if (!form || form.dataset.ready) return; form.dataset.ready = "1";
-  form.innerHTML = `<label>Command<input name="command" id="commandInput" list="commandSuggestions" placeholder="/lich" required autocomplete="off" /><datalist id="commandSuggestions"></datalist></label><p class="muted">Executing as: <strong>${escapeHtml("authenticated admin")}</strong></p><div class="field"><label for="targetUserInput">Target User ID (tuỳ chọn)</label><div class="combobox" data-combobox><input name="targetUserId" id="targetUserInput" role="combobox" aria-expanded="false" aria-controls="targetUserList" aria-autocomplete="list" aria-describedby="targetUserHint" placeholder="Chọn user đã tương tác hoặc nhập User ID" autocomplete="off" /><button type="button" class="combobox-toggle" data-combobox-toggle aria-label="Mở danh sách user" tabindex="-1">▾</button><ul class="combobox-list" id="targetUserList" role="listbox" aria-label="User đã tương tác với bot" hidden></ul></div><p class="field-hint" id="targetUserHint">Chưa tải danh sách user.</p></div><label>Target Chat ID (tuỳ chọn)<input name="targetChatId" id="targetChatIdInput" placeholder="Mặc định là chat của admin đang đăng nhập" autocomplete="off" /></label><button class="primary" type="submit">Execute command</button><pre id="commandResult" class="command-output">No result yet.</pre>`;
+  form.innerHTML = `
+    <label>Command<input name="command" id="commandInput" list="commandSuggestions" placeholder="/lich" required autocomplete="off" /><datalist id="commandSuggestions"></datalist></label>
+    <p class="muted">Executing as: <strong>${escapeHtml("authenticated admin")}</strong> — quyền hạn luôn xét theo admin đang đăng nhập, không theo người nhận.</p>
+    <div class="field">
+      <label for="targetUserInput">Người nhận (User ID)</label>
+      <div class="combobox" data-combobox>
+        <input name="targetUserInput" id="targetUserInput" role="combobox" aria-expanded="false" aria-controls="targetUserList" aria-autocomplete="list" aria-describedby="targetUserHint" placeholder="Tìm theo tên, User ID hoặc MSSV" autocomplete="off" />
+        <button type="button" class="combobox-toggle" data-combobox-toggle aria-label="Mở danh sách user" tabindex="-1">▾</button>
+        <ul class="combobox-list" id="targetUserList" role="listbox" aria-label="User đã tương tác với bot" hidden></ul>
+      </div>
+      <div class="row-actions selection-actions">
+        <button type="button" id="targetSelectAll" class="small">Chọn tất cả kết quả đang lọc</button>
+        <button type="button" id="targetClearAll" class="small">Bỏ chọn tất cả</button>
+        <span class="muted" id="targetCount">Chưa chọn người nhận nào</span>
+      </div>
+      <div id="targetChips" class="chip-list" aria-live="polite"></div>
+      <p class="field-hint" id="targetUserHint">Chưa tải danh sách user.</p>
+    </div>
+    <button class="primary" type="submit" id="commandSubmit">Execute command</button>
+    <div id="batchConfirm" class="panel confirm-panel" hidden></div>
+    <pre id="commandResult" class="command-output">No result yet.</pre>`;
 
   const input = $("#commandInput");
   input.addEventListener("input", () => { const query = input.value.toLowerCase(); $("#commandSuggestions").innerHTML = commandRegistry.filter((item) => item.name.toLowerCase().startsWith(query || "/")).map((item) => `<option value="${escapeHtml(item.usage)}">`).join(""); });
 
   const userInput = $("#targetUserInput");
-  const chatInput = $("#targetChatIdInput");
   const toggle = $("[data-combobox-toggle]");
 
   userInput.addEventListener("focus", openTargetUserList);
   userInput.addEventListener("click", openTargetUserList);
-  userInput.addEventListener("input", () => { delete userInput.dataset.selectedUserId; openTargetUserList(); });
+  userInput.addEventListener("input", openTargetUserList);
   userInput.addEventListener("keydown", (event) => {
     const open = !$("#targetUserList").hidden;
     if (event.key === "ArrowDown") { event.preventDefault(); if (open) moveTargetUserActive(1); else openTargetUserList(); return; }
     if (event.key === "ArrowUp") { event.preventDefault(); if (open) moveTargetUserActive(-1); else openTargetUserList(); return; }
     if (event.key === "Home" && open) { event.preventDefault(); highlightTargetUser(0); return; }
     if (event.key === "End" && open) { event.preventDefault(); highlightTargetUser(Math.min(targetUserMatches.length, TARGET_USER_LIMIT) - 1); return; }
-    if (event.key === "Enter") { if (open && targetUserActiveIndex >= 0) { event.preventDefault(); selectTargetUser(targetUserActiveIndex); } return; }
+    if (event.key === "Enter") {
+      // Enter chọn gợi ý đang tô sáng; nếu không có gợi ý nào thì thêm User ID nhập tay.
+      const typed = userInput.value.trim();
+      if (open && targetUserActiveIndex >= 0 && targetUserMatches[targetUserActiveIndex]) {
+        event.preventDefault();
+        addTargetUser(targetUserMatches[targetUserActiveIndex]);
+        userInput.value = "";
+        openTargetUserList();
+        return;
+      }
+      if (typed) {
+        event.preventDefault();
+        const result = addTargetUser(typed);
+        if (!result.ok) $("#commandResult").textContent = result.error;
+        userInput.value = "";
+        openTargetUserList();
+      }
+      return;
+    }
+    if (event.key === "Backspace" && !userInput.value && selectedTargets.length) {
+      removeTargetUser(selectedTargets[selectedTargets.length - 1].userId);
+      return;
+    }
     if (event.key === "Escape" && open) { event.preventDefault(); closeTargetUserList(); }
   });
   // Đóng khi focus rời khỏi combobox, kể cả khi chọn bằng chuột.
   userInput.addEventListener("blur", () => window.setTimeout(() => { if (!$("[data-combobox]")?.contains(document.activeElement)) closeTargetUserList(); }, 120));
-  userInput.addEventListener("change", () => {
-    const typed = userInput.value.trim();
-    if (!typed) { $("#targetUserHint").textContent = `${targetUsers.length} user đã tương tác với bot. Gõ để tìm hoặc nhập User ID thủ công.`; return; }
-    if (targetUsers.some((user) => user.userId === typed)) return;
-    $("#targetUserHint").textContent = "User ID nhập thủ công. Chat ID không được điền tự động.";
-  });
+
   toggle.addEventListener("click", () => { if ($("#targetUserList").hidden) { userInput.focus(); openTargetUserList(); } else closeTargetUserList(); });
   $("#targetUserList").addEventListener("mousedown", (event) => {
     const option = event.target.closest(".combobox-option");
     if (!option) return;
     event.preventDefault();
-    selectTargetUser(Number(option.dataset.index));
+    const user = targetUserMatches[Number(option.dataset.index)];
+    if (!user) return;
+    addTargetUser(user);
+    userInput.value = "";
+    openTargetUserList();
+    userInput.focus();
   });
-  chatInput.addEventListener("input", () => { delete chatInput.dataset.autofilled; });
+
+  $("#targetSelectAll").addEventListener("click", () => {
+    const added = selectAllFilteredTargets();
+    if (!added) $("#commandResult").textContent = "Không còn user nào để chọn thêm trong kết quả đang lọc.";
+  });
+  $("#targetClearAll").addEventListener("click", () => { clearTargetSelection(); hideBatchConfirm(); });
+
+  // Gửi form: chỉ hiện xác nhận, chưa chạy gì cả.
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const command = $("#commandInput").value.trim();
+    if (!command) return;
+    if (!command.startsWith("/")) { $("#commandResult").textContent = "Lệnh phải bắt đầu bằng /"; return; }
+    if (!selectedTargets.length) { $("#commandResult").textContent = "Chọn ít nhất một người nhận."; return; }
+
+    const name = command.slice(1).match(/^(\w+)/)?.[1]?.toLowerCase() || "";
+    const entry = commandRegistry.find((item) => item.name.slice(1) === name || (item.aliases || []).includes(name));
+    if (!entry) { $("#commandResult").textContent = `Không nhận diện được lệnh “/${name}”.`; return; }
+
+    // Cùng quy tắc với commandTargeting.js: chỉ dẫn hướng trước, server vẫn là
+    // nơi quyết định cuối cùng.
+    const broadcastNames = ["thongbao", "update", "congbo", "test6h"];
+    const perUserName = ["start", "find", "lich", "lichtuan", "lichthi", "lichgv", "phongtrong", "dangky", "danhsachdangky", "suadangky", "xoadangky", "huythongbao", "batnhaclich", "tatnhaclich", "trangthainhaclich", "sinhnhat", "ai", "help"];
+    let targeting;
+    if (broadcastNames.includes(name)) {
+      targeting = { mode: "broadcast", broadcastScope: "Lệnh này gửi tới mọi chat đang hoạt động, nên hệ thống chỉ chạy đúng một lần dù bạn chọn bao nhiêu người." };
+    } else if (perUserName.includes(name)) {
+      targeting = { mode: "per-user" };
+    } else {
+      $("#commandResult").textContent = `Lệnh /${name} không chạy theo từng người được nên không thể chọn nhiều người nhận.`;
+      return;
+    }
+
+    showBatchConfirm({ command, targets: selectedTargets, targeting });
+  });
 }
 
 function renderLogs() {
@@ -425,7 +705,7 @@ function openCreateUser() {
 
 function openUser(userId) {
   const user = workspace.users.find((item) => item.userId === userId); if (!user) return;
-  showDialog(user.displayName, `<div class="detail-grid"><div class="detail"><span>User ID</span><code>${escapeHtml(user.userId)}</code></div><div class="detail"><span>MSSV</span><strong>${escapeHtml(user.studentIds.join(", ") || "Chưa có MSSV")}</strong></div><div class="detail"><span>Tương tác đầu tiên</span><strong>${escapeHtml(formatDate(user.firstInteractionAt))}</strong></div><div class="detail"><span>Hoạt động gần nhất</span><strong>${escapeHtml(formatDate(user.lastInteractionAt))}</strong></div></div><h3>Ngữ cảnh chat</h3><div class="stack">${user.chats.map((chat) => `<article class="stack-item"><form class="userContextForm" data-user-chat="${escapeHtml(chat.chatId)}"><div class="form-grid"><label>Tên hiển thị<input name="displayName" value="${escapeHtml(user.displayName)}" /></label><label>Trạng thái thành viên<select name="status"><option value="active" ${chat.memberStatus === "active" ? "selected" : ""}>Đang hoạt động</option><option value="disabled" ${chat.memberStatus === "disabled" ? "selected" : ""}>Đã tắt</option><option value="removed" ${chat.memberStatus === "removed" ? "selected" : ""}>Đã xóa</option></select></label></div><p>${escapeHtml(chat.chatType)} · chat ${escapeHtml(chat.status)} · <code>${escapeHtml(chat.chatId)}</code></p><div class="row-actions"><button type="submit">Lưu người dùng</button><button type="button" data-open-chat="${escapeHtml(chat.chatId)}">Mở chat</button><button type="button" data-user-admin="${escapeHtml(chat.chatId)}">Cấp quyền admin</button><button type="button" class="danger-text" data-user-remove="${escapeHtml(chat.chatId)}">Xóa khỏi chat</button></div></form></article>`).join("")}</div><h3>Đăng ký nhận lịch</h3><div class="stack">${user.subscriptions.map((item) => `<article class="stack-item horizontal"><div><strong>${escapeHtml(item.studentId || "Chưa có MSSV")} · ${escapeHtml(item.chatName)}</strong><p>${escapeHtml(item.notificationsEnabled ? "Đang bật" : "Đang tắt")} · ${escapeHtml(item.notificationTimes.map((time) => time.time).join(", ") || "Chưa có giờ nhận lịch")}</p></div><button data-open-sub="${escapeHtml(item.key)}">Quản lý</button></article>`).join("") || `<div class="empty-state">Không có đăng ký nhận lịch.</div>`}</div>`);
+  showDialog(user.displayName, `<div class="detail-grid"><div class="detail"><span>User ID</span><code>${escapeHtml(user.userId)}</code></div><div class="detail"><span>MSSV</span><strong>${escapeHtml(user.studentIds.join(", ") || "Chưa có MSSV")}</strong></div><div class="detail"><span>Tương tác đầu tiên</span><strong>${escapeHtml(formatDate(user.firstInteractionAt))}</strong></div><div class="detail"><span>Hoạt động gần nhất</span><strong>${escapeHtml(formatDate(user.lastInteractionAt))}</strong></div></div><h3>Ngữ cảnh chat</h3><div class="stack">${user.chats.map((chat) => `<article class="stack-item"><form class="userContextForm" data-user-chat="${escapeHtml(chat.chatId)}"><div class="form-grid"><label>Tên hiển thị<input name="displayName" value="${escapeHtml(user.displayName)}" /></label><label>Trạng thái thành viên<select name="status"><option value="active" ${chat.memberStatus === "active" ? "selected" : ""}>Đang hoạt động</option><option value="disabled" ${chat.memberStatus === "disabled" ? "selected" : ""}>Đã tắt</option><option value="removed" ${chat.memberStatus === "removed" ? "selected" : ""}>Đã xóa</option></select></label></div><p>${escapeHtml(chat.chatType)} · chat ${escapeHtml(chat.status)} · <code>${escapeHtml(chat.chatId)}</code></p><div class="row-actions"><button type="submit">Lưu người dùng</button><button type="button" data-open-chat="${escapeHtml(chat.chatId)}">Mở chat</button><button type="button" data-user-admin="${escapeHtml(chat.chatId)}">Cấp quyền admin</button><button type="button" class="danger-text" data-user-remove="${escapeHtml(chat.chatId)}">Xóa khỏi chat</button></div></form></article>`).join("")}</div><h3>Đăng ký nhận lịch</h3><div class="stack">${user.subscriptions.map((item) => `<article class="stack-item horizontal"><div><strong>${escapeHtml(item.studentId || "Chưa có MSSV")} · ${escapeHtml(item.chatName)}</strong><p>${escapeHtml(item.notificationsEnabled ? "Đang bật" : "Đang tắt")} · ${escapeHtml(item.notificationTimes.map((time) => `${time.time} ${targetDayLabel(time.targetDayOffset)}`).join(", ") || "Chưa có giờ nhận lịch")}</p></div><button data-open-sub="${escapeHtml(item.key)}">Quản lý</button></article>`).join("") || `<div class="empty-state">Không có đăng ký nhận lịch.</div>`}</div>`);
   $$('.userContextForm').forEach((form) => form.addEventListener("submit", async (event) => { event.preventDefault(); const values = new FormData(event.currentTarget); await api(`/api/admin/users/${encodeURIComponent(userId)}`, { method: "PATCH", body: JSON.stringify({ chatId: event.currentTarget.dataset.userChat, displayName: values.get("displayName"), status: values.get("status") }) }); $("#detailDialog").close(); await loadData(); }));
   $$('[data-user-admin]').forEach((button) => button.addEventListener("click", async () => { await api("/api/admin/settings/admins", { method: "POST", body: JSON.stringify({ userId, chatId: button.dataset.userAdmin, displayName: user.displayName }) }); await loadData(); }));
   $$('[data-user-remove]').forEach((button) => button.addEventListener("click", async () => { if (!confirm(`Xóa user ${userId} khỏi chat ${button.dataset.userRemove}? Subscription của user trong chat cũng sẽ bị xóa.`)) return; await api(`/api/admin/users/${encodeURIComponent(userId)}?hard=1&chatId=${encodeURIComponent(button.dataset.userRemove)}`, { method: "DELETE" }); $("#detailDialog").close(); await loadData(); }));
@@ -435,7 +715,7 @@ function openUser(userId) {
 
 async function openChat(chatId) {
   const data = await api(`/api/admin/chats/${encodeURIComponent(chatId)}`); const chat = data.chat;
-  showDialog(chat.displayName || chat.chatId, `<form id="chatMetadataForm"><div class="form-grid"><label>Chat ID<input value="${escapeHtml(chat.chatId)}" disabled /></label><label>User ID<input name="userId" value="${escapeHtml(chat.userId || "")}" /></label><label>Display name<input name="displayName" value="${escapeHtml(chat.displayName || "")}" /></label><label>Type<select name="chatType"><option value="private" ${chat.chatType === "private" ? "selected" : ""}>Private</option><option value="group" ${chat.chatType === "group" ? "selected" : ""}>Group</option><option value="unknown" ${chat.chatType === "unknown" ? "selected" : ""}>Unknown</option></select></label></div><button class="primary" type="submit">Lưu metadata</button></form><div class="action-bar"><button data-chat-status="active">Reactivate</button><button data-chat-status="disabled">Disable</button><button data-chat-status="removed">Soft remove</button><button data-chat-retry="1">Retry</button><button data-make-admin="1">Make admin</button><button class="danger-text" data-chat-hard-delete="1">Xóa vĩnh viễn</button></div><div class="detail-grid"><div class="detail"><span>Last inbound</span><strong>${escapeHtml(formatDate(chat.lastInboundInteractionAt))}</strong></div><div class="detail"><span>Last success</span><strong>${escapeHtml(formatDate(chat.lastSuccessfulDeliveryAt))}</strong></div><div class="detail"><span>Last error</span><strong>${escapeHtml(chat.lastError?.message || "-")}</strong></div><div class="detail"><span>Error time</span><strong>${escapeHtml(formatDate(chat.lastError?.at))}</strong></div></div><h3>Members & MSSV</h3><div class="stack">${(data.members || []).map((user) => `<article class="stack-item"><strong>${escapeHtml(user.displayName)}</strong><p><code>${escapeHtml(user.userId)}</code> · ${escapeHtml(user.studentIds.join(", ") || "No MSSV")}</p></article>`).join("") || `<div class="empty-state">Không có member record.</div>`}</div><h3>Subscriptions</h3><div class="stack">${(data.subscriptions || []).map((item) => `<article class="stack-item horizontal"><div><strong>${escapeHtml(item.userDisplayName || item.userId || "Legacy")}</strong><p>${escapeHtml(item.studentId || "No MSSV")} · ${escapeHtml(item.notificationTimes.map((time) => time.time).join(", ") || "No times")}</p></div><button data-open-sub="${escapeHtml(item.key)}">Quản lý</button></article>`).join("") || `<div class="empty-state">Không có subscription.</div>`}</div>`);
+  showDialog(chat.displayName || chat.chatId, `<form id="chatMetadataForm"><div class="form-grid"><label>Chat ID<input value="${escapeHtml(chat.chatId)}" disabled /></label><label>User ID<input name="userId" value="${escapeHtml(chat.userId || "")}" /></label><label>Display name<input name="displayName" value="${escapeHtml(chat.displayName || "")}" /></label><label>Type<select name="chatType"><option value="private" ${chat.chatType === "private" ? "selected" : ""}>Private</option><option value="group" ${chat.chatType === "group" ? "selected" : ""}>Group</option><option value="unknown" ${chat.chatType === "unknown" ? "selected" : ""}>Unknown</option></select></label></div><button class="primary" type="submit">Lưu metadata</button></form><div class="action-bar"><button data-chat-status="active">Reactivate</button><button data-chat-status="disabled">Disable</button><button data-chat-status="removed">Soft remove</button><button data-chat-retry="1">Retry</button><button data-make-admin="1">Make admin</button><button class="danger-text" data-chat-hard-delete="1">Xóa vĩnh viễn</button></div><div class="detail-grid"><div class="detail"><span>Last inbound</span><strong>${escapeHtml(formatDate(chat.lastInboundInteractionAt))}</strong></div><div class="detail"><span>Last success</span><strong>${escapeHtml(formatDate(chat.lastSuccessfulDeliveryAt))}</strong></div><div class="detail"><span>Last error</span><strong>${escapeHtml(chat.lastError?.message || "-")}</strong></div><div class="detail"><span>Error time</span><strong>${escapeHtml(formatDate(chat.lastError?.at))}</strong></div></div><h3>Members & MSSV</h3><div class="stack">${(data.members || []).map((user) => `<article class="stack-item"><strong>${escapeHtml(user.displayName)}</strong><p><code>${escapeHtml(user.userId)}</code> · ${escapeHtml(user.studentIds.join(", ") || "No MSSV")}</p></article>`).join("") || `<div class="empty-state">Không có member record.</div>`}</div><h3>Subscriptions</h3><div class="stack">${(data.subscriptions || []).map((item) => `<article class="stack-item horizontal"><div><strong>${escapeHtml(item.userDisplayName || item.userId || "Legacy")}</strong><p>${escapeHtml(item.studentId || "No MSSV")} · ${escapeHtml(item.notificationTimes.map((time) => `${time.time} ${targetDayLabel(time.targetDayOffset)}`).join(", ") || "No times")}</p></div><button data-open-sub="${escapeHtml(item.key)}">Quản lý</button></article>`).join("") || `<div class="empty-state">Không có subscription.</div>`}</div>`);
   $("#chatMetadataForm").addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); await api(`/api/admin/chats/${encodeURIComponent(chatId)}`, { method: "PATCH", body: JSON.stringify({ action: "metadata", userId: form.get("userId"), displayName: form.get("displayName"), chatType: form.get("chatType") }) }); $("#detailDialog").close(); await loadData(); });
   $$('[data-chat-status]').forEach((button) => button.addEventListener("click", async () => { await api(`/api/admin/chats/${encodeURIComponent(chatId)}`, { method: "PATCH", body: JSON.stringify({ action: "status", status: button.dataset.chatStatus }) }); $("#detailDialog").close(); await loadData(); }));
   $('[data-chat-retry]').addEventListener("click", async () => { await api(`/api/admin/chats/${encodeURIComponent(chatId)}/retry`, { method: "POST" }); $("#detailDialog").close(); await loadData(); });
@@ -446,13 +726,47 @@ async function openChat(chatId) {
 
 function openSubscription(key) {
   const item = workspace.subscriptions.find((entry) => entry.key === key); if (!item) return;
-  showDialog(`${item.studentId || "Đăng ký nhận lịch"} · ${item.chatName}`, `<div class="detail-grid"><div class="detail"><span>Người dùng</span><strong>${escapeHtml(item.userDisplayName || item.userId || "Bản ghi cũ")}</strong><code>${escapeHtml(item.userId || "-")}</code></div><div class="detail"><span>Chat</span><strong>${escapeHtml(item.chatName)}</strong><code>${escapeHtml(item.chatId)}</code></div><div class="detail"><span>Loại chat</span><strong>${escapeHtml(item.chatType)}</strong></div><div class="detail"><span>Cập nhật bản ghi</span><strong>${escapeHtml(formatDate(item.updatedAt))}</strong></div></div>${item.schema === "legacy" ? `<div class="warning-box">Bản ghi cũ không có userId rõ ràng; chỉ nên xem hoặc xóa.</div>` : `<form id="subscriptionMetaForm"><div class="form-grid"><label>MSSV<input name="studentId" value="${escapeHtml(item.studentId)}" /></label><label>Tên sinh viên<input name="studentName" value="${escapeHtml(item.studentName)}" /></label><label>Tên người dùng<input name="userDisplayName" value="${escapeHtml(item.userDisplayName)}" /></label></div><button class="primary" type="submit">Lưu thông tin</button></form><h3>Giờ nhận lịch</h3><div class="stack">${item.notificationTimes.map((time) => `<article class="stack-item horizontal"><div><strong>#${time.id} · ${escapeHtml(time.time)}</strong><small>Đăng ký ${escapeHtml(formatDate(time.createdAt))} · cập nhật ${escapeHtml(formatDate(time.updatedAt))}</small></div><div class="row-actions"><button data-time-edit="${time.id}">Sửa</button><button class="danger-text" data-time-remove="${time.id}">Xóa</button></div></article>`).join("") || `<div class="empty-state">Chưa có giờ nhận lịch.</div>`}<button class="secondary" id="addTimeButton">Thêm giờ</button></div><div class="action-bar"><button data-sub-action="${item.notificationsEnabled ? "disable" : "enable"}">${item.notificationsEnabled ? "Tắt nhận lịch" : "Bật nhận lịch"}</button><button class="danger-text" data-sub-action="delete">Xóa đăng ký</button></div>`}`);
+  showDialog(`${item.studentId || "Đăng ký nhận lịch"} · ${item.chatName}`, `<div class="detail-grid"><div class="detail"><span>Người dùng</span><strong>${escapeHtml(item.userDisplayName || item.userId || "Bản ghi cũ")}</strong><code>${escapeHtml(item.userId || "-")}</code></div><div class="detail"><span>Chat</span><strong>${escapeHtml(item.chatName)}</strong><code>${escapeHtml(item.chatId)}</code></div><div class="detail"><span>Loại chat</span><strong>${escapeHtml(item.chatType)}</strong></div><div class="detail"><span>Cập nhật bản ghi</span><strong>${escapeHtml(formatDate(item.updatedAt))}</strong></div></div>${item.schema === "legacy" ? `<div class="warning-box">Bản ghi cũ không có userId rõ ràng; chỉ nên xem hoặc xóa.</div>` : `<form id="subscriptionMetaForm"><div class="form-grid"><label>MSSV<input name="studentId" value="${escapeHtml(item.studentId)}" /></label><label>Tên sinh viên<input name="studentName" value="${escapeHtml(item.studentName)}" /></label><label>Tên người dùng<input name="userDisplayName" value="${escapeHtml(item.userDisplayName)}" /></label></div><button class="primary" type="submit">Lưu thông tin</button></form><h3>Giờ nhận lịch</h3><div class="stack">${item.notificationTimes.map((time) => `<article class="stack-item horizontal"><div><strong>#${time.id} · ${escapeHtml(time.time)}</strong><small>${escapeHtml(targetDayText(time.targetDayOffset))} · đăng ký ${escapeHtml(formatDate(time.createdAt))} · cập nhật ${escapeHtml(formatDate(time.updatedAt))}</small></div><div class="row-actions"><button data-time-edit="${time.id}">Sửa</button><button class="danger-text" data-time-remove="${time.id}">Xóa</button></div></article>`).join("") || `<div class="empty-state">Chưa có giờ nhận lịch.</div>`}<button class="secondary" id="addTimeButton">Thêm giờ</button></div><div class="action-bar"><button data-sub-action="${item.notificationsEnabled ? "disable" : "enable"}">${item.notificationsEnabled ? "Tắt nhận lịch" : "Bật nhận lịch"}</button><button class="danger-text" data-sub-action="delete">Xóa đăng ký</button></div>`}`);
   if (item.schema === "legacy") return;
   $("#subscriptionMetaForm").addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); await updateSubscription(item, { action: "metadata", ...Object.fromEntries(form.entries()) }); });
-  $("#addTimeButton").addEventListener("click", async () => { const time = prompt("Nhập giờ HH:mm"); if (time) await updateSubscription(item, { action: "add_time", time, studentId: item.studentId, studentName: item.studentName }); });
-  $$('[data-time-edit]').forEach((button) => button.addEventListener("click", async () => { const time = prompt("Giờ mới HH:mm"); if (time) await updateSubscription(item, { action: "update_time", timeId: Number(button.dataset.timeEdit), time }); }));
+  $("#addTimeButton").addEventListener("click", () => openTimeDialog({ item }));
+  $$('[data-time-edit]').forEach((button) => button.addEventListener("click", () => openTimeDialog({ item, time: item.notificationTimes.find((entry) => Number(entry.id) === Number(button.dataset.timeEdit)) })));
   $$('[data-time-remove]').forEach((button) => button.addEventListener("click", () => updateSubscription(item, { action: "remove_time", timeId: Number(button.dataset.timeRemove) })));
   $$('[data-sub-action]').forEach((button) => button.addEventListener("click", () => updateSubscription(item, { action: button.dataset.subAction, studentId: item.studentId, studentName: item.studentName })));
+}
+
+// Hộp thoại thêm/sửa một mốc nhận lịch. Bắt buộc chọn ngày đích, đúng như lệnh
+// chat: homnay (0) hoặc homsau (1).
+function openTimeDialog({ item, time }) {
+  const isEdit = Boolean(time);
+  showDialog(isEdit ? `Sửa mốc #${time.id}` : "Thêm giờ nhận lịch", `
+    <form id="timeForm">
+      <div class="form-grid">
+        <label>Giờ nhận lịch (HH:mm)
+          <input name="time" value="${escapeHtml(time?.time || "06:00")}" placeholder="06:30" required />
+        </label>
+        <label>Ngày đích
+          <select name="targetDayOffset">
+            <option value="0" ${Number(time?.targetDayOffset) === 0 ? "selected" : ""}>homnay — lịch hôm nay</option>
+            <option value="1" ${Number(time?.targetDayOffset) === 1 ? "selected" : ""}>homsau — lịch hôm sau</option>
+          </select>
+        </label>
+      </div>
+      <p class="muted">Cùng một giờ có thể đăng ký cho cả hai ngày đích; hai mốc này độc lập với nhau.</p>
+      <button class="primary" type="submit">${isEdit ? "Lưu mốc" : "Thêm mốc"}</button>
+      <p id="timeFormError" class="error"></p>
+    </form>`);
+  $("#timeForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const values = new FormData(event.currentTarget);
+    try {
+      await updateSubscription(item, isEdit
+        ? { action: "update_time", timeId: Number(time.id), time: values.get("time"), targetDayOffset: Number(values.get("targetDayOffset")) }
+        : { action: "add_time", time: values.get("time"), targetDayOffset: Number(values.get("targetDayOffset")), studentId: item.studentId, studentName: item.studentName });
+    } catch (error) {
+      $("#timeFormError").textContent = error.message;
+    }
+  });
 }
 
 async function updateSubscription(item, changes) { await api("/api/admin/subscriptions", { method: "PATCH", body: JSON.stringify({ chatId: item.chatId, userId: item.userId, userDisplayName: item.userDisplayName, ...changes }) }); $("#detailDialog").close(); await loadData(); }
@@ -466,7 +780,8 @@ $("#userSearch").addEventListener("input", () => rerender(renderUsers, "users"))
 $("#directorySearch").addEventListener("input", () => rerender(renderDirectory, "directory")); $("#directoryType").addEventListener("change", () => rerender(renderDirectory, "directory")); $("#addChatButton").addEventListener("click", openCreateChat);
 $("#addUserButton").addEventListener("click", openCreateUser);
 $("#adminForm").addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); try { await api("/api/admin/settings/admins", { method: "POST", body: JSON.stringify(Object.fromEntries(form.entries())) }); event.currentTarget.reset(); $("#adminFormMessage").textContent = "Đã lưu."; await loadData(); } catch (error) { $("#adminFormMessage").textContent = error.message; } });
-$("#commandForm").addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); $("#commandResult").textContent = "Đang thực thi..."; try { const result = await api("/api/admin/commands", { method: "POST", body: JSON.stringify(Object.fromEntries(form.entries())) }); $("#commandResult").textContent = (result.messages || []).map((item) => item.text).join("\n\n") || `Đã gửi phản hồi tới ${result.deliveredToChatId}`; await loadData(); } catch (error) { $("#commandResult").textContent = error.message; } });
+// Command console tự gắn trình xử lý submit trong setupCommandConsole() vì nó
+// cần đọc danh sách người nhận đã chọn và đi qua bước xác nhận.
 $("#commandAdminIdentity")?.addEventListener("change", () => {});
 $$('.tab-button').forEach((button) => button.addEventListener("click", () => switchTab(button.dataset.tab)));
 applyTheme(localStorage.getItem("zalobot-admin-theme") || "dark"); switchTab(localStorage.getItem("zalobot-admin-tab") || "overview");

@@ -29,7 +29,7 @@ test("safe API guidance is preserved for users", () => {
 test("missing MSSV and reminder states provide a clear next action", () => {
     const missing = formatMissingStudentIdMessage("lich");
     assert.match(missing, /Chưa có MSSV cho tài khoản này/);
-    assert.match(missing, /\/find \[MSSV\]/);
+    assert.match(missing, /\/luumssv \[MSSV\]/);
 
     const enabled = formatClassStartEnabled({
         studentId: "123456789",

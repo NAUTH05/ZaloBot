@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { buildTargetUserOptions, findTargetUser, resolveTargetUserId, resolveTargetChat } = require("../targetUsers");
+const { buildTargetUserOptions, findTargetUser, resolveBatchTargets, resolveTargetUserId, resolveTargetChat } = require("../targetUsers");
 
 function user(overrides = {}) {
     return {
@@ -144,4 +144,86 @@ test("đầu vào rỗng hoặc thiếu trường không làm hỏng danh sách"
     assert.deepEqual(buildTargetUserOptions({}), []);
     assert.deepEqual(buildTargetUserOptions({ users: [null, {}, { userId: "  " }] }), []);
     assert.deepEqual(buildTargetUserOptions({ chats: [null, {}, { chatId: "c" }] }), []);
+});
+
+/* -------------------------------------------------------------------------- */
+/* Chọn nhiều người nhận                                                      */
+/* -------------------------------------------------------------------------- */
+
+function batchWorkspace() {
+    return {
+        users: [
+            { userId: "u1", displayName: "Nguyễn Văn A", status: "active", studentIds: ["111"], chats: [chat({ chatId: "c1" })] },
+            { userId: "u2", displayName: "Trần Thị B", status: "active", studentIds: [], chats: [chat({ chatId: "c2" })] },
+            { userId: "u3", displayName: "Lê Văn C", status: "active", studentIds: [], chats: [] }
+        ],
+        chats: [{ chatId: "g1", chatType: "group", displayName: "Nhóm lớp" }]
+    };
+}
+
+test("khử trùng User ID và giữ nguyên thứ tự xuất hiện", () => {
+    const result = resolveBatchTargets(batchWorkspace(), ["u2", "u1", "u2", "u1", "u3"]);
+
+    assert.deepEqual(result.targets.map((item) => item.userId), ["u2", "u1", "u3"]);
+    assert.deepEqual(result.duplicates, ["u2", "u1"]);
+    assert.deepEqual(result.rejected, []);
+});
+
+test("cắt khoảng trắng, bỏ giá trị rỗng và báo lại", () => {
+    const result = resolveBatchTargets(batchWorkspace(), ["  u1  ", "", "   ", null]);
+
+    assert.deepEqual(result.targets.map((item) => item.userId), ["u1"]);
+    assert.equal(result.rejected.length, 3);
+    assert.ok(result.rejected.every((item) => /rỗng/.test(item.reason)));
+});
+
+test("Chat ID của nhóm bị từ chối, không lặng lẽ dùng làm User ID", () => {
+    const result = resolveBatchTargets(batchWorkspace(), ["u1", "g1"]);
+
+    assert.deepEqual(result.targets.map((item) => item.userId), ["u1"]);
+    assert.equal(result.rejected.length, 1);
+    assert.match(result.rejected[0].reason, /Chat ID của một nhóm/);
+});
+
+test("User ID nhập tay không có trong gợi ý vẫn được chấp nhận", () => {
+    const result = resolveBatchTargets(batchWorkspace(), ["u1", "nguoi-moi"]);
+
+    assert.deepEqual(result.targets.map((item) => item.userId), ["u1", "nguoi-moi"]);
+    const unknown = result.targets[1];
+    assert.equal(unknown.known, false);
+    assert.equal(unknown.chatId, "");
+    assert.equal(unknown.displayName, "User nguoi-moi");
+});
+
+test("Chat ID chỉ được trả kèm khi liên kết đủ tin cậy", () => {
+    const result = resolveBatchTargets(batchWorkspace(), ["u1", "u3"]);
+
+    assert.equal(result.targets[0].chatId, "c1");
+    assert.equal(result.targets[0].chatHint, "private");
+    assert.equal(result.targets[1].chatId, "");
+    assert.equal(result.targets[1].chatHint, "none");
+});
+
+test("giới hạn số người mỗi lượt, phần vượt được đếm chứ không cắt lặng lẽ", () => {
+    const ids = Array.from({ length: 30 }, (unused, index) => `u${index}`);
+    const result = resolveBatchTargets(batchWorkspace(), ids, { max: 5 });
+
+    assert.equal(result.targets.length, 5);
+    assert.equal(result.overflow, 25);
+    assert.equal(result.max, 5);
+});
+
+test("đầu vào không phải mảng vẫn xử lý an toàn", () => {
+    assert.deepEqual(resolveBatchTargets(batchWorkspace(), null).targets, []);
+    assert.deepEqual(resolveBatchTargets(batchWorkspace(), undefined).targets, []);
+    assert.deepEqual(resolveBatchTargets(batchWorkspace(), "").targets, []);
+    assert.deepEqual(resolveBatchTargets(batchWorkspace(), "u1").targets.map((item) => item.userId), ["u1"]);
+    assert.deepEqual(resolveBatchTargets().targets, []);
+});
+
+test("mặc định giới hạn 25 người mỗi lượt", () => {
+    const ids = Array.from({ length: 40 }, (unused, index) => `u${index}`);
+    const result = resolveBatchTargets(batchWorkspace(), ids);
+    assert.equal(result.max, 25);
+    assert.equal(result.targets.length, 25);
 });

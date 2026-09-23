@@ -8,7 +8,7 @@ ZaloBot is a production-oriented Node.js bot for Lạc Hồng University schedul
 - Daily schedule, schedule-change, class-start, birthday, and broadcast notifications.
 - Per-user and per-chat MSSV context with separate private/group records.
 - Firestore-backed persistence with legacy JSON migration support.
-- Authenticated admin dashboard and command console backed by the same bot command engine.
+- Authenticated admin dashboard and command console backed by the same bot command engine, with multi-recipient command execution.
 - Access control, chat health tracking, bounded delivery retries, and operational audit logs.
 - File-based Firebase configuration with a single downloaded service-account JSON.
 
@@ -165,6 +165,8 @@ FIREBASE_SERVICE_ACCOUNT_FILE=C:\Secure\ZaloBot\zalobot-firebase-adminsdk-fbsvc.
 4. Restart the bot.
 
 Owner IDs can also be managed from the dashboard (**Settings -> Admins**) without editing `.env`.
+
+The same Settings panel configures the Command console batch limits: `maxBatchSize` (recipients per run, default 25) and `batchDelayMs` (pause between sends, default 350 ms).
 
 ## Development run
 
@@ -328,10 +330,11 @@ All help content lives in `helpContent.js` as reusable metadata:
 ```js
 const HELP_COMMANDS = [
     {
-        command: "find",
-        usage: "/find [MSSV]",
+        command: "luumssv",
+        aliases: ["find"],
+        usage: "/luumssv [MSSV]",
         description: "Lưu MSSV để dùng cho các lệnh lịch.",
-        examples: ["/find 123000135"],
+        examples: ["/luumssv 123000xxx"],
         note: "Lệnh này chỉ lưu MSSV, không tự bật thông báo."
     }
 ];
@@ -342,10 +345,11 @@ The same metadata feeds `/help`, `/helpadmin`, the dashboard "Available commands
 Both help outputs render each command as one compact, consistent block — usage first, then the description, then `(Ví dụ: ...)` and `(Lưu ý: ...)` when present:
 
 ```text
-**/find [MSSV]**
+**/luumssv [MSSV]**
 Lưu MSSV để dùng cho các lệnh lịch.
-(Ví dụ: /find 123000135)
+(Ví dụ: /luumssv 123000xxx)
 (Lưu ý: Lệnh này chỉ lưu MSSV, không tự bật thông báo.)
+(Tên cũ vẫn dùng được: /find)
 ```
 
 Blocks are separated by a blank line so the existing `sendMessage()` chunker still splits long help output on entry boundaries.
@@ -355,14 +359,90 @@ Public `/help` is grouped by category:
 ```text
 # ZALOBOT HƯỚNG DẪN
 
-## BẮT ĐẦU        /start, /find
+## BẮT ĐẦU        /start, /luumssv
 ## LỊCH HỌC       /lich, /lichtuan, /lichthi, /lichgv, /phongtrong
-## THÔNG BÁO      /dangky, /danhsachdangky, /suadangky, /xoadangky,
-                  /huythongbao, /batnhaclich, /tatnhaclich, /trangthainhaclich
+## THÔNG BÁO      /nhanlich, /gionhanlich, /suagionhanlich, /xoagionhanlich,
+                  /tatnhanlich, /batnhaclich, /tatnhaclich, /trangthainhaclich
 ## SINH NHẬT      /sinhnhat
 ## TIỆN ÍCH       /ai, /time, /myid
 ## TRỢ GIÚP       /help
 ```
+
+## Daily notification target day
+
+Each notification time chooses which day's schedule it sends: `homnay` (today's schedule) or `homsau` (tomorrow's schedule).
+
+```text
+/nhanlich [MSSV] hh:mm homnay|homsau
+
+/nhanlich 06:30 homnay
+/nhanlich 20:00 homsau
+/nhanlich 123000xxx 06:30 homnay
+```
+
+- The day token is **required** for new registrations. Omitting it returns a syntax message with both examples instead of guessing.
+- Tokens are case-insensitive, and `hôm nay` / `hôm sau` are accepted as well as `homnay` / `homsau`.
+- The time must be `00:00`–`23:59`.
+- Argument order is always `[MSSV] hh:mm homnay|homsau`; the MSSV may be omitted when it was saved with `/luumssv`.
+- The **same** `hh:mm` can be registered for both days. They are separate entries with their own IDs, and `/suagionhanlich` / `/xoagionhanlich` act on one ID at a time.
+
+At delivery, each entry's target date is the delivery instant in `Asia/Ho_Chi_Minh` **plus that entry's own offset**, so two recipients sharing a time slot can receive different days.
+
+### Stored shape
+
+```json
+{
+  "id": 2,
+  "time": "20:00",
+  "targetDayOffset": 1,
+  "createdAt": "2026-09-23T04:00:00.000Z",
+  "updatedAt": "2026-09-23T04:00:00.000Z"
+}
+```
+
+`targetDayOffset` is `0` for today and `1` for tomorrow. Deduplication uses `time` + `targetDayOffset`, so the same time with two different days is kept, while an exact duplicate collapses.
+
+### Legacy records
+
+Records written before this change have no `targetDayOffset`. They keep their previous behaviour: the value is derived from the time using the old rule (before 20:00 → today, from 20:00 → tomorrow). The derivation happens on read, so a missing field can never turn an existing 20:00 notification into today's schedule.
+
+To persist the derived values:
+
+```bash
+npm run migrate:target-day              # dry-run, prints what would change
+npm run migrate:target-day -- --apply   # write
+```
+
+The migration only adds the field. IDs, MSSV, chat/user ownership, enabled state and delivery history are untouched, and re-running it writes nothing. Once a value is stored it takes priority over the old time rule, so `21:00 homnay` and `06:00 homsau` both work.
+
+The dashboard shows the day on every time chip and in the subscription detail, and its add/edit dialog offers the same two choices with the same validation as the chat commands.
+
+## Command renames
+
+Commands are defined once in `helpContent.js`, which now also holds the alias table (`COMMAND_ALIASES`). `parseCommand()` resolves an alias to its canonical name, so every downstream check, the dashboard command console and typo suggestions work on one name per command. Old names remain usable as compatibility aliases and are listed in help output as `(Tên cũ vẫn dùng được: ...)`.
+
+| Old | Canonical | Why |
+| --- | --- | --- |
+| `/find` | `/luumssv` | "find" implied a lookup; the command saves an MSSV |
+| `/dangky` | `/nhanlich` | Aligns with the notification family |
+| `/danhsachdangky` | `/gionhanlich` | "danh sách đăng ký" was vague |
+| `/suadangky` | `/suagionhanlich` | |
+| `/xoadangky` | `/xoagionhanlich` | |
+| `/huythongbao` | `/tatnhanlich` | Pairs with `/nhanlich`; also accepts `/ngungnhanlich` |
+| `/danhsach` | `/danhsachcauhoi` | `/danhsach` alone did not say what was listed |
+| `/them` | `/themcauhoi` | `/them` alone did not say what was added |
+| `/sua` | `/suacauhoi` | |
+| `/xoa` | `/xoacauhoi` | |
+| `/traloi` | `/traloicauhoi` | |
+| `/congbo` | `/congbocauhoi` | |
+| `/thongtinch` | `/chitietchat` | Abbreviation was typo-prone |
+| `/vohieuchat` | `/tamdungchat` | |
+| `/kichhoatchat` | `/batlaichat` | Pairs with `/tamdungchat` |
+| `/thuchatchat` | `/kiemtrachat` | "thử chat" was vague |
+
+Already-clear commands were deliberately left alone: `/lich`, `/lichtuan`, `/lichthi`, `/lichgv`, `/phongtrong`, `/sinhnhat`, `/ai`, `/time`, `/myid`, `/help`, `/start`, `/batnhaclich`, `/tatnhaclich`, `/trangthainhaclich`, `/xoachat`, `/chatfeature`, `/blockbot`, `/allowbot`, `/blockai`, `/allowai`, `/accessmode`, `/accesslist`, `/thongbao`, `/update`, `/test6h`, `/helpadmin`.
+
+**Note:** `/tatnhanlich` (turn off schedule notifications) and `/tatnhaclich` (turn off class-start reminders) differ by one character. Their help entries cross-reference each other, but if this proves confusing in practice the class-start pair is the better candidate to rename.
 
 ## Room 411 bot (separate project)
 
@@ -381,7 +461,7 @@ Migration, cutover order, and rollback steps are documented in the Room 411 bot'
 
 ## Bot commands
 
-Public commands: `/start`, `/find`, `/lich`, `/lichtuan`, `/lichthi`, `/lichgv`, `/phongtrong`, `/ai`, `/dangky`, `/danhsachdangky`, `/suadangky`, `/xoadangky`, `/huythongbao`, `/batnhaclich`, `/tatnhaclich`, `/trangthainhaclich`, `/sinhnhat`, `/time`, `/myid`, `/help`. Run `/help` for syntax and examples.
+Public commands: `/start`, `/luumssv`, `/lich`, `/lichtuan`, `/lichthi`, `/lichgv`, `/phongtrong`, `/ai`, `/nhanlich`, `/gionhanlich`, `/suagionhanlich`, `/xoagionhanlich`, `/tatnhanlich`, `/batnhaclich`, `/tatnhaclich`, `/trangthainhaclich`, `/sinhnhat`, `/time`, `/myid`, `/help`. Run `/help` for syntax and examples.
 
 Owner commands cover access control, chat health, birthday Q&A, broadcasts, and delivery tests; `/helpadmin` lists the complete owner-only set.
 

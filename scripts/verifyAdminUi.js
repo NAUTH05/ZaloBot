@@ -52,16 +52,27 @@ for (const id of requiredIds) {
     if (!html.includes(`id="${id}"`)) fail(`index.html is missing #${id}`);
 }
 
-// Command console: ô User ID dùng combobox, khóa gửi lên vẫn là targetUserId.
-if (!app.includes('name="targetUserId"')) fail("Command console must post targetUserId");
-if (!app.includes('name="targetChatId"')) fail("Command console must post targetChatId");
+// Command console: chọn nhiều người nhận. Khóa gửi lên là mảng User ID thật.
 if (!app.includes('id="targetUserInput"')) fail("Command console must render the target user combobox input");
 if (!app.includes("combobox-list")) fail("Command console must render the combobox option list");
 if (!app.includes('role="combobox"')) fail("the target user input must expose the combobox role");
 if (!app.includes("aria-activedescendant")) fail("the combobox must support keyboard navigation");
 if (!app.includes("/api/admin/target-users")) fail("the Command console must load the deduplicated target user list");
+if (!app.includes("targetUserIds")) fail("Command console must post an array of target User IDs");
+if (!app.includes('id="targetChips"')) fail("Command console must render removable chips for the selected users");
+if (!app.includes('id="targetSelectAll"')) fail("Command console must offer select-all-filtered");
+if (!app.includes('id="targetClearAll"')) fail("Command console must offer clear-selection");
+if (!app.includes('id="targetCount"')) fail("Command console must show the selected count");
+if (!app.includes('id="batchConfirm"')) fail("Command console must confirm before executing a batch");
+if (!app.includes("progress-track")) fail("Command console must show batch progress");
 
-// Command console vẫn gửi đúng endpoint hiện có.
-if (!app.includes('api("/api/admin/commands"')) fail("Command console must keep posting to /api/admin/commands");
+// Ô Target Chat ID rời đã bị bỏ: Chat ID chỉ được suy ra khi liên kết đủ tin cậy,
+// không còn là trường nhập tay không có tác dụng.
+if (app.includes('name="targetChatId"')) fail("Command console must not post a standalone targetChatId");
+
+// Command console đi qua endpoint nhiều người nhận và vẫn giữ endpoint cũ cho
+// client chỉ gửi một targetUserId.
+if (!app.includes('api("/api/admin/commands/batch"')) fail("Command console must post batches to /api/admin/commands/batch");
+if (!app.includes("/api/admin/commands/batch/")) fail("Command console must poll the batch job endpoint");
 
 console.log("Admin UI validation passed");

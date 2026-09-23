@@ -10,6 +10,7 @@
 
 const CHAT_TYPES = new Set(["private", "group", "unknown"]);
 const USER_STATUSES = new Set(["active", "disabled", "removed"]);
+const DEFAULT_MAX_BATCH_SIZE = 25;
 
 function normalizeId(value) {
     return String(value ?? "").trim();
@@ -120,6 +121,71 @@ function findTargetUser(workspace = {}, rawValue) {
     return buildTargetUserOptions(workspace).find((user) => user.userId === userId) || null;
 }
 
+// Chuẩn hoá danh sách User ID cho Command console nhiều người nhận.
+//
+// - Chuẩn hoá: cắt khoảng trắng, bỏ giá trị rỗng.
+// - Khử trùng: giữ lần xuất hiện đầu tiên, ghi lại các lần lặp để báo cáo.
+// - Từ chối: Chat ID của nhóm bị dùng làm User ID (dùng lại resolveTargetUserId).
+// - Giới hạn: tối đa `max` người nhận, phần vượt bị đếm riêng chứ không cắt lặng lẽ.
+//
+// Chat ID chỉ được trả kèm khi liên kết đủ tin cậy, đúng như resolveTargetChat.
+function resolveBatchTargets(workspace = {}, rawValues = [], options = {}) {
+    const max = Number.isInteger(options.max) && options.max > 0 ? options.max : DEFAULT_MAX_BATCH_SIZE;
+    const list = Array.isArray(rawValues) ? rawValues : (rawValues == null || rawValues === "" ? [] : [rawValues]);
+
+    // Dựng chỉ mục một lần để không phải quét lại workspace cho từng ID.
+    const known = new Map();
+    for (const user of buildTargetUserOptions(workspace)) known.set(user.userId, user);
+    const groupChatIds = new Set(
+        (workspace.chats || [])
+            .filter((chat) => chat?.chatType === "group")
+            .map((chat) => normalizeId(chat.chatId))
+            .filter(Boolean)
+    );
+    const knownUserIds = new Set((workspace.users || []).map((user) => normalizeId(user?.userId)).filter(Boolean));
+
+    const seen = new Set();
+    const targets = [];
+    const duplicates = [];
+    const rejected = [];
+    let overflow = 0;
+
+    for (const raw of list) {
+        const value = normalizeId(raw);
+        if (!value) {
+            rejected.push({ userId: "", reason: "Bỏ qua một giá trị rỗng." });
+            continue;
+        }
+        if (seen.has(value)) {
+            duplicates.push(value);
+            continue;
+        }
+        // Chat ID của nhóm không bao giờ được lặng lẽ dùng làm User ID.
+        if (!knownUserIds.has(value) && groupChatIds.has(value)) {
+            rejected.push({
+                userId: value,
+                reason: `${value} là Chat ID của một nhóm, không phải User ID. Hãy dùng Target Chat ID cho nhóm.`
+            });
+            continue;
+        }
+        seen.add(value);
+        if (targets.length >= max) {
+            overflow += 1;
+            continue;
+        }
+        const user = known.get(value);
+        targets.push({
+            userId: value,
+            displayName: user?.displayName || `User ${value}`,
+            chatId: user?.targetChatId || "",
+            chatHint: user?.targetChatHint || "none",
+            known: Boolean(user)
+        });
+    }
+
+    return { targets, duplicates, rejected, overflow, max };
+}
+
 // Chặn việc vô tình dùng Chat ID của nhóm làm User ID. Giá trị không nằm trong
 // directory vẫn được chấp nhận để không khoá khả năng nhập tay.
 function resolveTargetUserId(workspace = {}, rawValue) {
@@ -138,8 +204,10 @@ function resolveTargetUserId(workspace = {}, rawValue) {
 }
 
 module.exports = {
+    DEFAULT_MAX_BATCH_SIZE,
     buildTargetUserOptions,
     findTargetUser,
+    resolveBatchTargets,
     resolveTargetUserId,
     resolveTargetChat
 };

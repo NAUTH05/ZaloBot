@@ -24,7 +24,7 @@ function formatMissingStudentIdMessage(command = "") {
     const suffix = command ? ` trước khi dùng **/${escapeMarkdown(command)}**` : " trước khi sử dụng tính năng này";
     return formatWarningMessage(
         "CHƯA CÓ MSSV",
-        `Chưa có MSSV cho tài khoản này.\n\n> Dùng **/find [MSSV]** để lưu MSSV${suffix}.`
+        `Chưa có MSSV cho tài khoản này.\n\n> Dùng **/luumssv [MSSV]** để lưu MSSV${suffix}.`
     );
 }
 
@@ -33,8 +33,8 @@ function formatWelcomeMessage(displayName = "bạn") {
 
 Xin chào **${escapeMarkdown(displayName || "bạn")}**!
 
-> Dùng **/find [MSSV]** để lưu mã sinh viên.
-> Dùng **/lich** để xem lịch hôm nay hoặc **/dangky [hh:mm]** để chọn giờ nhận lịch.
+> Dùng **/luumssv [MSSV]** để lưu mã sinh viên.
+> Dùng **/lich** để xem lịch hôm nay hoặc **/nhanlich hh:mm homnay|homsau** để chọn giờ nhận lịch.
 
 {orange}Dùng **/help** để xem danh sách lệnh.{/orange}`;
 }
@@ -52,17 +52,24 @@ function formatStudentSavedMessage(scheduleData, subscription) {
         `**Sinh viên:** ${escapeMarkdown(scheduleData.studentName || "Sinh viên")}\n` +
         `> **MSSV:** ${escapeMarkdown(scheduleData.studentId)}\n` +
         `> **Nhận lịch tự động:** ${notificationsEnabled ? "Đang bật" : "Đang tắt"}\n\n` +
-        "> Dùng **/lich** để xem lịch hoặc **/dangky [hh:mm]** để chọn giờ nhận lịch."
+        "> Dùng **/lich** để xem lịch hoặc **/nhanlich hh:mm homnay|homsau** để chọn giờ nhận lịch."
     );
 }
 
+function formatTargetDay(targetDayOffset) {
+    return Number(targetDayOffset) === 1 ? "homsau" : "homnay";
+}
+
 function formatDailyNotificationEnabled(scheduleData, notificationTimes) {
-    const times = (notificationTimes || []).map((item) => `#${item.id} ${item.time}`).join(", ");
+    const times = (notificationTimes || [])
+        .map((item) => `#${item.id} ${item.time} (${formatTargetDay(item.targetDayOffset)})`)
+        .join(", ");
     return formatSuccessMessage(
         "ĐÃ BẬT THÔNG BÁO LỊCH",
         `> **Sinh viên:** ${escapeMarkdown(scheduleData.studentName || "Sinh viên")}\n` +
         `> **MSSV:** ${escapeMarkdown(scheduleData.studentId)}\n` +
-        `> **Giờ nhận lịch:** ${escapeMarkdown(times || "06:00")}`
+        `> **Giờ nhận lịch:** ${escapeMarkdown(times || "06:00 (homnay)")}\n\n` +
+        "**homnay** = gửi lịch hôm nay, **homsau** = gửi lịch hôm sau. Dùng /suagionhanlich để đổi."
     );
 }
 

@@ -8,6 +8,7 @@
     "start": "node main.js",
     "admin:hash-password": "node hashAdminPassword.js",
     "migrate:firestore": "node migrateToFirestore.js recent_json",
+    "migrate:target-day": "node scripts/migrateNotificationTargetDays.js",
     "verify:firebase-admin": "node scripts/verifyFirebaseAdmin.js",
     "build:admin": "node scripts/verifyAdminUi.js",
     "test": "node --test --test-force-exit"

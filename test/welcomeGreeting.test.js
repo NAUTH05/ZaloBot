@@ -16,7 +16,7 @@ test("sendWelcomeMessage định dạng tin nhắn chào mừng chuẩn", async 
     assert.ok(sentMsg, "Tin nhắn chào đã được tạo thành công");
     assert.match(sentMsg, /Xin chào \*\*Minh Anh\*\*/);
     assert.match(sentMsg, /LỊCH HỌC LHU/);
-    assert.match(sentMsg, /\/find/);
+    assert.match(sentMsg, /\/luumssv/);
     assert.doesNotMatch(sentMsg, /Bot sẽ|bạn ơi/i);
 
     assert.ok(

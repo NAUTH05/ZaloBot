@@ -34,13 +34,14 @@ const HELP_COMMANDS = [
         examples: ["/start"]
     },
     {
-        command: "find",
-        usage: "/find [MSSV]",
+        command: "luumssv",
+        aliases: ["find"],
+        usage: "/luumssv [MSSV]",
         group: HELP_GROUPS.PUBLIC,
         category: CATEGORY.START,
         permission: "user",
         description: "Lưu MSSV để dùng cho các lệnh lịch.",
-        examples: ["/find 123000135"],
+        examples: ["/luumssv 123000xxx"],
         note: "Lệnh này chỉ lưu MSSV, không tự bật thông báo."
     },
     {
@@ -50,7 +51,7 @@ const HELP_COMMANDS = [
         category: CATEGORY.SCHEDULE,
         permission: "user",
         description: "Xem lịch học hôm nay.",
-        examples: ["/lich", "/lich 123000135"],
+        examples: ["/lich", "/lich 123000xxx"],
         note: "Nếu không truyền MSSV, dùng MSSV đã lưu."
     },
     {
@@ -60,7 +61,7 @@ const HELP_COMMANDS = [
         category: CATEGORY.SCHEDULE,
         permission: "user",
         description: "Xem lịch học trong tuần.",
-        examples: ["/lichtuan", "/lichtuan 123000135"],
+        examples: ["/lichtuan", "/lichtuan 123000xxx"],
         note: "Hiển thị lịch từ Thứ Hai đến Chủ Nhật."
     },
     {
@@ -70,7 +71,7 @@ const HELP_COMMANDS = [
         category: CATEGORY.SCHEDULE,
         permission: "user",
         description: "Xem lịch thi trong học kỳ.",
-        examples: ["/lichthi", "/lichthi 123000135"],
+        examples: ["/lichthi", "/lichthi 123000xxx"],
         note: "Nếu không truyền MSSV, dùng MSSV đã lưu."
     },
     {
@@ -94,53 +95,58 @@ const HELP_COMMANDS = [
         note: "Không truyền cơ sở thì mặc định là Cơ sở I."
     },
     {
-        command: "dangky",
-        usage: "/dangky [MSSV] [hh:mm]",
+        command: "nhanlich",
+        aliases: ["dangky"],
+        usage: "/nhanlich [MSSV] hh:mm homnay|homsau",
         group: HELP_GROUPS.PUBLIC,
         category: CATEGORY.NOTIFY,
         permission: "user",
-        description: "Bật nhận lịch học tự động theo giờ đã chọn.",
-        examples: ["/dangky", "/dangky 123000135", "/dangky 06:30", "/dangky 123000135 06:30"],
-        note: "Có thể dùng MSSV đã lưu hoặc truyền MSSV trực tiếp. Giờ hợp lệ từ 00:00 đến 23:59."
+        description: "Bật nhận lịch học tự động vào giờ đã chọn, kèm lựa chọn lịch hôm nay hay hôm sau.",
+        examples: ["/nhanlich 06:30 homnay", "/nhanlich 20:00 homsau", "/nhanlich 123000xxx 06:30 homnay"],
+        note: "Bỏ qua MSSV nếu đã lưu bằng /luumssv. homnay = lịch hôm nay, homsau = lịch hôm sau. Giờ hợp lệ 00:00–23:59. Có thể đăng ký cùng một giờ cho cả hai ngày."
     },
     {
-        command: "danhsachdangky",
-        usage: "/danhsachdangky",
+        command: "gionhanlich",
+        aliases: ["danhsachdangky"],
+        usage: "/gionhanlich",
         group: HELP_GROUPS.PUBLIC,
         category: CATEGORY.NOTIFY,
         permission: "user",
-        description: "Xem các giờ nhận lịch đã lưu.",
-        examples: ["/danhsachdangky"]
+        description: "Xem các mốc giờ nhận lịch đã lưu kèm ngày đích của từng mốc.",
+        examples: ["/gionhanlich"]
     },
     {
-        command: "suadangky",
-        usage: "/suadangky #ID [hh:mm]",
+        command: "suagionhanlich",
+        aliases: ["suadangky"],
+        usage: "/suagionhanlich #ID hh:mm homnay|homsau",
         group: HELP_GROUPS.PUBLIC,
         category: CATEGORY.NOTIFY,
         permission: "user",
-        description: "Đổi một giờ nhận lịch đã lưu.",
-        examples: ["/suadangky #1 20:00"],
-        note: "Dùng /danhsachdangky để xem ID cần sửa."
+        description: "Đổi giờ và ngày đích của một mốc nhận lịch đã lưu.",
+        examples: ["/suagionhanlich #1 06:30 homnay", "/suagionhanlich #2 21:00 homsau", "/suagionhanlich #2 homsau"],
+        note: "Đổi được cả giờ lẫn ngày đích; chỉ nhập homnay|homsau nếu chỉ muốn đổi ngày. Dùng /gionhanlich để xem ID."
     },
     {
-        command: "xoadangky",
-        usage: "/xoadangky #ID",
+        command: "xoagionhanlich",
+        aliases: ["xoadangky"],
+        usage: "/xoagionhanlich #ID",
         group: HELP_GROUPS.PUBLIC,
         category: CATEGORY.NOTIFY,
         permission: "user",
-        description: "Xóa một giờ nhận lịch đã lưu.",
-        examples: ["/xoadangky #1"],
-        note: "Dùng /danhsachdangky để xem ID cần xóa."
+        description: "Xóa một mốc nhận lịch đã lưu.",
+        examples: ["/xoagionhanlich #1"],
+        note: "Dùng /gionhanlich để xem ID cần xóa."
     },
     {
-        command: "huythongbao",
-        usage: "/huythongbao",
+        command: "tatnhanlich",
+        aliases: ["huythongbao", "ngungnhanlich"],
+        usage: "/tatnhanlich",
         group: HELP_GROUPS.PUBLIC,
         category: CATEGORY.NOTIFY,
         permission: "user",
         description: "Tắt nhận lịch học tự động.",
-        examples: ["/huythongbao"],
-        note: "MSSV đã lưu vẫn dùng được với /lich và /lichtuan."
+        examples: ["/tatnhanlich"],
+        note: "MSSV đã lưu vẫn dùng được với /lich và /lichtuan. Đừng nhầm với /tatnhaclich (tắt nhắc giờ bắt đầu tiết học)."
     },
     {
         command: "batnhaclich",
@@ -150,7 +156,7 @@ const HELP_COMMANDS = [
         permission: "user",
         description: "Bật nhắc giờ bắt đầu tiết học.",
         examples: ["/batnhaclich"],
-        note: "Cần lưu MSSV bằng /find trước."
+        note: "Cần lưu MSSV bằng /luumssv trước."
     },
     {
         command: "tatnhaclich",
@@ -188,7 +194,7 @@ const HELP_COMMANDS = [
         permission: "user",
         description: "Hỏi trợ lý AI về lịch học đã lưu.",
         examples: ["/ai Tuần này tôi học môn gì?"],
-        note: "Cần lưu MSSV bằng /find trước."
+        note: "Cần lưu MSSV bằng /luumssv trước."
     },
     {
         command: "time",
@@ -320,40 +326,44 @@ const HELP_COMMANDS = [
         note: "Bộ lọc: all, active, inactive, disabled, removed, private, group, unknown."
     },
     {
-        command: "thongtinch",
-        usage: "/thongtinch [Chat ID]",
+        command: "chitietchat",
+        aliases: ["thongtinch"],
+        usage: "/chitietchat [Chat ID]",
         group: HELP_GROUPS.ADMIN,
         category: CATEGORY.CHAT,
         permission: "owner",
         description: "Xem chi tiết trạng thái và lỗi gửi của một chat.",
-        examples: ["/thongtinch 123456789"]
+        examples: ["/chitietchat 123456789"]
     },
     {
-        command: "vohieuchat",
-        usage: "/vohieuchat [Chat ID]",
+        command: "tamdungchat",
+        aliases: ["vohieuchat"],
+        usage: "/tamdungchat [Chat ID]",
         group: HELP_GROUPS.ADMIN,
         category: CATEGORY.CHAT,
         permission: "owner",
         description: "Tạm dừng gửi thông báo tới một chat.",
-        examples: ["/vohieuchat 123456789"]
+        examples: ["/tamdungchat 123456789"]
     },
     {
-        command: "kichhoatchat",
-        usage: "/kichhoatchat [Chat ID]",
+        command: "batlaichat",
+        aliases: ["kichhoatchat"],
+        usage: "/batlaichat [Chat ID]",
         group: HELP_GROUPS.ADMIN,
         category: CATEGORY.CHAT,
         permission: "owner",
         description: "Bật lại một chat đã bị tạm dừng.",
-        examples: ["/kichhoatchat 123456789"]
+        examples: ["/batlaichat 123456789"]
     },
     {
-        command: "thuchatchat",
-        usage: "/thuchatchat [Chat ID]",
+        command: "kiemtrachat",
+        aliases: ["thuchatchat"],
+        usage: "/kiemtrachat [Chat ID]",
         group: HELP_GROUPS.ADMIN,
         category: CATEGORY.CHAT,
         permission: "owner",
         description: "Gửi tin kiểm tra để xác nhận chat còn nhận được thông báo.",
-        examples: ["/thuchatchat 123456789"]
+        examples: ["/kiemtrachat 123456789"]
     },
     {
         command: "xoachat",
@@ -395,58 +405,64 @@ const HELP_COMMANDS = [
         note: "Chỉ dùng cho thông tin cập nhật. Dùng /thongbao cho thông báo chung khác."
     },
     {
-        command: "danhsach",
-        usage: "/danhsach [Năm]",
+        command: "danhsachcauhoi",
+        aliases: ["danhsach"],
+        usage: "/danhsachcauhoi [Năm]",
         group: HELP_GROUPS.ADMIN,
         category: CATEGORY.BIRTHDAY,
         permission: "owner",
         description: "Xem danh sách câu hỏi sinh nhật.",
-        examples: ["/danhsach", "/danhsach 2026"]
+        examples: ["/danhsachcauhoi", "/danhsachcauhoi 2026"]
     },
     {
-        command: "them",
-        usage: "/them [Câu hỏi]",
+        command: "themcauhoi",
+        aliases: ["them"],
+        usage: "/themcauhoi [Câu hỏi]",
         group: HELP_GROUPS.ADMIN,
         category: CATEGORY.BIRTHDAY,
         permission: "owner",
         description: "Thêm một câu hỏi sinh nhật thủ công.",
-        examples: ["/them Điều bạn muốn hỏi tôi là gì?"]
+        examples: ["/themcauhoi Điều bạn muốn hỏi tôi là gì?"]
     },
     {
-        command: "sua",
-        usage: "/sua [ID] [Câu hỏi mới]",
+        command: "suacauhoi",
+        aliases: ["sua"],
+        usage: "/suacauhoi [ID] [Câu hỏi mới]",
         group: HELP_GROUPS.ADMIN,
         category: CATEGORY.BIRTHDAY,
         permission: "owner",
         description: "Sửa nội dung một câu hỏi sinh nhật.",
-        examples: ["/sua 1 Nội dung câu hỏi mới"]
+        examples: ["/suacauhoi 1 Nội dung câu hỏi mới"]
     },
     {
-        command: "xoa",
-        usage: "/xoa [ID]",
+        command: "xoacauhoi",
+        aliases: ["xoa"],
+        usage: "/xoacauhoi [ID]",
         group: HELP_GROUPS.ADMIN,
         category: CATEGORY.BIRTHDAY,
         permission: "owner",
         description: "Xóa một câu hỏi sinh nhật.",
-        examples: ["/xoa 1"]
+        examples: ["/xoacauhoi 1"]
     },
     {
-        command: "traloi",
-        usage: "/traloi [ID] [Câu trả lời]",
+        command: "traloicauhoi",
+        aliases: ["traloi"],
+        usage: "/traloicauhoi [ID] [Câu trả lời]",
         group: HELP_GROUPS.ADMIN,
         category: CATEGORY.BIRTHDAY,
         permission: "owner",
         description: "Trả lời một câu hỏi sinh nhật.",
-        examples: ["/traloi 1 Nội dung trả lời"]
+        examples: ["/traloicauhoi 1 Nội dung trả lời"]
     },
     {
-        command: "congbo",
-        usage: "/congbo [Năm]",
+        command: "congbocauhoi",
+        aliases: ["congbo"],
+        usage: "/congbocauhoi [Năm]",
         group: HELP_GROUPS.ADMIN,
         category: CATEGORY.BIRTHDAY,
         permission: "owner",
         description: "Công bố hỏi đáp sinh nhật tới mọi chat.",
-        examples: ["/congbo", "/congbo 2026"],
+        examples: ["/congbocauhoi", "/congbocauhoi 2026"],
         note: "Bỏ trống năm để dùng năm hiện tại. Bản công bố không đổi sẽ không gửi trùng."
     },
     {
@@ -469,12 +485,36 @@ const HELP_COMMANDS = [
     }
 ];
 
+// Bảng tra tên lệnh: tên chính tắc và mọi bí danh tương thích. Đây là nơi duy
+// nhất quyết định tên cũ trỏ về lệnh nào, nên parser, phân loại đích của
+// Command console và gợi ý gõ sai đều dùng chung một bảng.
+const COMMAND_ALIASES = Object.freeze(
+    HELP_COMMANDS.reduce((map, entry) => {
+        map[entry.command] = entry.command;
+        for (const alias of entry.aliases || []) map[alias] = entry.command;
+        return map;
+    }, {})
+);
+
+function resolveCommandName(value) {
+    const name = String(value == null ? "" : value).replace(/^\//, "").trim().toLowerCase();
+    if (!name) return "";
+    return COMMAND_ALIASES[name] || name;
+}
+
+function aliasesFor(command) {
+    const canonical = resolveCommandName(command);
+    const entry = HELP_COMMANDS.find((item) => item.command === canonical);
+    return entry?.aliases ? [...entry.aliases] : [];
+}
+
 function commandsInGroup(group) {
     return HELP_COMMANDS.filter((entry) => entry.group === group);
 }
 
 function findHelpCommand(name) {
-    const needle = String(name || "").replace(/^\//, "").toLowerCase();
+    const needle = resolveCommandName(name);
+    if (!needle) return null;
     return HELP_COMMANDS.find((entry) => entry.command === needle) || null;
 }
 
@@ -488,9 +528,9 @@ function groupByCategory(entries) {
 }
 
 // Mỗi lệnh là một khối gọn, thống nhất giữa /help và /helpadmin:
-//   **/find [MSSV]**
+//   **/luumssv [MSSV]**
 //   Lưu MSSV để dùng cho các lệnh lịch.
-//   (Ví dụ: /find 123000135)
+//   (Ví dụ: /luumssv 123000xxx)
 //   (Lưu ý: ...)
 // Khối được ngăn cách bằng dòng trống nên vẫn chia tin đúng theo sendMessage().
 function renderCommand(entry) {
@@ -499,6 +539,9 @@ function renderCommand(entry) {
     const examples = (entry.examples || []).filter(Boolean);
     if (examples.length > 0) lines.push(`(Ví dụ: ${examples.join(", ")})`);
     if (entry.note) lines.push(`(Lưu ý: ${entry.note})`);
+    // Tên cũ vẫn dùng được, nên nói rõ để người dùng cũ biết đường chuyển.
+    const aliases = (entry.aliases || []).filter(Boolean);
+    if (aliases.length > 0) lines.push(`(Tên cũ vẫn dùng được: ${aliases.map((alias) => `/${alias}`).join(", ")})`);
     return lines.join("\n");
 }
 
@@ -525,10 +568,13 @@ ${renderSections(commandsInGroup(HELP_GROUPS.ADMIN))}`;
 }
 
 module.exports = {
+    COMMAND_ALIASES,
     HELP_COMMANDS,
     HELP_GROUPS,
+    aliasesFor,
     commandsInGroup,
     findHelpCommand,
     formatAdminHelp,
-    formatPublicHelp
+    formatPublicHelp,
+    resolveCommandName
 };

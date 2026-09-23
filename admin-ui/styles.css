@@ -812,7 +812,85 @@ dialog h3:first-of-type { margin-top: var(--s-4); }
     .combobox-list { max-height: 220px; }
     dialog { width: calc(100% - 2 * var(--s-3)); padding: var(--s-4); }
     .dialog-head { top: calc(-1 * var(--s-4)); }
+
+    /* Chọn nhiều người nhận trên màn hình hẹp: chip xếp dọc, nút hành động
+       chiếm hết chiều rộng để vẫn bấm được bằng ngón tay. */
+    .selection-actions { flex-direction: column; align-items: stretch; }
+    .selection-actions button { width: 100%; }
+    .selection-actions .muted { margin-left: 0; text-align: center; }
+    .chip { width: 100%; align-items: flex-start; }
+    .chip-text { flex: 1 1 auto; }
+    .chip-note { white-space: normal; }
+    .confirm-panel .row-actions button { width: 100%; }
 }
+
+/* ------------------------------------------------- command console batch -- */
+
+/* Chọn nhiều người nhận: chip, xác nhận, tiến độ. Giữ đúng hệ phẳng/tối giản:
+   viền 1px, không bóng đổ, cùng thang bo góc và cỡ chữ với phần còn lại. */
+
+.combobox-option.selected { color: var(--accent); }
+.combobox-option.selected .combobox-name::after { content: " · đã chọn"; font-weight: 500; font-size: var(--fs-xs); color: var(--muted); }
+.combobox-check { margin-left: auto; color: var(--accent); font-weight: 700; }
+
+.selection-actions { margin-top: var(--s-2); align-items: center; }
+.selection-actions .muted { margin-left: auto; font-size: var(--fs-sm); }
+
+.chip-list { margin-top: var(--s-3); }
+
+.chip {
+    display: inline-flex; align-items: center; gap: var(--s-2);
+    max-width: 100%;
+    padding: var(--s-1) var(--s-1) var(--s-1) var(--s-3);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    background: var(--accent-soft);
+    color: var(--text);
+    font-size: var(--fs-sm);
+}
+
+.chip-warning { background: var(--warning-soft); border-color: var(--warning); }
+.chip-text { display: grid; min-width: 0; }
+.chip-text strong { font-size: var(--fs-sm); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip-text code { font-size: var(--fs-xs); color: var(--muted); }
+.chip-note { font-size: var(--fs-xs); color: var(--muted); white-space: nowrap; }
+.chip-warning .chip-note { color: var(--warning); }
+
+.chip-remove {
+    flex: none;
+    width: 22px; height: 22px;
+    display: grid; place-items: center;
+    border: 0; border-radius: var(--r-sm);
+    background: transparent;
+    color: var(--muted);
+    font-size: var(--fs-lg); line-height: 1;
+    transition: background-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.chip-remove:hover { background: var(--surface-3); color: var(--danger); }
+
+.confirm-panel { margin-top: var(--s-3); border-color: var(--accent); }
+.confirm-panel[hidden] { display: none; }
+.confirm-panel .row-actions { margin-top: var(--s-4); }
+.confirm-panel .detail { border: 1px solid var(--border); border-radius: var(--r-md); padding: var(--s-3); background: var(--surface-2); }
+.confirm-panel .detail span { display: block; font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: var(--s-1); }
+
+.batch-progress { display: grid; gap: var(--s-2); margin-bottom: var(--s-3); }
+
+.progress-track {
+    height: 6px;
+    border-radius: var(--r-full);
+    background: var(--surface-3);
+    overflow: hidden;
+}
+.progress-track span {
+    display: block; height: 100%;
+    background: var(--accent);
+    transition: width var(--t-base) var(--ease);
+}
+
+.batch-progress .muted { margin: 0; }
+.command-output table { min-width: 0; }
+.command-output .table-wrap { margin-top: var(--s-2); }
 
 /* ------------------------------------------------------- reduced motion --- */
 

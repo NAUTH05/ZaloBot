@@ -141,6 +141,6 @@ test("hai lệnh dùng chung một cơ chế gửi nhưng không gửi trùng ch
 
 test("/update được gợi ý khi gõ sai lệnh và có ví dụ trong COMMAND_EXAMPLES", () => {
     assert.equal(main.suggestCommandCorrection("updatetinhnang"), "/update tinhnang");
-    assert.equal(main.suggestCommandCorrection("updte"), "/update Đã bổ sung tuỳ chọn giờ nhận lịch");
+    assert.equal(main.suggestCommandCorrection("updte"), "/update Đã bổ sung tuỳ chọn ngày nhận lịch");
     assert.equal(main.suggestCommandCorrection("thongbao"), "/thongbao Hệ thống sẽ bảo trì lúc 22:00");
 });

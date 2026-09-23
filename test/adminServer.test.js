@@ -1,22 +1,41 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const http = require("http");
-const fs = require("node:fs");
 const path = require("node:path");
+
+// Cách ly khỏi các file runtime thật ở gốc dự án. `node --test` chạy mỗi file
+// kiểm tra trong một tiến trình song song; nếu hai file cùng ghi
+// chatDirectory.json / interactions.json thì chúng sẽ tranh chấp và làm hỏng
+// kết quả của nhau. Thay lớp lưu trữ bằng bộ nhớ để không file thật nào bị đụng.
+const persistencePath = require.resolve("../firestorePersistence");
+const realPersistence = require(persistencePath);
+const memoryFiles = new Map();
+const clone = (value) => (value === undefined ? undefined : JSON.parse(JSON.stringify(value)));
+const fileKey = (filePath, defaultPath) => path.resolve(filePath || defaultPath);
+
+require.cache[persistencePath] = {
+    id: persistencePath,
+    filename: persistencePath,
+    loaded: true,
+    exports: {
+        ...realPersistence,
+        readJsonStore: (filePath, defaultPath, fallback) => {
+            const key = fileKey(filePath, defaultPath);
+            if (!memoryFiles.has(key)) memoryFiles.set(key, clone(fallback) ?? null);
+            return clone(memoryFiles.get(key));
+        },
+        writeJsonStore: (filePath, defaultPath, value) => {
+            memoryFiles.set(fileKey(filePath, defaultPath), clone(value));
+        }
+    }
+};
+
 const { createAdminServer } = require("../adminServer");
 
-function preserveRuntimeFiles(t) {
-    const names = ["adminAudit.json", "adminSettings.json", "chatDirectory.json", "interactions.json", "subscriptions.json"];
-    const snapshots = names.map((name) => {
-        const filePath = path.join(__dirname, "..", name);
-        return { filePath, existed: fs.existsSync(filePath), content: fs.existsSync(filePath) ? fs.readFileSync(filePath) : null };
-    });
-    t.after(() => {
-        for (const snapshot of snapshots) {
-            if (snapshot.existed) fs.writeFileSync(snapshot.filePath, snapshot.content);
-            else if (fs.existsSync(snapshot.filePath)) fs.rmSync(snapshot.filePath, { force: true });
-        }
-    });
+// Mỗi bài kiểm tra bắt đầu từ vùng nhớ trắng, thay cho việc sao lưu/khôi phục
+// file thật như trước đây.
+function preserveRuntimeFiles() {
+    memoryFiles.clear();
 }
 
 function request(port, method, path, body = null, cookie = "") {
@@ -94,9 +113,19 @@ test("admin API exposes chat CRUD, settings and command execution", async (t) =>
     const settings = await request(port, "GET", "/zalobot/api/admin/settings", null, cookie);
     assert.ok(settings.body.admins.some((item) => item.userId === "dashboard-admin-user"));
     const command = await request(port, "POST", "/zalobot/api/admin/commands", { command: "/quanlychat", userId: "dashboard-admin-user", chatId: "dashboard-admin-chat" }, cookie);
-    assert.equal(command.status, 200);
-    assert.equal(executed.command, "/quanlychat");
-    assert.equal(command.body.messages[0].text, "Command result");
+    assert.equal(command.status, 400, "lệnh toàn cục không chạy theo từng người nhận nên phải bị từ chối");
+    assert.match(command.body.error, /không chạy theo từng người được/);
+
+    // Lệnh chạy theo từng người nhận cần một chat riêng tư đủ tin cậy để gửi.
+    await request(port, "POST", "/zalobot/api/admin/chats", { chatId: "command-private-chat", chatType: "private", displayName: "Command Target" }, cookie);
+    await request(port, "POST", "/zalobot/api/admin/users", { chatId: "command-private-chat", userId: "command-target-user", displayName: "Command Target", chatTitle: "Command Target", chatType: "private" }, cookie);
+    const targeted = await request(port, "POST", "/zalobot/api/admin/commands", { command: "/help", targetUserId: "command-target-user" }, cookie);
+    assert.equal(targeted.status, 200, JSON.stringify(targeted.body));
+    assert.equal(executed.command, "/help");
+    assert.equal(executed.target.userId, "command-target-user");
+    assert.equal(executed.target.chatId, "command-private-chat");
+    assert.equal(targeted.body.messages[0].text, "Command result");
+    assert.equal(targeted.body.summary.delivered, 1);
 
     const userDeleted = await request(port, "DELETE", "/zalobot/api/admin/users/dashboard-member?hard=1&chatId=dashboard-test-chat", null, cookie);
     assert.equal(userDeleted.status, 200, JSON.stringify(userDeleted.body));
@@ -116,8 +145,13 @@ test("command execution derives executor identity from the session", async (t) =
     t.after(() => { runtime.server.close(); process.env.ADMIN_USERNAME = oldUsername; process.env.ADMIN_PASSWORD = oldPassword; });
     const login = await request(port, "POST", "/zalobot/api/admin/auth/login", { username: "session-admin", password: "test-password" });
     const cookie = String(login.headers["set-cookie"][0]).split(";")[0];
+
+    // Đích phải có chat riêng tư đủ tin cậy thì lệnh mới gửi được.
+    await request(port, "POST", "/zalobot/api/admin/chats", { chatId: "session-target-chat", chatType: "private", displayName: "Session Target" }, cookie);
+    await request(port, "POST", "/zalobot/api/admin/users", { chatId: "session-target-chat", userId: "target-1", displayName: "Session Target", chatTitle: "Session Target", chatType: "private" }, cookie);
+
     const result = await request(port, "POST", "/zalobot/api/admin/commands", { command: "/help", userId: "spoofed", targetUserId: "target-1" }, cookie);
-    assert.equal(result.status, 200);
+    assert.equal(result.status, 200, JSON.stringify(result.body));
     assert.notEqual(executed.userId, "spoofed");
     assert.equal(executed.target.userId, "target-1");
 });

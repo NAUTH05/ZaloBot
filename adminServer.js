@@ -13,8 +13,17 @@ const {
     upsertChat
 } = require("./chatDirectory");
 const { getInteractionTargets, removeInteractionMember, upsertInteractionMember } = require("./interactionRegistry");
-const { getAdminSettings, getConfiguredAdminIds, removeAdmin, setDefaultPageSize, upsertAdmin } = require("./adminSettings");
-const { getCommandRegistry } = require("./commandRegistry");
+const {
+    getAdminSettings,
+    getConfiguredAdminIds,
+    removeAdmin,
+    setBatchDelayMs,
+    setDefaultPageSize,
+    setMaxBatchSize,
+    upsertAdmin
+} = require("./adminSettings");
+const { findCommand, getCommandRegistry } = require("./commandRegistry");
+const { TARGETING, normalizeCommandName, resolveCommandTargeting } = require("./commandTargeting");
 const {
     deleteSubscription,
     disableNotifications,
@@ -26,7 +35,7 @@ const {
     updateSubscriptionMetadata
 } = require("./subscriptions");
 const { buildAdminData } = require("./adminDataService");
-const { buildTargetUserOptions, findTargetUser, resolveTargetUserId } = require("./targetUsers");
+const { buildTargetUserOptions, resolveBatchTargets } = require("./targetUsers");
 const { getPersistenceStatus, readJsonStore, writeJsonStore } = require("./firestorePersistence");
 const { getSystemLogs } = require("./operationalLog");
 
@@ -127,6 +136,14 @@ function withinRateLimit(request) {
     return count <= 240;
 }
 
+// Ngày đích của một mốc nhận lịch: 0 = homnay, 1 = homsau. Dùng chung quy tắc
+// với lệnh chat nên API không thể nhận giá trị mà chat từ chối.
+function parseTargetDayOffset(value) {
+    if (value === 0 || value === "0") return 0;
+    if (value === 1 || value === "1") return 1;
+    return null;
+}
+
 function audit(action, request, details = {}) {
     const filePath = path.join(__dirname, "adminAudit.json");
     const fallback = { events: [] };
@@ -140,6 +157,188 @@ function audit(action, request, details = {}) {
         ...details
     });
     writeJsonStore(filePath, filePath, { events });
+}
+
+/* -------------------------------------------------------------------------- */
+/* Command console nhiều người nhận                                           */
+/* -------------------------------------------------------------------------- */
+
+// Lượt chạy nhiều người nhận chạy nền và được hỏi tiến độ qua jobId, để giao
+// diện hiển thị được completed/total thay vì chờ một yêu cầu HTTP dài.
+const BATCH_JOB_TTL_MS = 15 * 60 * 1000;
+const MAX_BATCH_JOBS = 20;
+const batchJobs = new Map();
+
+function pruneBatchJobs(now = Date.now()) {
+    for (const [id, job] of batchJobs) {
+        if (now - job.createdAtMs > BATCH_JOB_TTL_MS) batchJobs.delete(id);
+    }
+    while (batchJobs.size > MAX_BATCH_JOBS) {
+        const oldest = [...batchJobs.entries()].sort((left, right) => left[1].createdAtMs - right[1].createdAtMs)[0];
+        batchJobs.delete(oldest[0]);
+    }
+}
+
+// Danh tính admin lấy từ phiên đăng nhập, không bao giờ từ nội dung yêu cầu.
+function buildExecutor(request) {
+    const configured = getConfiguredAdminIds();
+    const configuredAdmin = getAdminSettings().admins
+        .find((admin) => admin.displayName && admin.displayName.toLowerCase() === String(request.admin.username).toLowerCase());
+    return {
+        userId: configuredAdmin?.userId || configured.userIds[0] || `admin:${request.admin.username}`,
+        username: request.admin.username,
+        role: "owner",
+        displayName: configuredAdmin?.displayName || request.admin.username,
+        chatId: configuredAdmin?.chatId || configured.chatIds[0] || null
+    };
+}
+
+function batchExecutorChatId(executor) {
+    return executor.chatId || executor.userId;
+}
+
+function sleep(ms) {
+    return ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
+}
+
+// Một kết quả cho một người nhận. `status` phân biệt rõ "chạy được và đã gửi"
+// với "lỗi" và "bỏ qua", dựa trên `deliveredToChatId` mà engine trả về.
+function targetResult(target, outcome) {
+    return {
+        userId: target.userId,
+        displayName: target.displayName,
+        chatId: target.chatId || null,
+        status: outcome.status,
+        messageCount: outcome.messageCount || 0,
+        deliveredToChatId: outcome.deliveredToChatId || null,
+        messages: outcome.messages || [],
+        error: outcome.error || null
+    };
+}
+
+function commandNameFromInput(raw) {
+    const text = String(raw || "").trim();
+    if (!text.startsWith("/")) return "";
+    const match = text.match(/^\/(\w+)/);
+    return match ? match[1].toLowerCase() : "";
+}
+
+function summarizeBatch(results, extra = {}) {
+    const summary = {
+        total: results.length,
+        completed: results.length,
+        delivered: results.filter((item) => item.status === "delivered").length,
+        failed: results.filter((item) => item.status === "failed").length,
+        skipped: results.filter((item) => item.status === "skipped").length,
+        ...extra
+    };
+    return summary;
+}
+
+// Kiểm tra toàn bộ yêu cầu TRƯỚC khi chạy bất kỳ người nhận nào, để một lượt
+// sai không bao giờ gửi được một nửa rồi mới báo lỗi.
+function prepareCommandRequest(body = {}) {
+    const command = String(body.command || "").trim();
+    if (!command) return { ok: false, status: 400, error: "Thiếu lệnh.", command: "" };
+    if (!command.startsWith("/")) return { ok: false, status: 400, error: "Lệnh phải bắt đầu bằng /", command };
+
+    const name = commandNameFromInput(command);
+    const entry = name ? findCommand(name) : null;
+    if (!entry) {
+        return { ok: false, status: 400, command, error: `Không nhận diện được lệnh “${name ? `/${name}` : command}”.` };
+    }
+
+    const targeting = resolveCommandTargeting(name);
+    if (targeting.mode === TARGETING.NONE) {
+        return { ok: false, status: 400, command, name, targeting, error: targeting.reason };
+    }
+
+    const settings = getAdminSettings();
+    // Tương thích ngược: client cũ vẫn gửi một chuỗi targetUserId.
+    const rawIds = Array.isArray(body.targetUserIds)
+        ? body.targetUserIds
+        : (body.targetUserId != null && String(body.targetUserId).trim() !== "" ? [body.targetUserId] : []);
+    const batch = resolveBatchTargets(buildAdminData(), rawIds, { max: settings.maxBatchSize });
+
+    if (batch.rejected.length > 0) {
+        return {
+            ok: false, status: 400, command, name, targeting,
+            error: batch.rejected[0].reason,
+            errors: batch.rejected.map((item) => item.reason),
+            targetUserIds: rawIds
+        };
+    }
+    if (batch.overflow > 0) {
+        return {
+            ok: false, status: 400, command, name, targeting,
+            error: `Mỗi lượt chỉ chạy tối đa ${batch.max} người nhận; đang chọn ${batch.targets.length + batch.overflow}. Hãy bỏ bớt ${batch.overflow} người.`,
+            targetUserIds: rawIds
+        };
+    }
+    if (targeting.mode === TARGETING.PER_USER && batch.targets.length === 0) {
+        return {
+            ok: false, status: 400, command, name, targeting,
+            error: "Lệnh này chạy theo từng người nên cần chọn ít nhất một người nhận.",
+            targetUserIds: rawIds
+        };
+    }
+
+    return { ok: true, command, name, targeting, batch, settings };
+}
+
+async function executeForTarget({ executeCommand, command, executor, target }) {
+    return executeCommand({
+        command,
+        userId: executor.userId,
+        chatId: batchExecutorChatId(executor),
+        displayName: executor.displayName,
+        executor,
+        target
+    });
+}
+
+// Chạy lệnh lần lượt cho từng người nhận. Một người lỗi không dừng những người
+// còn lại; mỗi lần gửi cách nhau `delayMs` để không dồn dập Zalo.
+async function runCommandBatch({ executeCommand, command, targets, executor, delayMs = 0, onProgress = null }) {
+    const results = [];
+
+    for (const target of targets) {
+        if (!target.chatId) {
+            // Không có liên kết chat đủ tin cậy thì không thể gửi thật, nên bỏ
+            // qua thay vì báo thành công.
+            results.push(targetResult(target, {
+                status: "skipped",
+                error: target.chatHint === "multiple"
+                    ? "Người này có nhiều ngữ cảnh chat nên không xác định được chat để gửi."
+                    : "Không xác định được chat riêng tư đang hoạt động cho người này."
+            }));
+            if (onProgress) onProgress(results);
+            continue;
+        }
+
+        try {
+            const result = await executeForTarget({ executeCommand, command, executor, target });
+            const messages = Array.isArray(result?.messages) ? result.messages : [];
+            const messageCount = Number(result?.messageCount ?? messages.length) || 0;
+            results.push(targetResult(target, {
+                status: messageCount > 0 ? "delivered" : "skipped",
+                messageCount,
+                deliveredToChatId: result?.deliveredToChatId || null,
+                messages,
+                error: messageCount > 0 ? null : "Lệnh không tạo ra tin nhắn nào để gửi."
+            }));
+        } catch (error) {
+            results.push(targetResult(target, {
+                status: "failed",
+                error: String(error?.message || error).slice(0, 300)
+            }));
+        }
+
+        if (onProgress) onProgress(results);
+        await sleep(delayMs);
+    }
+
+    return results;
 }
 
 function sessionFor(request) {
@@ -398,18 +597,25 @@ async function handleApi(request, response, url, options = {}) {
         let body;
         try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
         const context = { chatId: body.chatId, userId: body.userId, userDisplayName: body.userDisplayName || "" };
+        // Ngày đích phải được kiểm tra giống hệt lệnh chat: chỉ 0 (homnay) hoặc 1 (homsau).
+        const targetDayOffset = parseTargetDayOffset(body.targetDayOffset);
+        if (body.targetDayOffset !== undefined && body.targetDayOffset !== null && targetDayOffset == null) {
+            return json(response, 400, { error: "targetDayOffset chỉ nhận 0 (homnay) hoặc 1 (homsau)" });
+        }
         try {
             let result;
             if (body.action === "enable") result = enableNotifications(context, { studentId: body.studentId, studentName: body.studentName });
             else if (body.action === "disable") result = disableNotifications(context);
-            else if (body.action === "add_time") result = enableNotifications(context, { studentId: body.studentId, studentName: body.studentName, notificationTime: body.time });
-            else if (body.action === "update_time") result = updateNotificationTime(context, body.timeId, body.time);
+            else if (body.action === "add_time") {
+                if (targetDayOffset == null) return json(response, 400, { error: "Cần chọn ngày đích: 0 (homnay) hoặc 1 (homsau)" });
+                result = enableNotifications(context, { studentId: body.studentId, studentName: body.studentName, notificationTime: body.time, targetDayOffset });
+            } else if (body.action === "update_time") result = updateNotificationTime(context, body.timeId, body.time, targetDayOffset);
             else if (body.action === "remove_time") result = removeNotificationTime(context, body.timeId);
             else if (body.action === "metadata") result = updateSubscriptionMetadata(context, body);
             else if (body.action === "delete") result = deleteSubscription(context);
             else return json(response, 400, { error: "Unsupported subscription action" });
             if (result == null || result === false) return json(response, 404, { error: "Subscription or notification time not found" });
-            audit(`subscription.${body.action}`, request, { result: "success", chatId: body.chatId, userId: body.userId });
+            audit(`subscription.${body.action}`, request, { result: "success", chatId: body.chatId, userId: body.userId, targetDayOffset: targetDayOffset ?? null });
             return json(response, 200, { ok: true, result });
         } catch (error) {
             audit(`subscription.${body.action || "update"}`, request, { result: "failed", error: error.message });
@@ -420,8 +626,21 @@ async function handleApi(request, response, url, options = {}) {
     if (url.pathname === `${API_PREFIX}/settings` && request.method === "PATCH") {
         let body;
         try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
-        try { const updated = setDefaultPageSize(body.defaultPageSize); audit("settings.page_size", request, { result: "success", defaultPageSize: updated.defaultPageSize }); return json(response, 200, updated); }
-        catch (error) { return json(response, 400, { error: error.message }); }
+        try {
+            let updated = getAdminSettings();
+            if (body.defaultPageSize !== undefined) updated = setDefaultPageSize(body.defaultPageSize);
+            if (body.maxBatchSize !== undefined) updated = setMaxBatchSize(body.maxBatchSize);
+            if (body.batchDelayMs !== undefined) updated = setBatchDelayMs(body.batchDelayMs);
+            audit("settings.update", request, {
+                result: "success",
+                defaultPageSize: updated.defaultPageSize,
+                maxBatchSize: updated.maxBatchSize,
+                batchDelayMs: updated.batchDelayMs
+            });
+            return json(response, 200, updated);
+        } catch (error) {
+            return json(response, 400, { error: error.message });
+        }
     }
     if (url.pathname === `${API_PREFIX}/commands` && request.method === "GET") return json(response, 200, { commands: getCommandRegistry() });
     if (url.pathname === `${API_PREFIX}/target-users` && request.method === "GET") {
@@ -445,32 +664,200 @@ async function handleApi(request, response, url, options = {}) {
         if (typeof options.executeCommand !== "function") return json(response, 503, { error: "Command service unavailable" });
         let body;
         try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
-        try {
-            const workspace = buildAdminData();
-            // Chat ID của nhóm không được lặng lẽ dùng làm User ID.
-            const targetUser = resolveTargetUserId(workspace, body.targetUserId);
-            if (!targetUser.ok) {
-                audit("command.execute", request, { result: "rejected", command: body.command, targetUserId: targetUser.userId });
-                return json(response, 400, { error: targetUser.error });
-            }
-            const configured = getConfiguredAdminIds();
-            const configuredAdmin = getAdminSettings().admins.find((admin) => admin.displayName && admin.displayName.toLowerCase() === String(request.admin.username).toLowerCase());
-            const executor = {
-                userId: configuredAdmin?.userId || configured.userIds[0] || `admin:${request.admin.username}`,
-                username: request.admin.username,
-                role: "owner",
-                displayName: configuredAdmin?.displayName || request.admin.username
-            };
-            const target = targetUser.userId || body.targetChatId
-                ? { userId: targetUser.userId || null, chatId: body.targetChatId || null, displayName: findTargetUser(workspace, targetUser.userId)?.displayName || null }
-                : null;
-            const result = await options.executeCommand({ command: body.command, userId: executor.userId, chatId: body.chatId || configuredAdmin?.chatId || configured.chatIds[0] || executor.userId, displayName: executor.displayName, executor, target });
-            audit("command.execute", request, { result: "success", command: body.command, executor: executor.username, userId: executor.userId, target });
-            return json(response, 200, result);
-        } catch (error) {
-            audit("command.execute", request, { result: "failed", command: body.command, error: error.message });
-            return json(response, 400, { error: error.message });
+
+        const prepared = prepareCommandRequest(body);
+        if (!prepared.ok) {
+            audit("command.execute", request, {
+                result: "rejected",
+                command: prepared.command,
+                error: prepared.error,
+                targetUserIds: prepared.targetUserIds || null
+            });
+            return json(response, prepared.status || 400, {
+                error: prepared.error,
+                errors: prepared.errors || [],
+                targeting: prepared.targeting || null
+            });
         }
+
+        const executor = buildExecutor(request);
+        const { command, targeting, batch, settings } = prepared;
+
+        // Lệnh broadcast gửi tới mọi chat nên chỉ chạy ĐÚNG MỘT LẦN, dù người
+        // dùng chọn bao nhiêu người nhận.
+        if (targeting.mode === TARGETING.BROADCAST) {
+            let result;
+            let failure = null;
+            try {
+                result = await executeForTarget({ executeCommand: options.executeCommand, command, executor, target: null });
+            } catch (error) {
+                failure = error;
+            }
+            audit("command.execute", request, {
+                result: failure ? "failed" : "success",
+                command,
+                executor: executor.username,
+                scope: "broadcast",
+                targetUserIds: batch.targets.map((item) => item.userId),
+                deliveredToChatId: result?.deliveredToChatId || null,
+                error: failure ? failure.message : null
+            });
+            if (failure) return json(response, 400, { error: failure.message, targeting });
+            return json(response, 200, {
+                ...result,
+                targeting,
+                summary: summarizeBatch([], { broadcast: true, selected: batch.targets.length, duplicates: batch.duplicates.length }),
+                results: [],
+                note: targeting.broadcastScope
+            });        }
+
+        const results = await runCommandBatch({
+            executeCommand: options.executeCommand,
+            command,
+            targets: batch.targets,
+            executor,
+            delayMs: settings.batchDelayMs
+        });
+
+        const summary = summarizeBatch(results, { duplicates: batch.duplicates.length, truncated: 0 });
+        audit("command.execute", request, {
+            result: summary.failed > 0 ? "partial" : "success",
+            command,
+            executor: executor.username,
+            scope: "per-user",
+            targetUserIds: batch.targets.map((item) => item.userId),
+            duplicates: batch.duplicates,
+            outcomes: results.map((item) => ({ userId: item.userId, status: item.status, error: item.error }))
+        });
+
+        // Tương thích ngược: client cũ gửi một targetUserId vẫn nhận đúng dạng
+        // phản hồi cũ (messages / deliveredToChatId / target).
+        const single = results.length === 1 ? results[0] : null;
+        return json(response, 200, {
+            command,
+            targeting,
+            summary,
+            results,
+            deliveredToChatId: single?.deliveredToChatId || null,
+            messages: single?.messages || [],
+            messageCount: single?.messageCount || 0,
+            executor,
+            target: single ? { userId: single.userId, chatId: single.chatId, displayName: single.displayName } : null
+        });
+    }
+
+    // Lượt chạy nhiều người nhận chạy nền để giao diện hỏi được tiến độ.
+    if (url.pathname === `${API_PREFIX}/commands/batch` && request.method === "POST") {
+        if (typeof options.executeCommand !== "function") return json(response, 503, { error: "Command service unavailable" });
+        let body;
+        try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
+
+        const prepared = prepareCommandRequest(body);
+        if (!prepared.ok) {
+            audit("command.batch", request, {
+                result: "rejected",
+                command: prepared.command,
+                error: prepared.error,
+                targetUserIds: prepared.targetUserIds || null
+            });
+            return json(response, prepared.status || 400, {
+                error: prepared.error,
+                errors: prepared.errors || [],
+                targeting: prepared.targeting || null
+            });
+        }
+
+        const executor = buildExecutor(request);
+        const { command, targeting, batch, settings } = prepared;
+        const isBroadcast = targeting.mode === TARGETING.BROADCAST;
+
+        pruneBatchJobs();
+        const job = {
+            id: crypto.randomUUID(),
+            command,
+            targeting,
+            executor,
+            total: isBroadcast ? 1 : batch.targets.length,
+            results: [],
+            status: "running",
+            duplicates: batch.duplicates,
+            createdAtMs: Date.now(),
+            startedAt: new Date().toISOString(),
+            finishedAt: null
+        };
+        batchJobs.set(job.id, job);
+
+        const run = async () => {
+            try {
+                if (isBroadcast) {
+                    let outcome;
+                    try {
+                        const result = await executeForTarget({ executeCommand: options.executeCommand, command, executor, target: null });
+                        const messages = Array.isArray(result?.messages) ? result.messages : [];
+                        outcome = [{ userId: null, displayName: "Mọi chat đang hoạt động", chatId: null, status: "delivered", messageCount: Number(result?.messageCount ?? messages.length) || 0, deliveredToChatId: result?.deliveredToChatId || null, messages, error: null }];
+                    } catch (error) {
+                        outcome = [{ userId: null, displayName: "Mọi chat đang hoạt động", chatId: null, status: "failed", messageCount: 0, deliveredToChatId: null, messages: [], error: String(error?.message || error).slice(0, 300) }];
+                    }
+                    job.results = outcome;
+                } else {
+                    job.results = await runCommandBatch({
+                        executeCommand: options.executeCommand,
+                        command,
+                        targets: batch.targets,
+                        executor,
+                        delayMs: settings.batchDelayMs,
+                        onProgress: (partial) => { job.results = [...partial]; }
+                    });
+                }
+                job.status = "finished";
+            } catch (error) {
+                job.status = "failed";
+                job.error = String(error?.message || error).slice(0, 300);
+            } finally {
+                job.finishedAt = new Date().toISOString();
+                const summary = summarizeBatch(job.results, { broadcast: isBroadcast, duplicates: batch.duplicates.length });
+                audit("command.batch", request, {
+                    result: summary.failed > 0 ? "partial" : "success",
+                    command,
+                    executor: executor.username,
+                    jobId: job.id,
+                    scope: isBroadcast ? "broadcast" : "per-user",
+                    targetUserIds: batch.targets.map((item) => item.userId),
+                    duplicates: batch.duplicates,
+                    outcomes: job.results.map((item) => ({ userId: item.userId, status: item.status, error: item.error }))
+                });
+            }
+        };
+        // Không await: trả jobId ngay để giao diện hiển thị tiến độ.
+        run().catch(() => {});
+
+        return json(response, 202, {
+            jobId: job.id,
+            total: job.total,
+            targeting,
+            note: isBroadcast ? targeting.broadcastScope : null
+        });
+    }
+
+    const batchJobMatch = new RegExp(`^${API_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/commands/batch/([^/]+)$`).exec(url.pathname);
+    if (batchJobMatch && request.method === "GET") {
+        const job = batchJobs.get(decodeURIComponent(batchJobMatch[1]));
+        if (!job) return json(response, 404, { error: "Không tìm thấy lượt chạy này (có thể đã hết hạn)." });
+        return json(response, 200, {
+            jobId: job.id,
+            status: job.status,
+            command: job.command,
+            targeting: job.targeting,
+            startedAt: job.startedAt,
+            finishedAt: job.finishedAt,
+            error: job.error || null,
+            progress: {
+                completed: job.results.length,
+                total: job.total
+            },
+            summary: summarizeBatch(job.results, { broadcast: job.targeting?.mode === TARGETING.BROADCAST, duplicates: job.duplicates.length }),
+            results: job.results
+        });
     }
     if (url.pathname === `${API_PREFIX}/audit` && request.method === "GET") return json(response, 200, { events: recentAudit(100) });
     if (url.pathname === `${API_PREFIX}/logs` && request.method === "GET") {

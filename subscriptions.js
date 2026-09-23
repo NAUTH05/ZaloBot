@@ -1,9 +1,14 @@
 const path = require("path");
 const { readJsonStore, writeJsonStore } = require("./firestorePersistence");
+const { LEGACY_TARGET_DAY_CUTOFF, deriveLegacyTargetDayOffset } = require("./scheduleDatePolicy");
 
 const FILE_PATH = path.join(__dirname, "subscriptions.json");
 const CONTEXT_VERSION = 2;
 const DEFAULT_NOTIFICATION_TIME = "06:00";
+// Mỗi mốc giờ nhận lịch tự chọn lịch của NGÀY NÀO: 0 = hôm nay, 1 = hôm sau.
+const TARGET_DAY_TODAY = 0;
+const TARGET_DAY_TOMORROW = 1;
+const TARGET_DAY_OFFSETS = Object.freeze([TARGET_DAY_TODAY, TARGET_DAY_TOMORROW]);
 
 function normalizeNotificationTime(value, fallback = DEFAULT_NOTIFICATION_TIME) {
     const raw = String(value == null ? "" : value).trim();
@@ -11,6 +16,22 @@ function normalizeNotificationTime(value, fallback = DEFAULT_NOTIFICATION_TIME) 
     const match = raw.match(/^(?:([01]\d|2[0-3]):([0-5]\d))$/);
     if (!match) return null;
     return `${match[1]}:${match[2]}`;
+}
+
+// Chấp nhận 0/1 dạng số hoặc chuỗi. Giá trị thiếu/không hợp lệ được suy ra từ
+// chính sách cũ theo giờ, để bản ghi cũ giữ nguyên hành vi (trước 20:00 là hôm
+// nay, từ 20:00 là hôm sau). Nhờ vậy một bản ghi thiếu trường không bao giờ làm
+// mọi mốc 20:00 đổ về lịch hôm nay.
+function normalizeTargetDayOffset(value, time) {
+    if (value === 0 || value === "0") return TARGET_DAY_TODAY;
+    if (value === 1 || value === "1") return TARGET_DAY_TOMORROW;
+    if (value === TARGET_DAY_TODAY || value === TARGET_DAY_TOMORROW) return value;
+    return deriveLegacyTargetDayOffset(time);
+}
+
+// Khóa nhận dạng một mốc: cùng giờ nhưng khác ngày đích là HAI mốc riêng biệt.
+function notificationTimeKey(time, targetDayOffset) {
+    return `${time}#${normalizeTargetDayOffset(targetDayOffset, time)}`;
 }
 
 function normalizeNotificationTimes(subscription) {
@@ -23,8 +44,12 @@ function normalizeNotificationTimes(subscription) {
     for (const raw of rawTimes) {
         const id = Number(raw?.id);
         const time = normalizeNotificationTime(raw?.time ?? raw);
-        if (!time || seen.has(time)) continue;
-        seen.add(time);
+        if (!time) continue;
+        const targetDayOffset = normalizeTargetDayOffset(raw?.targetDayOffset, time);
+        const key = notificationTimeKey(time, targetDayOffset);
+        // Khử trùng theo (giờ + ngày đích), không phải chỉ theo giờ.
+        if (seen.has(key)) continue;
+        seen.add(key);
         const normalizedId = Number.isInteger(id) && id > 0 && !usedIds.has(id)
             ? id
             : nextNotificationTimeId(times);
@@ -32,11 +57,23 @@ function normalizeNotificationTimes(subscription) {
         times.push({
             id: normalizedId,
             time,
+            targetDayOffset,
             createdAt: raw?.createdAt || new Date().toISOString(),
             updatedAt: raw?.updatedAt || raw?.createdAt || new Date().toISOString()
         });
     }
     return times.sort((left, right) => left.id - right.id);
+}
+
+// Bản ghi cũ chưa có targetDayOffset: trả về giá trị sẽ được suy ra, để script
+// di trú và giao diện hiển thị đúng mà không cần ghi đè.
+function needsTargetDayMigration(subscription) {
+    const rawTimes = Array.isArray(subscription?.notificationTimes) ? subscription.notificationTimes : [];
+    return rawTimes.some((raw) => {
+        const time = normalizeNotificationTime(raw?.time ?? raw);
+        if (!time) return false;
+        return !TARGET_DAY_OFFSETS.includes(raw?.targetDayOffset) && raw?.targetDayOffset !== "0" && raw?.targetDayOffset !== "1";
+    });
 }
 
 function nextNotificationTimeId(times) {
@@ -88,7 +125,7 @@ function removeLegacyChatRecord(subscriptions, context) {
     delete subscriptions[String(context.chatId)];
 }
 
-// /find chỉ lưu MSSV cho đúng user trong đúng chat. /dangky mới bật thông báo.
+// /luumssv chỉ lưu MSSV cho đúng user trong đúng chat. /nhanlich mới bật thông báo.
 function saveStudent(contextInput, { studentId, studentName }, filePath = FILE_PATH) {
     const context = normalizeContext(contextInput);
     const subscriptions = readJsonStore(filePath, FILE_PATH, {});
@@ -109,7 +146,7 @@ function saveStudent(contextInput, { studentId, studentName }, filePath = FILE_P
     return subscriptions[key];
 }
 
-function enableNotifications(contextInput, { studentId, studentName, notificationTime } = {}, filePath = FILE_PATH) {
+function enableNotifications(contextInput, { studentId, studentName, notificationTime, targetDayOffset } = {}, filePath = FILE_PATH) {
     const context = normalizeContext(contextInput);
     const subscriptions = readJsonStore(filePath, FILE_PATH, {});
     const key = createSubscriptionKey(context);
@@ -117,13 +154,25 @@ function enableNotifications(contextInput, { studentId, studentName, notificatio
     const existing = subscriptions[key] || {};
     const notificationTimes = normalizeNotificationTimes(existing);
     const normalizedTime = normalizeNotificationTime(notificationTime, null);
-    if (normalizedTime && !notificationTimes.some((item) => item.time === normalizedTime)) {
-        const now = new Date().toISOString();
-        notificationTimes.push({ id: nextNotificationTimeId(notificationTimes), time: normalizedTime, createdAt: now, updatedAt: now });
+    if (normalizedTime) {
+        const offset = normalizeTargetDayOffset(targetDayOffset, normalizedTime);
+        // Cùng giờ nhưng khác ngày đích là hai mốc riêng, nên chỉ bỏ qua khi
+        // trùng cả giờ lẫn ngày đích.
+        const duplicate = notificationTimes.some((item) => item.time === normalizedTime && item.targetDayOffset === offset);
+        if (!duplicate) {
+            const now = new Date().toISOString();
+            notificationTimes.push({ id: nextNotificationTimeId(notificationTimes), time: normalizedTime, targetDayOffset: offset, createdAt: now, updatedAt: now });
+        }
     }
     if (notificationTimes.length === 0) {
         const now = new Date().toISOString();
-        notificationTimes.push({ id: 1, time: DEFAULT_NOTIFICATION_TIME, createdAt: now, updatedAt: now });
+        notificationTimes.push({
+            id: 1,
+            time: DEFAULT_NOTIFICATION_TIME,
+            targetDayOffset: deriveLegacyTargetDayOffset(DEFAULT_NOTIFICATION_TIME),
+            createdAt: now,
+            updatedAt: now
+        });
     }
     subscriptions[key] = {
         ...existing,
@@ -172,16 +221,27 @@ function disableClassStartNotifications(contextInput, filePath = FILE_PATH) {
     return true;
 }
 
-function updateNotificationTime(contextInput, timeId, notificationTime, filePath = FILE_PATH) {
+// Sửa một mốc theo ID: đổi được cả giờ lẫn ngày đích. Bỏ trống ngày đích thì
+// giữ nguyên giá trị đang có, không suy đoán lại theo chính sách cũ.
+function updateNotificationTime(contextInput, timeId, notificationTime, targetDayOffset, filePath = FILE_PATH) {
     const subscriptions = readJsonStore(filePath, FILE_PATH, {});
     const key = createSubscriptionKey(contextInput);
     const subscription = subscriptions[key];
-    const normalizedTime = normalizeNotificationTime(notificationTime, null);
-    if (!subscription || !normalizedTime) return null;
+    if (!subscription) return null;
     const times = normalizeNotificationTimes(subscription);
     const index = times.findIndex((item) => Number(item.id) === Number(timeId));
-    if (index < 0 || times.some((item, itemIndex) => itemIndex !== index && item.time === normalizedTime)) return null;
-    times[index] = { ...times[index], time: normalizedTime, updatedAt: new Date().toISOString() };
+    if (index < 0) return null;
+
+    const normalizedTime = normalizeNotificationTime(notificationTime, null) || times[index].time;
+    const offset = targetDayOffset == null || targetDayOffset === ""
+        ? times[index].targetDayOffset
+        : normalizeTargetDayOffset(targetDayOffset, normalizedTime);
+
+    // Không cho hai mốc trùng cả giờ lẫn ngày đích.
+    const conflict = times.some((item, itemIndex) => itemIndex !== index && item.time === normalizedTime && item.targetDayOffset === offset);
+    if (conflict) return null;
+
+    times[index] = { ...times[index], time: normalizedTime, targetDayOffset: offset, updatedAt: new Date().toISOString() };
     subscription.notificationTimes = times;
     subscription.updatedAt = new Date().toISOString();
     writeJsonStore(filePath, FILE_PATH, subscriptions);
@@ -231,6 +291,28 @@ function deleteSubscription(contextInput, filePath = FILE_PATH) {
     return removed;
 }
 
+// Di trú idempotent cho bản ghi cũ chưa có targetDayOffset: ghi lại giá trị suy
+// ra từ chính sách trước 20:00 / từ 20:00. Không đụng tới id, MSSV, quyền sở
+// hữu chat/user, trạng thái bật-tắt hay lịch sử gửi tin. Chạy lại lần hai không
+// ghi gì thêm.
+function migrateNotificationTargetDays(filePath = FILE_PATH) {
+    const subscriptions = readJsonStore(filePath, FILE_PATH, {});
+    let changedSubscriptions = 0;
+    let migratedTimes = 0;
+
+    for (const [key, subscription] of Object.entries(subscriptions)) {
+        const rawTimes = Array.isArray(subscription?.notificationTimes) ? subscription.notificationTimes : [];
+        const missing = rawTimes.filter((raw) => raw?.targetDayOffset !== TARGET_DAY_TODAY && raw?.targetDayOffset !== TARGET_DAY_TOMORROW).length;
+        if (missing === 0) continue;
+        subscriptions[key] = { ...subscription, notificationTimes: normalizeNotificationTimes(subscription) };
+        changedSubscriptions += 1;
+        migratedTimes += missing;
+    }
+
+    if (changedSubscriptions > 0) writeJsonStore(filePath, FILE_PATH, subscriptions);
+    return { changedSubscriptions, migratedTimes };
+}
+
 function getEnabledSubscriptions() {
     return Object.fromEntries(
         Object.entries(getAllSubscriptions())
@@ -254,6 +336,9 @@ module.exports = {
     CONTEXT_VERSION,
     DEFAULT_NOTIFICATION_TIME,
     FILE_PATH,
+    TARGET_DAY_OFFSETS,
+    TARGET_DAY_TODAY,
+    TARGET_DAY_TOMORROW,
     createSubscriptionKey,
     deleteSubscription,
     disableClassStartNotifications,
@@ -265,8 +350,13 @@ module.exports = {
     getEnabledSubscriptions,
     getSubscription,
     isCurrentSubscription,
+    migrateNotificationTargetDays,
+    needsTargetDayMigration,
+    nextNotificationTimeId,
     normalizeNotificationTime,
     normalizeNotificationTimes,
+    normalizeTargetDayOffset,
+    notificationTimeKey,
     removeNotificationTime,
     saveStudent,
     updateNotificationTime,
