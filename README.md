@@ -463,6 +463,92 @@ npm run cleanup:birthday-data -- --apply   # deletes the document, after the bac
 
 The script always writes a timestamped JSON backup under `migration-backups/` first and refuses to delete if the backup fails. It never runs automatically and is never called by the bot.
 
+## Running up to three bots
+
+One process, one codebase and one Firestore database can serve up to three Zalo bot identities. Each bot is a **separate identity**: its own token, its own users, its own chats and its own platform limits. Adding bots does not increase the capacity of the existing bot.
+
+### Configuration
+
+| Bot | Environment variable | Required |
+| --- | --- | --- |
+| bot1 | `BOT_1_TOKEN`, or the legacy `BOT_TOKEN` | yes |
+| bot2 | `BOT_2_TOKEN` | no |
+| bot3 | `BOT_3_TOKEN` | no |
+
+- A bot whose token is absent is simply disabled. Bot 1 is required because it owns the legacy storage namespace.
+- If both `BOT_1_TOKEN` and `BOT_TOKEN` are set to **different** values, startup fails rather than silently picking one.
+- Two bots sharing one token fails at startup — that would mean two polling consumers on one identity, producing duplicate inbound messages and a fight over the update cursor.
+- Tokens are never printed. Logs and the dashboard show a short SHA-256 fingerprint instead, which is enough to tell two tokens apart.
+- A single process runs all bots (`instances: 1`, `exec_mode: "fork"`). Do **not** run one PM2 process per bot: the admin dashboard and the schedulers are process-wide.
+
+### Storage namespaces
+
+Bot 1 keeps the **existing key namespace unchanged** (`chatId::userId`, `chatId`). Existing data is therefore used as-is — there is no migration to run, and the Room 411 bot keeps reading `chatDirectory` exactly as before.
+
+Bot 2 and bot 3 use a `botN::` prefix (`bot2::chatId::userId`). The same Chat ID or User ID under two bots is two different conversations and never overwrites the other.
+
+A user who talks to both bot 1 and bot 2 has **separate notification settings per bot**, shown separately in the dashboard.
+
+| Store | Key | Bot 1 | Bot 2 |
+| --- | --- | --- | --- |
+| `subscriptions` | chat + user | `chat::user` | `bot2::chat::user` |
+| `chatDirectory` | chat | `chatId` | `bot2::chatId` |
+| `interactions` | chat | `chatId` | `bot2::chatId` |
+
+Shared data — the fetched LHU schedule and its change snapshots — stays keyed by student, not by bot, so schedule fetching is **not** tripled when three bots run. Only delivery is per bot.
+
+### Creating bot 2 or bot 3
+
+1. Create the new bot on the Zalo Bot Platform and copy its token.
+2. Put it in `.env` as `BOT_2_TOKEN` (never in source, never in a commit).
+3. Restart: `pm2 restart zalobot`. Bot 2 appears on the dashboard with status `running`.
+4. Obtain bot 2's invite link / QR from the Zalo Bot Platform.
+5. Ask a test user to open that link and send `/start` to **bot 2**. Nothing is transferred automatically: a bot can only serve chats that have talked to it.
+
+### Trial checklist
+
+Run these in order. Do bot 2 completely before touching bot 3.
+
+| # | Step | Expected |
+| --- | --- | --- |
+| 1 | Add `BOT_2_TOKEN`, `pm2 restart zalobot` | Dashboard lists bot2 as running; bot1 unaffected |
+| 2 | Test user sends `/start` to bot 2 | Reply arrives **from bot 2** |
+| 3 | `/luumssv <MSSV>` | Saved against bot 2's chat/user |
+| 4 | `/nhanlich 06:30 homnay` | Confirmation from bot 2 |
+| 5 | Wait for the scheduled time | Notification arrives from **bot 2**, not bot 1 |
+| 6 | Dashboard → Chats / Notifications | The record shows `botId = bot2`; filter by bot 2 finds it |
+| 7 | Dashboard → Users / Logs | Bot 2 entries appear only under the bot 2 filter |
+| 8 | Send `/start` to bot 1 | Bot 1 still answers with its own data |
+| 9 | Repeat 1–8 with `BOT_3_TOKEN` | Same results for bot 3 |
+
+If step 5 delivers from the wrong bot, stop — do not continue to bot 3.
+
+### Rollback
+
+Disable a bot by removing or commenting out its token and restarting:
+
+```bash
+# .env: comment out BOT_2_TOKEN and BOT_3_TOKEN
+pm2 restart zalobot
+```
+
+Bot 1 continues with its original data, untouched. Bot 2/3 records remain in Firestore under their `botN::` keys; they are simply not read while the bot is disabled, so re-enabling later resumes where it left off.
+
+### Rate limits and message estimates
+
+The dashboard tracks outgoing messages **per bot**. `BOT_MONTHLY_MESSAGE_WARNING` (default 3000) only raises a warning.
+
+**Unconfirmed:** Zalo documents the Basic plan as 3,000 outgoing messages per month, but it is not confirmed whether that is per bot, per Zalo account, or per something else. The per-bot counters assume nothing — they just count what each bot sent, so you can compare against whatever the real limit turns out to be. Treat the warning as a prompt to check, not as an enforcement.
+
+### What cannot be verified without real tokens
+
+The multi-bot routing, storage namespacing, duplicate-token rejection and shutdown behaviour are covered by tests. These cannot be confirmed from this repository:
+
+- whether Zalo's monthly message limit is per bot or per account;
+- whether a Chat ID observed by bot 1 is ever valid for bot 2 (the code treats every ID as bot-scoped, which is the safe assumption);
+- whether Zalo rate-limits polling per account or per token;
+- real invite-link behaviour for a newly created bot.
+
 ## Command renames
 
 Commands are defined once in `helpContent.js`, which now also holds the alias table (`COMMAND_ALIASES`). `parseCommand()` resolves an alias to its canonical name, so every downstream check, the dashboard command console and typo suggestions work on one name per command.

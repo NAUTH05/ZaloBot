@@ -100,14 +100,57 @@ const { createAdminServer } = require("./adminServer");
 const { DEFAULT_SHUTDOWN_TIMEOUT_MS, createShutdownController } = require("./shutdown");
 const { recordSystemLog } = require("./operationalLog");
 const { getConfiguredAdminIds, isConfiguredAdmin } = require("./adminSettings");
+const { LEGACY_BOT_ID, normalizeBotId, resolveBotConfigs, scopeKey } = require("./bots");
+const {
+    bindBot,
+    describeRegisteredBots,
+    getBot,
+    getCurrentBot,
+    listBots,
+    listEnabledBots,
+    registerBots,
+    runWithBot
+} = require("./botContext");
 
 const isTestEnv = process.env.NODE_ENV === "test" || require.main !== module;
 
-if (!process.env.BOT_TOKEN) {
-    throw new Error("Thiếu BOT_TOKEN trong file .env");
+// Cấu hình nhiều bot trên cùng một codebase và một Firestore database.
+// BOT_TOKEN cũ vẫn là đường tương thích của bot 1; thiếu BOT_2_TOKEN/BOT_3_TOKEN
+// chỉ đơn giản là bot đó tắt.
+const botConfigResult = resolveBotConfigs(process.env);
+
+// Bot 1 là danh tính gốc: nó sở hữu không gian khóa cũ và là đường tương thích
+// của bản triển khai hiện tại. Thiếu token bot 1 là lỗi cấu hình, không phải
+// trạng thái chạy được — kể cả khi bot 2 hoặc bot 3 có token.
+const hasLegacyBot = botConfigResult.bots.some((config) => config.botId === LEGACY_BOT_ID);
+if (botConfigResult.bots.length === 0 || !hasLegacyBot) {
+    const reasons = botConfigResult.errors.length
+        ? botConfigResult.errors
+        : ["Không có bot 1 đang bật. Đặt BOT_TOKEN hoặc BOT_1_TOKEN trong .env."];
+    throw new Error(`Không thể khởi động bot:\n- ${reasons.join("\n- ")}`);
+}
+for (const warning of botConfigResult.warnings) console.log(`[Bots] ${warning}`);
+
+// Một runtime cho mỗi bot đang bật: client riêng, con trỏ polling riêng, handler
+// riêng. Không bao giờ dùng chung một token cho hai bot.
+function createBotRuntime(config) {
+    return {
+        botId: config.botId,
+        token: config.token,
+        source: config.source,
+        fingerprint: config.fingerprint,
+        enabled: true,
+        client: new ZaloBot(config.token, { polling: false }),
+        monthlyMessageWarning: config.monthlyMessageWarning,
+        status: "starting",
+        lastError: null,
+        lastErrorAt: null,
+        pollingStartedAt: null
+    };
 }
 
-const bot = new ZaloBot(process.env.BOT_TOKEN, { polling: false });
+const botRuntimes = botConfigResult.bots.map((config) => createBotRuntime(config));
+registerBots(botRuntimes);
 const dashboardCommandContext = new AsyncLocalStorage();
 const registeredSchedulers = new WeakSet();
 
@@ -154,6 +197,16 @@ function logDiscord(level, message) {
     }
 }
 
+// Client Zalo của bot đang xử lý. Không có ngữ cảnh thì rơi về bot 1 — đây là
+// đường tương thích cho mọi lối gọi cũ và cho bản triển khai một token.
+function currentClient() {
+    const runtime = getCurrentBot();
+    if (!runtime || !runtime.client) {
+        throw new Error("Không xác định được bot nào để gửi tin nhắn");
+    }
+    return runtime.client;
+}
+
 async function sendMessage(chatId, text, options = {}) {
     // Chia tin dài theo dòng để tránh vượt giới hạn tin nhắn của Zalo.
     const {
@@ -196,7 +249,7 @@ async function sendMessage(chatId, text, options = {}) {
             commandContext.messages.push({ chatId: String(chatId), text: payload });
         }
         try {
-            await Promise.resolve(bot.sendMessage(chatId, payload, messageOptions));
+            await Promise.resolve(currentClient().sendMessage(chatId, payload, messageOptions));
         } catch (error) {
             const permanentChatError = Number(error?.response?.statusCode || error?.statusCode || 0) === 410 || /410\s+The chat_id is invalid/i.test(String(error?.message || ""));
             if (messageOptions.parse_mode && !permanentChatError) {
@@ -207,7 +260,7 @@ async function sendMessage(chatId, text, options = {}) {
                     .replace(/\\([\\*_~`>])/g, "$1");
                 const fallbackOptions = { ...otherOptions };
                 delete fallbackOptions.parse_mode;
-                await Promise.resolve(bot.sendMessage(chatId, plainPayload, fallbackOptions));
+                await Promise.resolve(currentClient().sendMessage(chatId, plainPayload, fallbackOptions));
             } else {
                 throw error;
             }
@@ -1160,8 +1213,10 @@ function positiveDuration(value, fallback) {
 const classStartReminderService = createClassStartReminderService({
     fetchSchedule: fetchStudentSchedule,
     getSubscriptions: getClassStartNotificationSubscriptions,
-    isEligible: (subscription) => isChatEligible(subscription.chatId, "schedule"),
-    sendReminder: (subscription, message) => sendNotification(subscription.chatId, message, {
+    // Quyền truy cập và việc gửi đều phải chạy trong ngữ cảnh của bot sở hữu
+    // đăng ký, nếu không nhắc giờ học của bot 2 sẽ bị gửi bằng bot 1.
+    isEligible: (subscription) => isSubscriptionEligible(subscription),
+    sendReminder: (subscription, message) => sendToSubscription(subscription, message, {
         feature: "schedule",
         operation: "class_start_reminder"
     }),
@@ -1205,10 +1260,42 @@ function groupEnabledSubscriptionsByStudent(notificationTime = null) {
 // Nhóm theo MSSV -> ngày đích -> chat. Mỗi mốc giờ tự chọn lịch hôm nay hay hôm
 // sau, nên hai người nhận cùng một mốc giờ có thể cần hai ngày đích khác nhau;
 // không được dùng chung một ngày cho cả lượt gửi.
+// Bot sở hữu một đăng ký. Bản ghi cũ không có botId thuộc về bot 1.
+function subscriptionBotId(subscription) {
+    return normalizeBotId(subscription?.botId) || LEGACY_BOT_ID;
+}
+
+// Chạy một thao tác trong ngữ cảnh của bot SỞ HỮU đăng ký: kiểm tra quyền chat,
+// hạn mức và client gửi đều phải là của chính bot đó. Không bao giờ chọn token
+// ngẫu nhiên, và không bao giờ thử lại bằng một bot khác.
+function withSubscriptionBot(subscription, fn) {
+    const ownerId = subscriptionBotId(subscription);
+    const owner = getBot(ownerId);
+    if (!owner) {
+        return Promise.reject(new Error(`Không có bot ${ownerId} đang bật để gửi cho chat ${subscription?.chatId}`));
+    }
+    return Promise.resolve(runWithBot(owner, fn));
+}
+
+function sendToSubscription(subscription, text, options) {
+    return withSubscriptionBot(subscription, () => sendNotification(subscription.chatId, text, options));
+}
+
+// Kiểm tra quyền truy cập chat trong ngữ cảnh của bot sở hữu đăng ký. ĐỒNG BỘ —
+// classStartNotifications gọi isEligible trong một vòng lặp đồng bộ, nên trả về
+// Promise ở đây sẽ khiến mọi đăng ký đều được coi là hợp lệ.
+function isSubscriptionEligible(subscription) {
+    const owner = getBot(subscriptionBotId(subscription));
+    if (!owner) return false;
+    return runWithBot(owner, () => isChatEligible(subscription.chatId, "schedule"));
+}
+
 function groupEnabledSubscriptionsByTargetDay(notificationTime = null) {
     const grouped = new Map();
     const subscriptions = Object.values(getEnabledSubscriptions())
-        .filter((subscription) => isChatEligible(subscription.chatId, "schedule"));
+        // Quyền truy cập chat phải được kiểm tra trong ngữ cảnh của bot sở hữu
+        // đăng ký, nếu không bot 2 sẽ bị đánh giá bằng sổ chat của bot 1.
+        .filter((subscription) => isSubscriptionEligible(subscription));
 
     for (const subscription of subscriptions) {
         const offsets = new Set();
@@ -1218,11 +1305,14 @@ function groupEnabledSubscriptionsByTargetDay(notificationTime = null) {
         }
         if (offsets.size === 0) continue;
 
+        const ownerId = subscriptionBotId(subscription);
         const byOffset = grouped.get(subscription.studentId) || new Map();
         for (const offset of offsets) {
             const targets = byOffset.get(offset) || new Map();
-            // Một MSSV chỉ gửi một lần vào cùng một chat cho cùng một ngày đích.
-            targets.set(subscription.chatId, subscription);
+            // Một MSSV chỉ gửi một lần cho mỗi cặp (bot, chat) ở mỗi ngày đích.
+            // Khóa phải gồm botId: cùng một Chat ID ở bot 1 và bot 2 là hai cuộc
+            // trò chuyện khác nhau, gộp chúng lại sẽ làm mất một người nhận.
+            targets.set(`${ownerId}::${subscription.chatId}`, subscription);
             byOffset.set(offset, targets);
         }
         grouped.set(subscription.studentId, byOffset);
@@ -1246,7 +1336,7 @@ async function checkAndNotifyScheduleChanges() {
                 if (result.confirmed) {
                     const changeMessage = formatScheduleChangeMessage(data, result.changes);
                     for (const subscription of targetMap.values()) {
-                        const delivery = await sendNotification(subscription.chatId, changeMessage, { feature: "schedule", operation: "schedule_change" });
+                        const delivery = await sendToSubscription(subscription, changeMessage, { feature: "schedule", operation: "schedule_change" });
                         if (delivery.failed) logDiscord("ERROR", `Không thể gửi cảnh báo thay đổi cho chat ${subscription.chatId}: ${delivery.error.message}`);
                     }
                 }
@@ -1309,7 +1399,7 @@ async function sendDailySchedulesAtTime(notificationTime = DEFAULT_NOTIFICATION_
                                 // của MSSV, không chỉ nhóm đang nhận lịch ở đúng mốc giờ hiện tại.
                                 const allStudentTargets = groupEnabledSubscriptionsByStudent().get(studentId) || targets;
                                 for (const subscription of allStudentTargets.values()) {
-                                    const delivery = await sendNotification(subscription.chatId, changeMessage, { feature: "schedule", operation: "schedule_change" });
+                                    const delivery = await sendToSubscription(subscription, changeMessage, { feature: "schedule", operation: "schedule_change" });
                                     if (delivery.failed) logDiscord("ERROR", `Không thể gửi cảnh báo thay đổi cho chat ${subscription.chatId}: ${delivery.error.message}`);
                                 }
                             }
@@ -1321,7 +1411,7 @@ async function sendDailySchedulesAtTime(notificationTime = DEFAULT_NOTIFICATION_
                     // 2. Gửi lịch của đúng ngày đích mà người nhận đã chọn
                     const dailyMessage = formatDailySchedule(data, targetDate, { referenceDate: deliveryAt });
                     for (const subscription of targets.values()) {
-                        const delivery = await sendNotification(subscription.chatId, dailyMessage, { feature: "schedule", operation: "daily_schedule" });
+                        const delivery = await sendToSubscription(subscription, dailyMessage, { feature: "schedule", operation: "daily_schedule" });
                         if (delivery.sent) {
                             dispatchResult.sent += 1;
                             console.log(`[${notificationTime}] Đã gửi lịch ${targetDateKey} cho MSSV ${studentId} tới chat ${subscription.chatId}`);
@@ -1388,15 +1478,27 @@ function cancelSchedulerJobs() {
 // node-zalo-bot không có stopPolling công khai; instance Polling nội bộ có stop().
 // Chỉ gọi khi thư viện thực sự cung cấp, không tự phát minh API.
 // Hủy yêu cầu long-poll đang chờ để không phải đợi hết timeout của Zalo.
-function stopZaloPolling() {
-    shuttingDown = true;
-    if (bot && typeof bot.stopPolling === "function") return Promise.resolve(bot.stopPolling());
-    const polling = bot && bot._polling;
+function stopOneBotPolling(runtime) {
+    const client = runtime?.client;
+    if (client && typeof client.stopPolling === "function") return Promise.resolve(client.stopPolling());
+    const polling = client && client._polling;
     if (polling && typeof polling.stop === "function") {
         return Promise.resolve(polling.stop({ cancel: true, reason: "Bot is shutting down" }));
     }
-    console.warn("[Runtime] Thư viện Zalo không cung cấp API dừng polling; bỏ qua bước này.");
+    console.warn(`[Runtime] ${runtime?.botId || "?"}: thư viện Zalo không cung cấp API dừng polling; bỏ qua bước này.`);
     return Promise.resolve();
+}
+
+// Dừng polling của MỌI bot. Một bot lỗi không được ngăn các bot còn lại dừng sạch.
+async function stopZaloPolling() {
+    shuttingDown = true;
+    const results = await Promise.allSettled(listBots().map((runtime) => stopOneBotPolling(runtime)));
+    for (const [index, result] of results.entries()) {
+        if (result.status === "rejected") {
+            console.warn(`[Runtime] ${listBots()[index]?.botId || "?"}: dừng polling thất bại - ${result.reason?.message || result.reason}`);
+        }
+    }
+    return results.length;
 }
 
 function closeDashboardServer() {
@@ -1514,16 +1616,35 @@ async function startRuntime() {
     registerShutdownHandlers();
     console.log(`[Runtime] Scheduler started (${TIME_ZONE})`);
 
-    // Bước 5: polling Zalo sau cùng.
-    await bot.startPolling();
-    console.log(`[Runtime] Zalo polling started (${TIME_ZONE})`);
-    logDiscord("INFO", `Bot đã khởi động - timezone ${TIME_ZONE}`);
+    // Bước 5: polling Zalo sau cùng — mỗi bot một consumer riêng, không dùng
+    // chung token nên không bao giờ có hai consumer trên cùng một danh tính.
+    const started = [];
+    for (const runtime of listEnabledBots()) {
+        try {
+            await runtime.client.startPolling();
+            runtime.pollingStartedAt = new Date().toISOString();
+            runtime.status = "running";
+            started.push(runtime.botId);
+            console.log(`[Runtime] ${runtime.botId}: Zalo polling started (${TIME_ZONE})`);
+        } catch (error) {
+            runtime.status = "polling_failed";
+            runtime.lastError = error.message;
+            runtime.lastErrorAt = new Date().toISOString();
+            console.error(`[Runtime] ${runtime.botId}: không khởi động được polling - ${error.message}`);
+            logDiscord("ERROR", `polling_start_failed[${runtime.botId}]: ${error.message}`);
+        }
+    }
+    if (started.length === 0) {
+        throw new Error("Không bot nào khởi động được polling Zalo");
+    }
+    logDiscord("INFO", `Bot đã khởi động - timezone ${TIME_ZONE} - bots: ${started.join(", ")}`);
     await flushPersistenceWrites();
 }
 
-bot.on("message", asyncCommand(async (msg) => {
+async function handleIncomingMessage(runtime, msg) {
     const text = msg.text || "[không có nội dung]";
-    const context = getMessageContext(msg);
+    // Chat ID / User ID chỉ có nghĩa trong phạm vi một bot, nên botId đi kèm ngữ cảnh.
+    const context = getMessageContext(msg, { botId: runtime.botId });
     const from = msg.from?.display_name || context.userId || "unknown";
     console.log("Tin nhắn mới:", from, "→", text);
     const interaction = recordInteraction(context, msg);
@@ -1580,20 +1701,35 @@ bot.on("message", asyncCommand(async (msg) => {
         );
     }
     await flushPersistenceWrites();
-}));
+}
 
-bot.on("polling_error", (error) => {
-    // Lỗi phát sinh do chủ động hủy long-poll lúc dừng bot không phải sự cố.
-    if (shuttingDown) return;
-    if (error.code === "EZALO" && error.message?.includes("408")) return;
-    console.error("Lỗi polling:", error);
-    logDiscord("ERROR", `polling_error: ${error.message}`);
-});
+// Đăng ký handler riêng cho từng bot. Mọi handler chạy trong ngữ cảnh của chính
+// bot đó, nên phản hồi luôn đi ra bằng đúng danh tính đã nhận tin nhắn.
+function registerBotHandlers(runtime) {
+    const label = runtime.botId;
+    runtime.client.on("message", bindBot(runtime, asyncCommand((msg) => handleIncomingMessage(runtime, msg))));
 
-bot.on("error", (error) => {
-    console.error("Lỗi bot:", error);
-    logDiscord("ERROR", `error: ${error.message}`);
-});
+    runtime.client.on("polling_error", (error) => {
+        // Lỗi phát sinh do chủ động hủy long-poll lúc dừng bot không phải sự cố.
+        if (shuttingDown) return;
+        if (error.code === "EZALO" && error.message?.includes("408")) return;
+        runtime.lastError = error.message;
+        runtime.lastErrorAt = new Date().toISOString();
+        console.error(`[${label}] Lỗi polling:`, error);
+        logDiscord("ERROR", `polling_error[${label}]: ${error.message}`);
+    });
+
+    runtime.client.on("error", (error) => {
+        runtime.lastError = error.message;
+        runtime.lastErrorAt = new Date().toISOString();
+        console.error(`[${label}] Lỗi bot:`, error);
+        logDiscord("ERROR", `error[${label}]: ${error.message}`);
+    });
+
+    return runtime;
+}
+
+for (const runtime of listBots()) registerBotHandlers(runtime);
 
 if (!isTestEnv) {
     startRuntime().catch((error) => {

@@ -1,5 +1,14 @@
 const path = require("path");
 const { readJsonStore, writeJsonStore } = require("./firestorePersistence");
+const { scopeKey } = require("./bots");
+const { getCurrentBotId } = require("./botContext");
+
+// Khóa của một chat trong sổ: có phạm vi theo bot đang xử lý.
+// Bot 1 giữ khóa trần (chatId) để dữ liệu hiện có dùng nguyên trạng và Room 411
+// vẫn đọc được; bot 2/3 có tiền tố nên không bao giờ ghi đè lên nhau.
+function scopedChatKey(chatId) {
+    return scopeKey(getCurrentBotId(), chatId);
+}
 
 const FILE_PATH = path.join(__dirname, "chatDirectory.json");
 const SCHEMA_VERSION = 2;
@@ -60,6 +69,7 @@ function normalizeRecord(chatId, input = {}, existing = {}) {
         ...existing,
         ...safeInput,
         chatId: id,
+        botId: getCurrentBotId(),
         chatType: normalizeChatType(input.chatType, normalizeChatType(existing.chatType)),
         displayName: input.displayName || existing.displayName || input.chatTitle || existing.chatTitle || "",
         userId: String(input.userId || existing.userId || "").trim() || null,
@@ -78,17 +88,18 @@ function upsertChat(input = {}, filePath = FILE_PATH) {
     const chatId = normalizeChatId(input.chatId);
     if (!chatId) return null;
     const data = readDirectory(filePath);
-    if (data.deletedChatIds[chatId] && input.restoreDeleted !== true) return null;
-    if (input.restoreDeleted === true) delete data.deletedChatIds[chatId];
-    const record = normalizeRecord(chatId, input, data.chats[chatId]);
-    data.chats[chatId] = record;
+    const key = scopedChatKey(chatId);
+    if (data.deletedChatIds[key] && input.restoreDeleted !== true) return null;
+    if (input.restoreDeleted === true) delete data.deletedChatIds[key];
+    const record = normalizeRecord(chatId, input, data.chats[key]);
+    data.chats[key] = record;
     writeDirectory(data, filePath);
     return record;
 }
 
 function getChat(chatId, filePath = FILE_PATH) {
     const id = normalizeChatId(chatId);
-    return id ? readDirectory(filePath).chats[id] || null : null;
+    return id ? readDirectory(filePath).chats[scopedChatKey(id)] || null : null;
 }
 
 function getAllChats(filePath = FILE_PATH) {
@@ -97,7 +108,7 @@ function getAllChats(filePath = FILE_PATH) {
 
 function isChatEligible(chatId, feature = null, filePath = FILE_PATH) {
     const id = normalizeChatId(chatId);
-    if (id && readDirectory(filePath).deletedChatIds[id]) return false;
+    if (id && readDirectory(filePath).deletedChatIds[scopedChatKey(id)]) return false;
     const record = getChat(chatId, filePath);
     if (!record) return true;
     if (record.status !== "active") return false;
@@ -109,11 +120,12 @@ function updateChat(chatId, changes = {}, filePath = FILE_PATH) {
     const id = normalizeChatId(chatId);
     if (!id) return null;
     const data = readDirectory(filePath);
-    if (data.deletedChatIds[id] && changes.restoreDeleted !== true) return null;
-    if (changes.restoreDeleted === true) delete data.deletedChatIds[id];
-    const existing = data.chats[id] || normalizeRecord(id, {}, {});
+    const key = scopedChatKey(id);
+    if (data.deletedChatIds[key] && changes.restoreDeleted !== true) return null;
+    if (changes.restoreDeleted === true) delete data.deletedChatIds[key];
+    const existing = data.chats[key] || normalizeRecord(id, {}, {});
     const record = normalizeRecord(id, changes, existing);
-    data.chats[id] = record;
+    data.chats[key] = record;
     writeDirectory(data, filePath);
     return record;
 }
@@ -123,10 +135,11 @@ function removeChat(chatId, hard = false, filePath = FILE_PATH) {
     if (!id) return null;
     if (!hard) return setChatStatus(id, "removed", "admin", "admin_removed", filePath);
     const data = readDirectory(filePath);
-    const existing = data.chats[id] || null;
+    const key = scopedChatKey(id);
+    const existing = data.chats[key] || null;
     if (!existing) return null;
-    delete data.chats[id];
-    data.deletedChatIds[id] = { deletedAt: nowIso(), deletedBy: "admin" };
+    delete data.chats[key];
+    data.deletedChatIds[key] = { deletedAt: nowIso(), deletedBy: "admin" };
     writeDirectory(data, filePath);
     return existing;
 }

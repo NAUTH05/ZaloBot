@@ -1,5 +1,14 @@
 const path = require("path");
 const { readJsonStore, writeJsonStore } = require("./firestorePersistence");
+const { normalizeBotId, scopeKey } = require("./bots");
+const { getCurrentBotId } = require("./botContext");
+
+// Khóa sổ tương tác có phạm vi theo bot: cùng một Chat ID ở bot 2 là một cuộc
+// trò chuyện khác với ở bot 1. Ưu tiên botId có sẵn trong ngữ cảnh, nếu không
+// thì lấy bot đang xử lý (mặc định bot 1 — đường tương thích cho dữ liệu cũ).
+function scopedChatKey(chatId, botId) {
+    return scopeKey(normalizeBotId(botId) || getCurrentBotId(), chatId);
+}
 
 const FILE_PATH = path.join(__dirname, "interactions.json");
 
@@ -28,7 +37,7 @@ function recordInteraction(context, msg = {}, date = new Date(), filePath = FILE
     const chatId = String(context.chatId);
     const userId = String(context.userId || "");
     const registry = readRegistry(filePath);
-    const existing = registry[chatId] || {};
+    const existing = registry[scopedChatKey(chatId)] || {};
     const isFirstInteraction = !existing.firstInteractionAt;
     const members = existing.members && typeof existing.members === "object" ? { ...existing.members } : {};
     if (existing.lastUserId && !members[String(existing.lastUserId)]) {
@@ -49,8 +58,9 @@ function recordInteraction(context, msg = {}, date = new Date(), filePath = FILE
             lastInteractionAt: date.toISOString()
         };
     }
-    registry[chatId] = {
+    registry[scopedChatKey(chatId)] = {
         chatId,
+        botId: getCurrentBotId(),
         chatType: detectChatType(msg),
         chatTitle: String(msg.chat?.title || msg.chat?.name || existing.chatTitle || ""),
         lastUserId: userId,
@@ -60,7 +70,7 @@ function recordInteraction(context, msg = {}, date = new Date(), filePath = FILE
         lastInteractionAt: date.toISOString()
     };
     writeRegistry(registry, filePath);
-    return { ...registry[chatId], isFirstInteraction };
+    return { ...registry[scopedChatKey(chatId)], isFirstInteraction };
 }
 
 function getInteractionTargets(filePath = FILE_PATH) {
@@ -74,7 +84,7 @@ function upsertInteractionMember(input = {}, filePath = FILE_PATH) {
     const userId = String(input.userId || "").trim();
     if (!chatId || !userId) throw new Error("Cần chatId và userId");
     const registry = readRegistry(filePath);
-    const existing = registry[chatId] || {};
+    const existing = registry[scopedChatKey(chatId)] || {};
     const members = existing.members && typeof existing.members === "object" ? { ...existing.members } : {};
     const member = members[userId] || {};
     const now = new Date().toISOString();
@@ -88,9 +98,10 @@ function upsertInteractionMember(input = {}, filePath = FILE_PATH) {
         updatedAt: now
     };
     if (members[userId].status === "active") delete members[userId].removedAt;
-    registry[chatId] = {
+    registry[scopedChatKey(chatId)] = {
         ...existing,
         chatId,
+        botId: getCurrentBotId(),
         chatType: ["private", "group", "unknown"].includes(input.chatType) ? input.chatType : (existing.chatType || "unknown"),
         chatTitle: String(input.chatTitle ?? existing.chatTitle ?? "").trim(),
         lastUserId: existing.lastUserId || userId,
@@ -107,13 +118,13 @@ function removeInteractionMember(chatIdInput, userIdInput, hard = false, filePat
     const chatId = String(chatIdInput || "").trim();
     const userId = String(userIdInput || "").trim();
     const registry = readRegistry(filePath);
-    const existing = registry[chatId];
+    const existing = registry[scopedChatKey(chatId)];
     if (!existing?.members?.[userId]) return null;
     const members = { ...existing.members };
     const removed = members[userId];
     if (hard) delete members[userId];
     else members[userId] = { ...removed, status: "removed", removedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
-    registry[chatId] = { ...existing, members };
+    registry[scopedChatKey(chatId)] = { ...existing, members };
     writeRegistry(registry, filePath);
     return hard ? removed : members[userId];
 }

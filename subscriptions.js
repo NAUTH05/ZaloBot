@@ -1,6 +1,7 @@
 const path = require("path");
 const { readJsonStore, writeJsonStore } = require("./firestorePersistence");
 const { LEGACY_TARGET_DAY_CUTOFF, deriveLegacyTargetDayOffset } = require("./scheduleDatePolicy");
+const { LEGACY_BOT_ID, normalizeBotId, scopeKey } = require("./bots");
 
 const FILE_PATH = path.join(__dirname, "subscriptions.json");
 const CONTEXT_VERSION = 2;
@@ -99,15 +100,19 @@ function normalizeContext(context) {
         throw new Error("Thiếu chatId hoặc userId khi xử lý đăng ký");
     }
     return {
+        botId: normalizeBotId(context.botId) || LEGACY_BOT_ID,
         chatId: String(context.chatId),
         userId: String(context.userId),
         userDisplayName: String(context.userDisplayName || "")
     };
 }
 
+// Khóa đăng ký có phạm vi theo bot: cùng một Chat ID / User ID ở bot 2 là một
+// đăng ký KHÁC với ở bot 1, nên chúng không bao giờ ghi đè lên nhau.
+// Bot 1 không có tiền tố — dữ liệu hiện có được dùng nguyên trạng, không cần di trú.
 function createSubscriptionKey(contextInput) {
     const context = normalizeContext(contextInput);
-    return `${encodeURIComponent(context.chatId)}::${encodeURIComponent(context.userId)}`;
+    return scopeKey(context.botId, `${encodeURIComponent(context.chatId)}::${encodeURIComponent(context.userId)}`);
 }
 
 function isCurrentSubscription(subscription) {

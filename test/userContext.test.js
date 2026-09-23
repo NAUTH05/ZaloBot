@@ -45,7 +45,32 @@ test("cùng user ở hai chat khác nhau có dữ liệu độc lập", () => {
 
 test("hỗ trợ các tên trường sender dự phòng", () => {
     const context = getMessageContext({ chat_id: 123, sender_id: 456 });
-    assert.deepEqual(context, { chatId: "123", userId: "456", userDisplayName: "" });
+    // Không truyền botId ⇒ mặc định bot 1, đường tương thích cho dữ liệu cũ.
+    assert.deepEqual(context, { botId: "bot1", chatId: "123", userId: "456", userDisplayName: "" });
+});
+
+test("ngữ cảnh mang theo botId đã nhận tin nhắn", () => {
+    const message = { chat: { id: "chat-01" }, from: { id: "user-01", display_name: "An" } };
+
+    assert.equal(getMessageContext(message, { botId: "bot2" }).botId, "bot2");
+    assert.equal(getMessageContext(message, { botId: "bot3" }).botId, "bot3");
+    // Giá trị lạ rơi về bot 1 thay vì tạo ra một danh tính không tồn tại.
+    assert.equal(getMessageContext(message, { botId: "khong-ton-tai" }).botId, "bot1");
+    assert.equal(getMessageContext(message, { botId: "" }).botId, "bot1");
+});
+
+test("cùng Chat ID và User ID ở hai bot cho ra hai khóa đăng ký khác nhau", () => {
+    const message = { chat: { id: "chat-01" }, from: { id: "user-01" } };
+    const bot1 = getMessageContext(message, { botId: "bot1" });
+    const bot2 = getMessageContext(message, { botId: "bot2" });
+
+    const key1 = createSubscriptionKey(bot1);
+    const key2 = createSubscriptionKey(bot2);
+
+    assert.notEqual(key1, key2, "cùng một ID ở hai bot không được dùng chung khóa");
+    // Bot 1 giữ khóa trần để dữ liệu hiện có không phải di trú.
+    assert.ok(!key1.includes("bot1"), `khóa bot 1 phải không có tiền tố: ${key1}`);
+    assert.ok(key2.startsWith("bot2::"), `khóa bot 2 phải có tiền tố: ${key2}`);
 });
 
 test("bản ghi schema cũ không được dùng để gửi thông báo", () => {

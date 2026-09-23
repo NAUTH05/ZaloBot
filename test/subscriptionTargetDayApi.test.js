@@ -188,3 +188,67 @@ test("bản ghi cũ hiển thị ngày đích suy ra qua API", async (t) => {
     const entry = notifications.body.schedule.find((item) => item.chatId === context.chatId);
     assert.deepEqual(entry.notificationTimes.map((item) => item.targetDayOffset), [0, 1], "20:00 phải là homsau, không phải homnay");
 });
+
+/* -------------------------------------------------------------------------- */
+/* Bot trong API quản trị                                                     */
+/* -------------------------------------------------------------------------- */
+
+const { registerBot, clearBots } = require("../botContext");
+const { createSubscriptionKey } = require("../subscriptions");
+const { scopeKey } = require("../bots");
+
+test("API /bots trả về danh sách bot và KHÔNG bao giờ lộ token", async (t) => {
+    const { port, cookie } = await setup(t);
+
+    clearBots();
+    registerBot({ botId: "bot1", token: "secret-token-one", source: "BOT_TOKEN", fingerprint: "aaaa1111", enabled: true, status: "running" });
+    registerBot({ botId: "bot2", token: "secret-token-two", source: "BOT_2_TOKEN", fingerprint: "bbbb2222", enabled: true, status: "running" });
+    t.after(() => clearBots());
+
+    const result = await request(port, "GET", "/zalobot/api/admin/bots", null, cookie);
+    assert.equal(result.status, 200);
+    assert.deepEqual(result.body.bots.map((bot) => bot.botId).sort(), ["bot1", "bot2"]);
+
+    const serialized = JSON.stringify(result.body);
+    assert.ok(!serialized.includes("secret-token-one"), "API làm lộ token bot 1");
+    assert.ok(!serialized.includes("secret-token-two"), "API làm lộ token bot 2");
+    for (const bot of result.body.bots) {
+        assert.equal(bot.token, undefined);
+        assert.equal(bot.status, "running");
+    }
+});
+
+test("API lọc đăng ký theo bot, không trộn hai bot vào nhau", async (t) => {
+    const { port, cookie } = await setup(t);
+
+    clearBots();
+    registerBot({ botId: "bot1", token: "t1", source: "BOT_TOKEN", fingerprint: "aaaa1111", enabled: true });
+    registerBot({ botId: "bot2", token: "t2", source: "BOT_2_TOKEN", fingerprint: "bbbb2222", enabled: true });
+    t.after(() => clearBots());
+
+    // Cùng Chat ID / User ID nhưng ở hai bot khác nhau.
+    const shared = { chatId: "same-chat", userId: "same-user" };
+    memoryFiles.set(fileKey(path.join(__dirname, "..", "subscriptions.json")), {
+        [createSubscriptionKey({ botId: "bot1", ...shared })]: {
+            contextVersion: 2, botId: "bot1", ...shared, userDisplayName: "B1",
+            studentId: "111111111", studentName: "SV 1",
+            notificationTimes: [{ id: 1, time: "06:30", targetDayOffset: 0 }],
+            notificationsEnabled: true, classStartNotificationsEnabled: false, updatedAt: new Date().toISOString()
+        },
+        [createSubscriptionKey({ botId: "bot2", ...shared })]: {
+            contextVersion: 2, botId: "bot2", ...shared, userDisplayName: "B2",
+            studentId: "222222222", studentName: "SV 2",
+            notificationTimes: [{ id: 1, time: "06:30", targetDayOffset: 0 }],
+            notificationsEnabled: true, classStartNotificationsEnabled: false, updatedAt: new Date().toISOString()
+        }
+    });
+
+    const all = await request(port, "GET", "/zalobot/api/admin/notifications", null, cookie);
+    assert.equal(all.body.schedule.length, 2, "không lọc thì thấy cả hai bot");
+
+    const onlyBot1 = await request(port, "GET", "/zalobot/api/admin/notifications?botId=bot1", null, cookie);
+    assert.deepEqual(onlyBot1.body.schedule.map((item) => item.studentId), ["111111111"]);
+
+    const onlyBot2 = await request(port, "GET", "/zalobot/api/admin/notifications?botId=bot2", null, cookie);
+    assert.deepEqual(onlyBot2.body.schedule.map((item) => item.studentId), ["222222222"]);
+});

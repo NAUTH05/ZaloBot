@@ -12,7 +12,8 @@
     "verify:firebase-admin": "node scripts/verifyFirebaseAdmin.js",
     "build:admin": "node scripts/verifyAdminUi.js",
     "test": "node --test --test-force-exit",
-    "cleanup:birthday-data": "node scripts/cleanupBirthdayData.js"
+    "cleanup:birthday-data": "node scripts/cleanupBirthdayData.js",
+    "migrate:bot-ownership": "node scripts/migrateBotOwnership.js"
   },
   "dependencies": {
     "dotenv": "^17.2.1",

@@ -38,6 +38,40 @@ const { buildAdminData } = require("./adminDataService");
 const { buildTargetUserOptions, resolveBatchTargets } = require("./targetUsers");
 const { getPersistenceStatus, readJsonStore, writeJsonStore } = require("./firestorePersistence");
 const { getSystemLogs } = require("./operationalLog");
+const { describeRegisteredBots, getBot, runWithBot } = require("./botContext");
+const { LEGACY_BOT_ID, normalizeBotId } = require("./bots");
+
+// Bản ghi không có botId thuộc về bot 1 — quy tắc giữ tương thích dữ liệu cũ.
+function recordBotId(record) {
+    return normalizeBotId(record?.botId) || LEGACY_BOT_ID;
+}
+
+// ?botId=all (mặc định) hoặc botN. Dashboard lọc theo bot bằng tham số này.
+function botFilterFrom(url) {
+    const raw = String(url.searchParams.get("botId") || "all").trim().toLowerCase();
+    if (!raw || raw === "all") return "all";
+    return normalizeBotId(raw) || "all";
+}
+
+function matchesBot(record, botId) {
+    return botId === "all" || recordBotId(record) === botId;
+}
+
+// Quyền truy cập chat phải được kiểm tra trong ngữ cảnh của bot SỞ HỮU đăng ký,
+// nếu không đăng ký của bot 2 sẽ bị đánh giá bằng sổ chat của bot 1.
+// (Cùng quy tắc với isSubscriptionEligible trong main.js.)
+function isSubscriptionEligibleForOwner(subscription) {
+    const ownerId = recordBotId(subscription);
+    const owner = getBot(ownerId);
+    if (!owner) {
+        // Bản ghi bot 1 vẫn hợp lệ khi registry chưa được nạp (dashboard chạy độc
+        // lập, hoặc trong bài kiểm tra): bot 1 là ngữ cảnh mặc định. Bản ghi của
+        // bot đang tắt thì KHÔNG hợp lệ — bot đó không gửi được.
+        if (ownerId !== LEGACY_BOT_ID) return false;
+        return isChatEligible(subscription.chatId, "schedule");
+    }
+    return runWithBot(owner, () => isChatEligible(subscription.chatId, "schedule"));
+}
 
 const configuredBasePath = String(process.env.ADMIN_BASE_PATH || "/zalobot").trim();
 const BASE_PATH = configuredBasePath === "/" ? "/" : `/${configuredBasePath.replace(/^\/+|\/+$/g, "")}`;
@@ -490,10 +524,19 @@ async function handleApi(request, response, url, options = {}) {
     if (!requireAdmin(request, response)) return;
     if (url.pathname === `${API_PREFIX}/workspace` && request.method === "GET") return json(response, 200, buildAdminData());
     if (url.pathname === `${API_PREFIX}/dashboard` && request.method === "GET") return json(response, 200, dashboardSummary());
+    // Danh sách bot đang chạy. describeRegisteredBots chỉ trả vân tay token,
+    // không bao giờ trả chính token.
+    if (url.pathname === `${API_PREFIX}/bots` && request.method === "GET") {
+        return json(response, 200, { bots: describeRegisteredBots() });
+    }
     if (url.pathname === `${API_PREFIX}/chats` && request.method === "GET") {
         const filter = String(url.searchParams.get("status") || "all");
         const type = String(url.searchParams.get("type") || "all");
-        const chats = buildAdminData().chats.filter((chat) => (filter === "all" || chat.status === filter) && (type === "all" || chat.chatType === type)).map(publicChat);
+        const botId = botFilterFrom(url);
+        const chats = buildAdminData().chats
+            .filter((chat) => matchesBot(chat, botId))
+            .filter((chat) => (filter === "all" || chat.status === filter) && (type === "all" || chat.chatType === type))
+            .map(publicChat);
         return json(response, 200, { chats });
     }
     if (url.pathname === `${API_PREFIX}/chats` && request.method === "POST") {
@@ -507,7 +550,8 @@ async function handleApi(request, response, url, options = {}) {
         } catch (error) { return json(response, 400, { error: error.message }); }
     }
     if (url.pathname === `${API_PREFIX}/users` && request.method === "GET") {
-        return json(response, 200, { users: buildAdminData().users });
+        const botId = botFilterFrom(url);
+        return json(response, 200, { users: buildAdminData().users.filter((user) => matchesBot(user, botId)) });
     }
     if (url.pathname === `${API_PREFIX}/users` && request.method === "POST") {
         let body;
@@ -589,8 +633,11 @@ async function handleApi(request, response, url, options = {}) {
         return json(response, 400, { error: result.error?.message || result.reason || "Retry failed" });
     }
     if (url.pathname === `${API_PREFIX}/notifications` && request.method === "GET") {
+        const botId = botFilterFrom(url);
         return json(response, 200, {
-            schedule: Object.values(getEnabledSubscriptions()).filter((item) => isChatEligible(item.chatId, "schedule"))
+            schedule: Object.values(getEnabledSubscriptions())
+                .filter((item) => matchesBot(item, botId))
+                .filter((item) => isSubscriptionEligibleForOwner(item))
         });
     }
     if (url.pathname === `${API_PREFIX}/subscriptions` && request.method === "PATCH") {
