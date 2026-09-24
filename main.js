@@ -81,6 +81,7 @@ const {
     recordDeliverySuccess,
     setChatStatus,
     setFeatureOverride,
+    reconcileChatDirectory,
     upsertChat
 } = require("./chatDirectory");
 const {
@@ -100,9 +101,13 @@ const { createAdminServer } = require("./adminServer");
 const { DEFAULT_SHUTDOWN_TIMEOUT_MS, createShutdownController } = require("./shutdown");
 const { recordSystemLog } = require("./operationalLog");
 const { getConfiguredAdminIds, isConfiguredAdmin } = require("./adminSettings");
-const { LEGACY_BOT_ID, extractBotName, normalizeBotId, resolveBotConfigs, resolveBotDisplayName, scopeKey } = require("./bots");
+const { LEGACY_BOT_ID, extractBotName, normalizeBotId, parseScopedKey, resolveBotConfigs, resolveBotDisplayName, scopeKey } = require("./bots");
 const { createOfficialProvider } = require("./providers/officialProvider");
 const { createZcaProvider } = require("./providers/zca/zcaProvider");
+const { createRuntimeMetrics } = require("./runtimeMetrics");
+const { DELIVERY_ERROR_KIND, classifyDeliveryError } = require("./deliveryErrors");
+const { PRIORITY, createProviderQueues } = require("./sendQueue");
+const { getPersistenceQueueStats } = require("./firestorePersistence");
 const {
     bindBot,
     describeRegisteredBots,
@@ -177,6 +182,46 @@ const zcaProvider = createZcaProvider({
 });
 
 registerBots([...officialProviders, zcaProvider]);
+
+// Đo lường runtime: mốc thời gian khởi động + log bộ nhớ định kỳ.
+const metrics = createRuntimeMetrics();
+
+// Hàng đợi gửi RIÊNG cho từng nhà cung cấp.
+//
+// Một hàng đợi chung sẽ khiến bot1 phải chờ bot2, và một đợt thông báo lớn có thể
+// chặn luôn câu trả lời cho người dùng đang nhắn tới. Mỗi nhà cung cấp có trần
+// song song riêng, và việc tương tác được ưu tiên hơn việc hàng loạt.
+const providerQueues = createProviderQueues();
+
+// Đánh dấu một chat là không gửi được tới (410/422) để các đợt thông báo sau không
+// tiếp tục bắn vào đó.
+//
+// KHÔNG xoá dữ liệu người dùng: chỉ tăng bộ đếm thất bại để chatDirectory tự
+// chuyển trạng thái theo ngưỡng sẵn có, và quản trị viên vẫn khôi phục được.
+function recordUndeliverableChat(chatId, classification) {
+    try {
+        recordDeliveryFailure(chatId, new Error(classification.reason), {
+            feature: "broadcast",
+            operation: "permanent_delivery_error"
+        });
+        console.warn(`[Delivery] ${chatId}: ${classification.reason} — sẽ không gửi tiếp cho tới khi được bật lại.`);
+    } catch (error) {
+        // Ghi nhận thất bại không được làm hỏng luồng gửi tin.
+        console.warn(`[Delivery] không ghi nhận được lỗi cho ${chatId}: ${error.message}`);
+    }
+}
+
+// Khi RSS vượt ngưỡng cảnh báo, in thêm ngữ cảnh để biết cái gì đang giữ bộ nhớ.
+// Đây là chẩn đoán, KHÔNG tự khởi động lại tiến trình — PM2 vẫn là cơ chế an toàn.
+metrics.setDiagnosticsProvider(() => ({
+    providers: listBots().map((bot) => `${bot.botId}:${bot.status || "?"}`).join(", "),
+    persistenceQueue: getPersistenceQueueStats(),
+    outboundQueues: providerQueues.getStats(),
+    schedulerJobs: Array.isArray(runtimeSchedulerJobs) ? runtimeSchedulerJobs.length : 0,
+    interactions: getInteractionTargets().length,
+    subscriptions: Object.keys(getAllSubscriptions()).length,
+    chats: getAllChats().length
+}));
 
 // Hỏi Zalo tên thật của từng bot bằng chính token của bot đó (getMe).
 //
@@ -302,6 +347,9 @@ async function sendMessage(chatId, text, options = {}) {
     const {
         continuationHeader = "",
         parse_mode = "markdown",
+        // Việc trả lời người dùng mặc định được ưu tiên hơn thông báo hàng loạt,
+        // để một đợt /thongbao lớn không làm người đang nhắn phải chờ.
+        priority = PRIORITY.INTERACTIVE,
         ...otherOptions
     } = options;
     const messageOptions = { ...otherOptions, parse_mode };
@@ -348,21 +396,40 @@ async function sendMessage(chatId, text, options = {}) {
             commandContext.messages.push({ chatId: String(chatId), text: payload });
         }
         try {
-            await Promise.resolve(provider.sendMessage(chatId, payload, sendOptions));
+            await providerQueues.enqueueFor(
+                provider.botId,
+                () => Promise.resolve(provider.sendMessage(chatId, payload, sendOptions)),
+                priority
+            );
         } catch (error) {
-            // Nhà cung cấp tự quyết định lỗi nào là vĩnh viễn (ví dụ 410 của Zalo
-            // Bot Platform). ZCA không dùng chung cách nhận diện đó.
-            const permanentChatError = typeof provider.isPermanentChatError === "function"
-                ? provider.isPermanentChatError(error)
-                : false;
-            if (sendOptions.parse_mode && !permanentChatError) {
-                console.warn(`Lỗi gửi markdown Zalo (${error.message}), đang gửi lại dạng plain text...`);
+            // Phân loại lỗi trước khi quyết định có thử lại dạng plain text hay không.
+            //
+            // Trước đây MỌI lỗi không phải 410 đều được thử lại plain text, kể cả
+            // 422 (không có quyền) và 429 (quá tải). Hai loại đó không liên quan
+            // gì tới định dạng, nên gửi lại chỉ nhân đôi số request vô ích và làm
+            // tình trạng quá tải nặng thêm.
+            const classification = classifyDeliveryError(error);
+            const canRetryAsPlainText = classification.retryAsPlainText && Boolean(sendOptions.parse_mode);
+
+            if (canRetryAsPlainText) {
+                console.warn(`Lỗi định dạng markdown (${error.message}), gửi lại dạng plain text một lần...`);
                 const fallbackOptions = { ...otherOptions };
                 delete fallbackOptions.parse_mode;
-                await Promise.resolve(provider.sendMessage(chatId, toPlainText(payload), fallbackOptions));
-            } else {
-                throw error;
+                await providerQueues.enqueueFor(
+                    provider.botId,
+                    () => Promise.resolve(provider.sendMessage(chatId, toPlainText(payload), fallbackOptions)),
+                    priority
+                );
+                continue;
             }
+
+            if (classification.kind === DELIVERY_ERROR_KIND.PERMANENT) {
+                // Đích không dùng được nữa: ghi nhận để không bắn tiếp vào đó, nhưng
+                // KHÔNG xoá dữ liệu người dùng — chỉ đánh dấu để quản trị viên xử lý.
+                recordUndeliverableChat(chatId, classification);
+                error.deliveryRecorded = true;
+            }
+            throw error;
         }
     }
 }
@@ -441,8 +508,22 @@ function resolveQuestionYear(argument, date = new Date()) {
 
 function getBroadcastTargets(feature = "broadcast") {
     const targets = new Map();
+
+    // Ghi sổ chat bằng MỘT lượt đối chiếu gộp thay vì một lần cho mỗi đích.
+    //
+    // Cách cũ gọi upsertChat() trong vòng lặp, nên mỗi lần /thongbao lại tạo ra N
+    // lần đọc + N lần ghi cả tài liệu sổ chat. Với hàng trăm đích thì đây vừa là
+    // điểm nghẽn tốc độ vừa là nguồn phình bộ nhớ ngay trước khi bắn tin.
+    const entriesByBot = new Map();
+    const addEntry = (botId, entry) => {
+        const normalized = normalizeBotId(botId) || LEGACY_BOT_ID;
+        const list = entriesByBot.get(normalized) || [];
+        list.push(entry);
+        entriesByBot.set(normalized, list);
+    };
+
     for (const target of getInteractionTargets()) {
-        upsertChat({
+        addEntry(target.botId, {
             chatId: target.chatId,
             chatType: target.chatType,
             displayName: target.chatTitle || target.lastUserDisplayName,
@@ -453,6 +534,7 @@ function getBroadcastTargets(feature = "broadcast") {
         });
         targets.set(String(target.chatId), target);
     }
+
     // Giữ tương thích với dữ liệu có trước khi sổ tương tác được bổ sung.
     for (const [subscriptionKey, subscription] of Object.entries(getAllSubscriptions())) {
         // Schema cũ dùng trực tiếp chatId làm khóa; schema mới có trường chatId rõ ràng.
@@ -460,9 +542,20 @@ function getBroadcastTargets(feature = "broadcast") {
         const rawChatId = subscription?.chatId ?? legacyChatId;
         if (rawChatId == null) continue;
         const chatId = String(rawChatId);
-        upsertChat({ chatId, chatType: subscription.chatType || "unknown", displayName: subscription.chatTitle || subscription.userDisplayName || "" });
+        addEntry(subscription?.botId || parseScopedKey(subscriptionKey).botId, {
+            chatId,
+            chatType: subscription.chatType || "unknown",
+            displayName: subscription.chatTitle || subscription.userDisplayName || ""
+        });
         if (!targets.has(chatId)) targets.set(chatId, { chatId, chatType: "unknown" });
     }
+
+    for (const [botId, entries] of entriesByBot) {
+        const runtime = getBot(botId);
+        const run = () => reconcileChatDirectory(entries);
+        if (runtime) runWithBot(runtime, run); else run();
+    }
+
     return [...targets.values()].filter((target) => isChatEligible(target.chatId, feature));
 }
 
@@ -473,17 +566,38 @@ async function sendBotAnnouncement(message, options = {}) {
     const { operation = "announcement", logLabel = "thông báo chung" } = options;
     const targets = getBroadcastTargets();
     const result = { targets: targets.length, sent: 0, failed: 0 };
-    for (const target of targets) {
-        try {
-            const delivery = await sendNotification(target.chatId, message, { feature: "broadcast", operation });
-            if (delivery.sent) result.sent += 1;
-            else if (delivery.failed) {
-                result.failed += 1;
-                logDiscord("ERROR", `Không thể gửi ${logLabel} cho chat ${target.chatId}: ${delivery.error.message}`);
-            }
-        } catch (error) {
+    // Gửi hàng loạt có kiểm soát.
+    //
+    // Trước đây vòng lặp này await TUẦN TỰ từng đích: 500 đích × ~200ms = 100 giây.
+    // Nay mỗi đích được xếp vào hàng đợi của nhà cung cấp sở hữu nó với mức ưu tiên
+    // BULK, nên chạy song song có trần và không chen ngang việc trả lời người dùng.
+    const deliveries = targets.map((target) =>
+        sendNotification(target.chatId, message, {
+            feature: "broadcast",
+            operation,
+            priority: PRIORITY.BULK
+        })
+            .then((delivery) => ({ target, delivery }))
+            .catch((error) => ({ target, error }))
+    );
+
+    const outcomes = await Promise.allSettled(deliveries);
+    for (const outcome of outcomes) {
+        if (outcome.status !== "fulfilled") {
+            result.failed += 1;
+            continue;
+        }
+        const { target, delivery, error } = outcome.value;
+        if (error) {
             result.failed += 1;
             logDiscord("ERROR", `Không thể gửi ${logLabel} cho chat ${target.chatId}: ${error.message}`);
+            continue;
+        }
+        if (delivery?.sent) {
+            result.sent += 1;
+        } else if (delivery?.failed) {
+            result.failed += 1;
+            logDiscord("ERROR", `Không thể gửi ${logLabel} cho chat ${target.chatId}: ${delivery.error?.message || "không rõ"}`);
         }
     }
     return result;
@@ -740,10 +854,29 @@ function formatChatDetails(record) {
         `> **Thời điểm lỗi:** ${escapeMarkdown(formatChatTime(error?.at))}`;
 }
 
+// Đối chiếu sổ chat từ dữ liệu cũ (sổ tương tác + đăng ký) khi khởi động.
+//
+// Hai điều quan trọng:
+//
+// 1. GHI TỐI ĐA MỘT LẦN cho mỗi bot. Cách cũ gọi upsertChat() cho từng bản ghi, mà
+//    mỗi lần lại đọc rồi ghi cả sổ ⇒ hàng trăm lần ghi Firestore cho cùng một tài
+//    liệu ngay lúc khởi động. Nay gộp trong bộ nhớ rồi ghi một lần.
+//
+// 2. ĐÚNG NGĂN CỦA TỪNG BOT. Sổ tương tác và đăng ký chứa bản ghi của MỌI bot,
+//    nhưng khóa lưu trữ lại phụ thuộc bot đang chạy. Gọi trong ngữ cảnh mặc định
+//    (bot 1) sẽ kéo bản ghi của bot 2/bot 3 vào ngăn của bot 1. Vì vậy phải gom
+//    theo bot rồi chạy mỗi nhóm trong ngữ cảnh của chính bot đó.
 function syncChatDirectoryFromLegacyStores() {
-    const syncedChatIds = new Set();
+    const entriesByBot = new Map();
+    const addEntry = (botId, entry) => {
+        const normalized = normalizeBotId(botId) || LEGACY_BOT_ID;
+        const list = entriesByBot.get(normalized) || [];
+        list.push(entry);
+        entriesByBot.set(normalized, list);
+    };
+
     for (const target of getInteractionTargets()) {
-        upsertChat({
+        addEntry(target.botId, {
             chatId: target.chatId,
             chatType: target.chatType,
             displayName: target.chatTitle || target.lastUserDisplayName,
@@ -752,17 +885,27 @@ function syncChatDirectoryFromLegacyStores() {
             firstInteractionAt: target.firstInteractionAt,
             lastInboundInteractionAt: target.lastInteractionAt
         });
-        syncedChatIds.add(String(target.chatId));
     }
+
     for (const [key, subscription] of Object.entries(getAllSubscriptions())) {
         const legacyChatId = !key.includes("::") ? key : null;
         const chatId = subscription?.chatId ?? legacyChatId;
-        if (chatId != null) {
-            upsertChat({ chatId, chatType: subscription.chatType || "unknown", displayName: subscription.chatTitle || subscription.userDisplayName || "" });
-            syncedChatIds.add(String(chatId));
-        }
+        if (chatId == null) continue;
+        addEntry(subscription?.botId || parseScopedKey(key).botId, {
+            chatId,
+            chatType: subscription.chatType || "unknown",
+            displayName: subscription.chatTitle || subscription.userDisplayName || ""
+        });
     }
-    return syncedChatIds.size;
+
+    let changed = 0;
+    for (const [botId, entries] of entriesByBot) {
+        const runtime = getBot(botId);
+        const run = () => reconcileChatDirectory(entries);
+        // Bot chưa đăng ký (hiếm) thì chạy ở ngữ cảnh hiện tại thay vì bỏ sót.
+        changed += runtime ? runWithBot(runtime, run) : run();
+    }
+    return changed;
 }
 
 async function handleCommand(msg, parsedCommand) {
@@ -1292,13 +1435,18 @@ Lịch học và thông báo đều dùng múi giờ này.`;
 async function sendNotification(chatId, text, options = {}) {
     const configuredThreshold = Number(process.env.CHAT_MAX_CONSECUTIVE_FAILURES || 3);
     const defaultThreshold = Number.isInteger(configuredThreshold) && configuredThreshold > 0 ? configuredThreshold : 3;
-    const { feature = "broadcast", operation = feature, maxConsecutiveFailures = defaultThreshold, bypassEligibility = false } = options;
+    const { feature = "broadcast", operation = feature, maxConsecutiveFailures = defaultThreshold, bypassEligibility = false, priority } = options;
     if (!bypassEligibility && !isChatEligible(chatId, feature)) return { skipped: true, reason: "inactive_or_disabled" };
     try {
-        await sendMessage(chatId, text, options.sendOptions || {});
+        await sendMessage(chatId, text, { ...(options.sendOptions || {}), ...(priority === undefined ? {} : { priority }) });
         recordDeliverySuccess(chatId);
         return { sent: true };
     } catch (error) {
+        // Lỗi vĩnh viễn (410/422) đã được ghi nhận ngay tại sendMessage, nơi biết
+        // rõ phân loại. Ghi thêm ở đây sẽ đếm hai lần cùng một lần gửi.
+        if (error?.deliveryRecorded === true) {
+            return { failed: true, error, suspended: false };
+        }
         const record = recordDeliveryFailure(chatId, error, { feature, operation, maxConsecutiveFailures });
         return { failed: true, error, suspended: record?.status === "inactive" };
     }
@@ -1580,14 +1728,12 @@ function cancelSchedulerJobs() {
 // Dừng MỘT nhà cung cấp. Mỗi nhà cung cấp tự biết cách dừng; nếu nó không cung
 // cấp stop() thì thử cách cũ của node-zalo-bot.
 function stopOneBotPolling(runtime) {
+    // Nhà cung cấp tự biết cách dừng. Với bot chính thức, officialProvider.stop()
+    // gọi polling.stop() KHÔNG tham số — truyền { cancel, reason } làm nó ném
+    // "... is not a function" (đã kiểm chứng trên node-zalo-bot 0.1.6).
     if (runtime && typeof runtime.stop === "function") return Promise.resolve(runtime.stop());
-    const client = runtime?.client;
-    if (client && typeof client.stopPolling === "function") return Promise.resolve(client.stopPolling());
-    const polling = client && client._polling;
-    if (polling && typeof polling.stop === "function") {
-        return Promise.resolve(polling.stop({ cancel: true, reason: "Bot is shutting down" }));
-    }
-    console.warn(`[Runtime] ${runtime?.botId || "?"}: không có API dừng; bỏ qua bước này.`);
+    const polling = runtime?.client?._polling;
+    if (polling && typeof polling.stop === "function") return Promise.resolve(polling.stop());
     return Promise.resolve();
 }
 
@@ -1617,9 +1763,12 @@ function registerShutdownHandlers() {
         timeoutMs: positiveDuration(process.env.SHUTDOWN_TIMEOUT_MS, DEFAULT_SHUTDOWN_TIMEOUT_MS),
         log: (message) => console.log(message),
         stopScheduler: () => { cancelSchedulerJobs(); },
+        // Dừng nhận việc gửi mới rồi chờ các tin đang gửi dở kết thúc.
+        stopOutboundQueues: () => providerQueues.stopAll(),
         stopPolling: () => stopZaloPolling(),
         closeDashboard: () => closeDashboardServer(),
-        flushPersistence: () => flushPersistenceWrites()
+        flushPersistence: () => flushPersistenceWrites(),
+        stopMetrics: () => { metrics.stop(); }
     });
     for (const signal of ["SIGINT", "SIGTERM"]) {
         process.on(signal, () => { shutdownController.run(signal); });
@@ -1629,6 +1778,7 @@ function registerShutdownHandlers() {
 
 async function startRuntime() {
     let firebaseTarget;
+    metrics.start();
     try {
         // Bước 1: nạp cấu hình Firebase + hydrate state Firestore vào bộ nhớ.
         firebaseTarget = await initializeFirestorePersistence({
@@ -1655,9 +1805,14 @@ async function startRuntime() {
     console.log(`[Firebase] Collection: ${firebaseTarget.collectionName}`);
     console.log(`[Persistence] State loaded (${firebaseTarget.storeIds.length} store)`);
     console.log(`[Runtime] Timezone: ${TIME_ZONE}`);
+    metrics.mark("Firebase hydrate");
+    metrics.logMemory("sau hydrate");
 
     // Bước 2: đồng bộ lại state phái sinh từ dữ liệu cũ trước khi chạy runtime.
-    if (syncChatDirectoryFromLegacyStores() > 0) await flushPersistenceWrites();
+    const reconciledChats = syncChatDirectoryFromLegacyStores();
+    metrics.mark(`Chat reconciliation (${reconciledChats} thay đổi)`);
+    if (reconciledChats > 0) await flushPersistenceWrites();
+    metrics.mark("Persistence flush");
 
     // Bước 3: dashboard.
     adminRuntime = createAdminServer({
@@ -1746,28 +1901,43 @@ async function startRuntime() {
         adminRuntime.server.listen(adminRuntime.port, "127.0.0.1", resolve);
     });
     console.log(`[Dashboard] Listening on http://127.0.0.1:${adminRuntime.port}${adminRuntime.basePath}`);
+    metrics.mark("Dashboard");
+    metrics.logMemory("sau dashboard");
 
     // Bước 4: chỉ bật scheduler sau khi state Firestore đã được hydrate vào bộ nhớ.
     runtimeSchedulerJobs = registerRuntimeJobs() || [];
     registerShutdownHandlers();
     console.log(`[Runtime] Scheduler started (${TIME_ZONE})`);
+    metrics.mark("Scheduler");
 
-    // Bước 4b: hỏi Zalo tên từng bot. Chỉ là thông tin hiển thị — lỗi ở đây
-    // không được ngăn bot khởi động.
-    await resolveBotNames();
+    // Bước 4b: tra tên hiển thị của từng bot — KHÔNG chặn khởi động.
+    //
+    // Tên bot chỉ để hiển thị trên dashboard. Trước đây bước này được await ngay
+    // trước khi khởi động nhà cung cấp, nên mỗi lần tra tên chậm (mạng, Zalo) đều
+    // cộng thẳng vào thời gian khởi động. Nay chạy nền; xong lúc nào cập nhật lúc đó.
+    const nameResolution = resolveBotNames()
+        .then(() => metrics.mark("Bot name resolution"))
+        .catch((error) => console.warn(`[Runtime] tra tên bot thất bại (không ảnh hưởng khởi động): ${error.message}`));
 
-    // Bước 5: khởi động từng nhà cung cấp ĐỘC LẬP.
+    // Bước 5: khởi động MỌI nhà cung cấp SONG SONG.
+    //
+    // Các nhà cung cấp độc lập với nhau: bot1 không cần bot2 khởi động xong, và ZCA
+    // không cần bot chính thức. Chạy tuần tự khiến tổng thời gian bằng TỔNG độ trễ
+    // của từng nhà cung cấp (3 bot × ~10s = ~30s) thay vì bằng độ trễ LỚN NHẤT.
     //
     // Ranh giới lỗi nằm ở đây: một nhà cung cấp hỏng không được ngăn những nhà
-    // cung cấp khác chạy. Cụ thể, ZCA chưa đăng nhập hoặc listener lỗi chỉ khiến
-    // ZCA ở trạng thái riêng của nó, còn bot chính thức và dashboard vẫn chạy.
+    // cung cấp khác chạy. Mỗi lời hứa tự xử lý lỗi của mình nên không lời hứa nào
+    // bị từ chối và không nhà cung cấp nào bị khởi động hai lần.
     const started = [];
     const failed = [];
-    for (const runtime of listEnabledBots()) {
+    const providerStartups = listEnabledBots().map(async (runtime) => {
+        const providerStart = Date.now();
         try {
             await runtime.start();
+            const elapsed = Date.now() - providerStart;
             started.push(runtime.botId);
-            console.log(`[Runtime] ${runtime.botId}: đã khởi động (${runtime.providerType || "official"})`);
+            metrics.mark(`${runtime.botId} start`);
+            console.log(`[Runtime] ${runtime.botId}: đã khởi động (${runtime.providerType || "official"}) sau ${elapsed}ms`);
         } catch (error) {
             failed.push({ botId: runtime.botId, message: error.message });
             runtime.status = "polling_failed";
@@ -1776,7 +1946,8 @@ async function startRuntime() {
             console.error(`[Runtime] ${runtime.botId}: không khởi động được - ${error.message}`);
             logDiscord("ERROR", `provider_start_failed[${runtime.botId}]: ${error.message}`);
         }
-    }
+    });
+    await Promise.allSettled(providerStartups);
 
     // Chỉ coi là lỗi chí mạng khi KHÔNG nhà cung cấp CHÍNH THỨC nào lên được:
     // đó mới là hệ thống hỏng. ZCA hỏng một mình là trạng thái bình thường và
@@ -1788,9 +1959,19 @@ async function startRuntime() {
 
     logDiscord("INFO", `Đã khởi động - timezone ${TIME_ZONE} - providers: ${started.join(", ")}`);
     await flushPersistenceWrites();
+    metrics.mark("Persistence flush");
+
+    // Đợi tra tên bot hoàn tất trước khi in tổng kết, nhưng chỉ để báo cáo: nó
+    // không chặn bất cứ thứ gì ở trên.
+    await nameResolution;
+    console.log(metrics.summary().text);
+    metrics.logMemory("sẵn sàng");
 }
 
 async function handleIncomingMessage(runtime, msg) {
+    // Sau khi bắt đầu tắt máy thì không xử lý tin mới: tránh bắt đầu một đợt gửi
+    // hoặc một lệnh quản trị trong lúc tiến trình đang dừng.
+    if (shuttingDown) return;
     const text = msg.text || "[không có nội dung]";
     // Chat ID / User ID chỉ có nghĩa trong phạm vi một bot, nên botId đi kèm ngữ cảnh.
     const context = getMessageContext(msg, { botId: runtime.botId });

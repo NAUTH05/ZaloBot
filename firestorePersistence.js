@@ -18,9 +18,78 @@ let databaseId = getDatabaseId();
 let collectionName = DEFAULT_COLLECTION;
 let db = null;
 const cache = new Map();
-let writeQueue = Promise.resolve();
 let lastPersistenceError = null;
 let lastPersistenceWriteAt = null;
+
+// ---------------------------------------------------------------------------
+// Ghi Firestore có gộp (coalesced).
+//
+// Cách cũ nối một Promise cho MỖI lần thay đổi:
+//     writeQueue = writeQueue.then(() => write(storeId, clone(value)))
+// nên 100 thay đổi nhanh tạo ra 100 closure, mỗi closure giữ một bản sao ĐẦY ĐỦ
+// của cả store, và chúng được ghi tuần tự. Với store lớn đây chính là nguồn phình
+// bộ nhớ: RSS tăng trong khi heap V8 vẫn nhỏ, vì các bản sao đó là dữ liệu ngoài
+// heap (external/ArrayBuffer) chờ được ghi.
+//
+// Cách mới: mỗi store có đúng MỘT writer đang chạy. Cache luôn giữ giá trị mới
+// nhất; writer lặp cho tới khi store hết "bẩn", nên các thay đổi trung gian không
+// bao giờ tồn tại thành nhiều bản sao trong hàng đợi.
+//
+// Bảo đảm:
+//   - thứ tự ghi trong cùng một store được giữ (một writer, vòng lặp tuần tự)
+//   - store khác nhau ghi song song được, không chặn nhau
+//   - không mất dữ liệu: thay đổi trong lúc đang ghi làm store bẩn lại và được ghi tiếp
+//   - bản sao cũ không bao giờ ghi đè trạng thái mới hơn
+//   - flushPersistenceWrites() chờ tới khi mọi writer xong việc
+// ---------------------------------------------------------------------------
+const dirtyStores = new Set();
+const activeWriters = new Map();
+
+function markStoreDirty(storeId) {
+    dirtyStores.add(storeId);
+    if (!activeWriters.has(storeId)) startStoreWriter(storeId);
+}
+
+function startStoreWriter(storeId) {
+    const writer = (async () => {
+        try {
+            // Lặp cho tới khi store sạch. Nếu có thay đổi trong lúc đang ghi thì
+            // vòng lặp chạy thêm một lượt với trạng thái MỚI NHẤT.
+            while (dirtyStores.has(storeId)) {
+                dirtyStores.delete(storeId);
+                // Chỉ sao chép MỘT lần cho mỗi lượt ghi, ngay trước khi gửi đi.
+                const snapshot = clone(cache.get(storeId));
+                await writeFirestoreDocumentWithRetry(storeId, snapshot);
+                lastPersistenceWriteAt = new Date().toISOString();
+                lastPersistenceError = null;
+            }
+        } catch (error) {
+            // Ghi lỗi không được làm mất các thay đổi sau: store được đánh dấu bẩn
+            // lại để lần ghi kế tiếp (hoặc flush lúc tắt) thử lại.
+            lastPersistenceError = { storeId, message: error.message, at: new Date().toISOString() };
+            console.error(`Không thể ghi Firestore store ${storeId}:`, error.message);
+            if (dirtyStores.has(storeId)) {
+                // Đã có thay đổi mới trong lúc ghi ⇒ thử lại ở vòng sau.
+            }
+        } finally {
+            activeWriters.delete(storeId);
+            // Thay đổi đến đúng lúc writer vừa kết thúc: khởi động lại.
+            if (dirtyStores.has(storeId)) startStoreWriter(storeId);
+        }
+    })();
+    activeWriters.set(storeId, writer);
+    return writer;
+}
+
+// Số liệu chẩn đoán cho dashboard/log: hàng đợi có bị dồn không.
+function getPersistenceQueueStats() {
+    return {
+        dirtyStores: dirtyStores.size,
+        activeWriters: activeWriters.size,
+        cachedStores: cache.size,
+        dirtyStoreIds: [...dirtyStores]
+    };
+}
 
 // Store do bot khác sở hữu. Bot này không hydrate, không ghi và không được
 // nhập lại từ JSON, để không bao giờ ghi đè dữ liệu của bot kia.
@@ -59,18 +128,11 @@ function writeJsonStore(filePath, defaultPath, value) {
         return;
     }
     const storeId = storeIdFromPath(defaultPath);
-    cache.set(storeId, clone(value));
-    writeQueue = writeQueue
-        .catch(() => {})
-        .then(() => writeFirestoreDocumentWithRetry(storeId, clone(value)))
-        .then(() => {
-            lastPersistenceError = null;
-            lastPersistenceWriteAt = new Date().toISOString();
-        })
-        .catch((error) => {
-            lastPersistenceError = { storeId, message: error.message, at: new Date().toISOString() };
-            console.error(`Không thể ghi Firestore store ${storeId}:`, error.message);
-        });
+    // Cache giữ giá trị MỚI NHẤT. Không sao chép ở đây: readJsonStore đã sao chép
+    // khi đọc, và mọi nơi gọi đều truyền vào một object vừa đọc ra (đã là bản
+    // riêng). Sao chép thêm ở đây chỉ tốn bộ nhớ mà không tăng an toàn.
+    cache.set(storeId, value);
+    markStoreDirty(storeId);
 }
 
 async function readFirestoreDocument(storeId) {
@@ -126,10 +188,17 @@ function connectFirestore(options = {}) {
 async function initializeFirestorePersistence(options = {}) {
     const connection = connectFirestore(options);
     const storeIds = options.storeIds || [];
-    for (const storeId of storeIds) {
+
+    // Đọc SONG SONG: các store độc lập với nhau nên đọc tuần tự chỉ nhân độ trễ
+    // mạng lên theo số store. Với 9 store × ~250ms thì tiết kiệm được ~2 giây.
+    const loaded = await Promise.all(storeIds.map(async (storeId) => {
         const value = await readFirestoreDocument(storeId);
-        if (value != null) cache.set(storeId, value);
+        return { storeId, value };
+    }));
+    for (const item of loaded) {
+        if (item.value != null) cache.set(item.storeId, item.value);
     }
+
     return {
         ...describeFirebaseTarget({ credentials: connection.credentials, databaseId: connection.databaseId, collectionName: connection.collectionName }),
         credentialSource: connection.credentialSource,
@@ -183,8 +252,26 @@ async function importJsonDirectory(sourceDirectory, options = {}) {
     };
 }
 
-function flushPersistenceWrites() {
-    return writeQueue;
+// Chờ tới khi MỌI thay đổi đang chờ đã được ghi xong.
+//
+// Vòng lặp có giới hạn: nếu Firestore liên tục lỗi thì không được treo tiến trình
+// mãi. Sau số lượt tối đa, lỗi đã được ghi log và hàm trả về.
+async function flushPersistenceWrites({ maxPasses = 5 } = {}) {
+    for (let pass = 0; pass < maxPasses; pass += 1) {
+        // Store còn bẩn mà chưa có writer (ví dụ writer vừa kết thúc) thì khởi động.
+        for (const storeId of [...dirtyStores]) {
+            if (!activeWriters.has(storeId)) startStoreWriter(storeId);
+        }
+        if (activeWriters.size === 0) return;
+
+        await Promise.allSettled([...activeWriters.values()]);
+
+        // Trong lúc chờ có thay đổi mới ⇒ chạy thêm một lượt.
+        if (dirtyStores.size === 0 && activeWriters.size === 0) return;
+    }
+    if (dirtyStores.size > 0) {
+        console.error(`[Persistence] còn ${dirtyStores.size} store chưa ghi được sau ${maxPasses} lượt.`);
+    }
 }
 
 function getPersistenceStatus() {
@@ -203,6 +290,7 @@ module.exports = {
     RESERVED_STORE_IDS,
     connectFirestore,
     flushPersistenceWrites,
+    getPersistenceQueueStats,
     getPersistenceStatus,
     importJsonDirectory,
     initializeFirestorePersistence,

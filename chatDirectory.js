@@ -130,6 +130,62 @@ function updateChat(chatId, changes = {}, filePath = FILE_PATH) {
     return record;
 }
 
+// Các trường mà việc đối chiếu lúc khởi động thực sự có thể thay đổi. Dùng để
+// biết một bản ghi có thật sự đổi hay không, thay vì so sánh cả object.
+const RECONCILE_FIELDS = Object.freeze(["chatType", "displayName", "userId", "chatTitle"]);
+
+function reconcileFieldChanged(before, after) {
+    for (const field of RECONCILE_FIELDS) {
+        if (String(before?.[field] ?? "") !== String(after?.[field] ?? "")) return true;
+    }
+    return false;
+}
+
+// Đối chiếu sổ chat trong MỘT LƯỢT: đọc một lần, gộp trong bộ nhớ, ghi TỐI ĐA một lần.
+//
+// Vì sao cần: cách cũ gọi upsertChat() cho từng bản ghi, mà mỗi lần như vậy lại đọc
+// cả sổ rồi ghi lại cả sổ. Với 500 bản ghi tương tác và đăng ký, khởi động tạo ra
+// 500 lần ghi Firestore cho cùng một tài liệu — chậm và tốn bộ nhớ vô ích.
+//
+// Giữ nguyên mọi thứ đang có: status, notificationOverrides, createdAt, các trường
+// khác của bản ghi, và không bao giờ hồi sinh chat đã xoá. `updatedAt` chỉ đổi khi
+// dữ liệu hiển thị thực sự thay đổi, nên khởi động lại nhiều lần không làm bẩn sổ.
+function reconcileChatDirectory(entries = [], filePath = FILE_PATH) {
+    const data = readDirectory(filePath);
+    let changed = 0;
+
+    for (const input of entries) {
+        const chatId = normalizeChatId(input?.chatId);
+        if (!chatId) continue;
+
+        const key = scopedChatKey(chatId);
+        // Chat đã bị xoá vĩnh viễn thì không được dựng lại.
+        if (data.deletedChatIds[key]) continue;
+
+        const existing = data.chats[key];
+        const merged = normalizeRecord(chatId, input, existing || {});
+        if (!merged) continue;
+
+        if (!existing) {
+            data.chats[key] = merged;
+            changed += 1;
+            continue;
+        }
+
+        // Giữ nguyên updatedAt nếu không có gì đổi.
+        merged.updatedAt = existing.updatedAt || merged.updatedAt;
+        if (!reconcileFieldChanged(existing, merged)) continue;
+
+        merged.updatedAt = nowIso();
+        data.chats[key] = merged;
+        changed += 1;
+    }
+
+    // Chỉ ghi khi thật sự có thay đổi.
+    if (changed > 0) writeDirectory(data, filePath);
+    return changed;
+}
+
 // Xoá một chat khỏi sổ của bot hiện tại.
 //
 //   hard = false  → chỉ ĐỔI TRẠNG THÁI sang "removed". Bản ghi vẫn còn, đăng ký
@@ -258,6 +314,7 @@ module.exports = {
     getDeletedChatIds,
     isChatDeleted,
     normalizeChatType,
+    reconcileChatDirectory,
     removeChat,
     isChatEligible,
     readDirectory,

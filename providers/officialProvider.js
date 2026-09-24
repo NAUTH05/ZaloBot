@@ -58,15 +58,23 @@ function createOfficialProvider(config = {}) {
         },
 
         async stop() {
-            // node-zalo-bot không có stopPolling công khai; instance Polling nội
-            // bộ có stop(). Chỉ gọi khi thư viện thực sự cung cấp.
             const client = provider.client;
-            if (typeof client.stopPolling === "function") return client.stopPolling();
-            const polling = client._polling;
+
+            // node-zalo-bot KHÔNG có API dừng công khai. Đối tượng polling nội bộ
+            // (`client._polling`) do startPolling() tạo ra và có `stop()`.
+            //
+            // Phải gọi `stop()` KHÔNG THAM SỐ. Gọi `stop({ cancel: true, reason })`
+            // làm nó đi vào một nhánh nội bộ gọi một phương thức không tồn tại:
+            //     "_0x44566d[_0x36d9cf(...)] is not a function"
+            // — đúng lỗi đã thấy trong log sản xuất. Đã kiểm chứng trực tiếp trên
+            // node-zalo-bot 0.1.6: stop() không tham số chạy sạch.
+            const polling = client?._polling;
             if (polling && typeof polling.stop === "function") {
-                return polling.stop({ cancel: true, reason: "Bot is shutting down" });
+                await polling.stop();
+                return true;
             }
-            return undefined;
+            // Chưa từng startPolling() thì không có gì để dừng.
+            return false;
         },
 
         // Tên thật lấy từ Zalo Bot Platform bằng chính token của bot.

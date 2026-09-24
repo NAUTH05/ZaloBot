@@ -345,20 +345,31 @@ test("runWithBot đổi danh tính cho cả nhánh async bên trong", async () =
 });
 
 test("dừng polling dừng mọi bot, một bot lỗi không chặn bot khác", async () => {
+    // node-zalo-bot KHÔNG có stopPolling công khai. Cách dừng thật là đối tượng
+    // polling nội bộ do startPolling() tạo ra: client._polling.stop(), và phải
+    // gọi KHÔNG tham số (truyền { cancel, reason } sẽ ném lỗi "... is not a function").
     const calls = [];
-    const original = ZaloBot.prototype.stopPolling;
-    ZaloBot.prototype.stopPolling = function () {
-        calls.push(this.token);
-        if (this.token === TOKEN_1) return Promise.reject(new Error("dừng lỗi"));
-        return Promise.resolve();
-    };
+    // Chỉ bot chính thức mới có client; ZCA tự dừng theo cách riêng.
+    const originals = listBots()
+        .filter((bot) => bot.client)
+        .map((bot) => ({ bot, polling: bot.client._polling }));
+
+    for (const { bot } of originals) {
+        bot.client._polling = {
+            stop() {
+                calls.push(bot.token);
+                if (bot.token === TOKEN_1) return Promise.reject(new Error("dừng lỗi"));
+                return Promise.resolve();
+            }
+        };
+    }
 
     try {
         const stopped = await main.stopZaloPolling();
         assert.equal(stopped, listBots().length, "phải thử dừng mọi nhà cung cấp đã đăng ký");
         assert.deepEqual(calls.sort(), [TOKEN_1, TOKEN_2].sort());
     } finally {
-        ZaloBot.prototype.stopPolling = original;
+        for (const { bot, polling } of originals) bot.client._polling = polling;
     }
 });
 
