@@ -102,6 +102,46 @@ function main() {
 
     const scopesOf = (map, id) => map.get(id) || null;
 
+    // --- Bằng chứng ủng hộ NGUỒN ĐANG KHAI BÁO -----------------------------------
+    //
+    // Đây là chốt chống GÁN QUÁ TAY, và là điều kiện tiên quyết để được gán lại.
+    //
+    // bot1 KHÔNG có tiền tố khóa, nên bằng chứng từ phạm vi khóa KHÔNG BAO GIỜ chứng
+    // minh được một bản ghi thuộc bot1. Nếu chỉ dựa vào phạm vi khóa thì mọi bản ghi
+    // "bot1 + khóa trần" đều thua khi chat của nó xuất hiện dưới khóa botN khác — dù
+    // đó có thể là HAI cuộc trò chuyện thật.
+    //
+    // Đã kiểm chứng trên dữ liệu thật: các chat đó có bản ghi bot2 CÓ PHẠM VI, đồng
+    // thời có bản ghi bot1 khai báo tường minh và cả đăng ký nhận lịch của bot1. Gán
+    // lại chúng sẽ phá dữ liệu bot1 hợp lệ.
+    //
+    // Vì vậy: CHỈ gán lại khi nguồn đang khai báo KHÔNG có bất kỳ bằng chứng tường
+    // minh nào ủng hộ. Có bằng chứng ⇒ giữ nguyên và để người xác minh.
+    const declaredSourceSupport = new Map();   // `${chatId}|${botId}` -> số bản ghi ủng hộ
+    for (const item of all) {
+        const declared = normalizeBotId(item.record?.botId);
+        if (!declared) continue;
+        if (item.chatId) {
+            const key = `${item.chatId}|${declared}`;
+            declaredSourceSupport.set(key, (declaredSourceSupport.get(key) || 0) + 1);
+        }
+        if (item.userId) {
+            const key = `${item.userId}|${declared}`;
+            declaredSourceSupport.set(key, (declaredSourceSupport.get(key) || 0) + 1);
+        }
+    }
+
+    // Số bản ghi KHÁC (không tính chính nó) khai báo tường minh nguồn đang xét.
+    function supportFor(item, botId) {
+        if (!botId) return 0;
+        let total = 0;
+        if (item.chatId) total += declaredSourceSupport.get(`${item.chatId}|${botId}`) || 0;
+        if (item.userId) total += declaredSourceSupport.get(`${item.userId}|${botId}`) || 0;
+        // Trừ đi chính bản ghi này nếu nó cũng khai báo nguồn đó.
+        if (normalizeBotId(item.record?.botId) === botId) total -= 1;
+        return Math.max(0, total);
+    }
+
     // --- Phân loại ---------------------------------------------------------------
     // Xác minh do quản trị viên thực hiện: bản ghi đã được người quyết định thì
     // KHÔNG đề xuất gán lại nữa. Nạp TRƯỚC vòng lặp phân loại vì vòng lặp cần tra.
@@ -111,6 +151,9 @@ function main() {
     const confirmed = [];      // đã có nguồn xác minh và KHÔNG mâu thuẫn bằng chứng
     const recoverable = [];    // có bằng chứng định danh chỉ thuộc một bot khác
     const ambiguous = [];      // không đủ căn cứ
+    // Có bằng chứng về nguồn khác NHƯNG nguồn đang khai báo cũng có bằng chứng
+    // riêng ⇒ giữ nguyên, đây rất có thể là hai cuộc trò chuyện thật.
+    const protectedByDeclaredEvidence = [];
     const conflicting = [];    // botId mâu thuẫn trực tiếp với khóa có phạm vi
 
     for (const item of all) {
@@ -141,6 +184,18 @@ function main() {
         const declared = source.botId;
 
         if (evidenceOwner && evidenceOwner !== declared) {
+            // CHỐT AN TOÀN: nếu nguồn đang khai báo có bằng chứng tường minh từ bản ghi
+            // khác thì KHÔNG gán lại. Rất có thể đây là hai cuộc trò chuyện thật.
+            const declaredSupport = supportFor(item, declared);
+            if (declaredSupport > 0) {
+                protectedByDeclaredEvidence.push({
+                    ...item,
+                    claimed: declared,
+                    target: evidenceOwner,
+                    support: declaredSupport
+                });
+                continue;
+            }
             recoverable.push({
                 ...item,
                 resolvedBotId: evidenceOwner,
@@ -162,6 +217,7 @@ function main() {
     console.log(`  KHÔNG đủ căn cứ (giữ nguyên)       : ${ambiguous.length}`);
     console.log(`  Mâu thuẫn (không tự động xử lý)    : ${conflicting.length}`);
     console.log(`  Quản trị viên đã xác minh (hoàn tác được): ${verificationCounts.active} (đã hoàn tác: ${verificationCounts.revoked})`);
+    console.log(`  GIỮ NGUYÊN vì nguồn đang khai báo cũng có bằng chứng: ${protectedByDeclaredEvidence.length}`);
 
     const byStore = (list) => {
         const out = {};
