@@ -614,6 +614,41 @@ async function handleApi(request, response, url, options = {}) {
     if (url.pathname === `${API_PREFIX}/bots` && request.method === "GET") {
         return json(response, 200, { bots: describeRegisteredBots() });
     }
+
+    // ---------------------------------------------------------------------
+    // Đăng nhập QR cho tài khoản Zalo cá nhân.
+    //
+    // Các endpoint này nằm sau middleware xác thực admin hiện có, nên KHÔNG bao
+    // giờ lộ ra công khai. Chúng chỉ trả ảnh QR và trạng thái — tuyệt đối không
+    // trả cookie, imei hay userAgent của phiên.
+    // ---------------------------------------------------------------------
+    if (url.pathname === `${API_PREFIX}/providers/zca/qr` && request.method === "GET") {
+        if (typeof options.getZcaQr !== "function") return json(response, 503, { error: "ZCA không khả dụng" });
+        const qr = options.getZcaQr();
+        // Ảnh QR chỉ nằm trong bộ nhớ; không có thì trả về null thay vì lỗi.
+        return json(response, 200, { qr });
+    }
+    if (url.pathname === `${API_PREFIX}/providers/zca/login` && request.method === "POST") {
+        if (typeof options.beginZcaLogin !== "function") return json(response, 503, { error: "ZCA không khả dụng" });
+        try {
+            const result = await options.beginZcaLogin();
+            audit("zca.login_requested", request, { result: result?.ok ? "success" : "failed" });
+            return json(response, 200, result || { ok: false });
+        } catch (error) {
+            audit("zca.login_requested", request, { result: "failed", error: error.message });
+            return json(response, 400, { error: error.message });
+        }
+    }
+    if (url.pathname === `${API_PREFIX}/providers/zca/session` && request.method === "DELETE") {
+        if (typeof options.clearZcaSession !== "function") return json(response, 503, { error: "ZCA không khả dụng" });
+        try {
+            const result = await options.clearZcaSession();
+            audit("zca.session_cleared", request, { result: "success" });
+            return json(response, 200, result || { ok: true });
+        } catch (error) {
+            return json(response, 400, { error: error.message });
+        }
+    }
     if (url.pathname === `${API_PREFIX}/chats` && request.method === "GET") {
         const filter = String(url.searchParams.get("status") || "all");
         const type = String(url.searchParams.get("type") || "all");

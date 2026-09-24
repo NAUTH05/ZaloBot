@@ -60,7 +60,8 @@ test("runtime nạp Firestore trước scheduler và Zalo polling", async (t) =>
         "[Dashboard] Listening on",
         "[Runtime] Scheduler started",
         // Log polling giờ nêu rõ bot nào, vì mỗi bot có consumer riêng.
-        "[Runtime] bot1: Zalo polling started"
+        // Mỗi nhà cung cấp khởi động độc lập và tự báo trạng thái của mình.
+        "[Runtime] bot1: đã khởi động"
     ]) {
         assert.ok(logs.some((line) => line.startsWith(prefix)), `thiếu log khởi động: ${prefix}`);
     }

@@ -13,7 +13,7 @@
 //     lối gọi cũ và cho bản triển khai một token.
 // ============================================================================
 const { AsyncLocalStorage } = require("async_hooks");
-const { LEGACY_BOT_ID, describeBot, normalizeBotId } = require("./bots");
+const { LEGACY_BOT_ID, describeBot, normalizeBotId, providerTypeOf } = require("./bots");
 
 const storage = new AsyncLocalStorage();
 const registry = new Map();
@@ -27,6 +27,27 @@ function registerBot(runtime) {
 function registerBots(runtimes = []) {
     for (const runtime of runtimes) registerBot(runtime);
     return [...registry.values()];
+}
+
+// Đổi danh tính của một nhà cung cấp đã đăng ký.
+//
+// Cần cho ZCA: UID của tài khoản cá nhân chỉ biết được SAU khi đăng nhập, mà khóa
+// lưu trữ lại phụ thuộc vào danh tính. Trước khi biết UID, nhà cung cấp nằm dưới
+// một khóa tạm; sau khi đăng nhập thì chuyển sang "zca:<uid>" thật.
+function rekeyBot(oldBotId, newBotId) {
+    const from = normalizeBotId(oldBotId);
+    const to = normalizeBotId(newBotId);
+    if (!from || !to || from === to) return null;
+
+    const runtime = registry.get(from);
+    if (!runtime) return null;
+    // Không cho phép ghi đè một nhà cung cấp khác đang tồn tại.
+    if (registry.has(to)) return null;
+
+    registry.delete(from);
+    runtime.botId = to;
+    registry.set(to, runtime);
+    return runtime;
 }
 
 function clearBots() {
@@ -88,12 +109,24 @@ function bindBot(botOrId, fn) {
 }
 
 // Mô tả an toàn cho dashboard/API: không bao giờ chứa token.
+// Mô tả an toàn cho dashboard/API.
+//
+// Mỗi nhà cung cấp tự cung cấp getIdentity()/getStatus() nên phần thân nhà cung
+// cấp riêng (token của bot chính thức, phiên của tài khoản cá nhân) không bao giờ
+// đi ra ngoài qua đường này.
 function describeRegisteredBots() {
-    return listBots().map((runtime) => ({
-        ...describeBot(runtime),
-        status: runtime.status || (runtime.enabled === false ? "disabled" : "enabled"),
-        health: typeof runtime.health === "function" ? runtime.health() : null
-    }));
+    return listBots().map((runtime) => {
+        const identity = typeof runtime.getIdentity === "function" ? runtime.getIdentity() : {};
+        const status = typeof runtime.getStatus === "function" ? runtime.getStatus() : {};
+        return {
+            ...describeBot(runtime),
+            providerType: providerTypeOf(runtime.botId),
+            isPersonalAccount: runtime.isPersonalAccount === true,
+            ...identity,
+            status: status.status || runtime.status || (runtime.enabled === false ? "disabled" : "enabled"),
+            health: typeof runtime.health === "function" ? runtime.health() : null
+        };
+    });
 }
 
 module.exports = {
@@ -108,5 +141,6 @@ module.exports = {
     listEnabledBots,
     registerBot,
     registerBots,
+    rekeyBot,
     runWithBot
 };

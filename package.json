@@ -19,6 +19,7 @@
     "dotenv": "^17.2.1",
     "firebase-admin": "^14.2.0",
     "node-schedule": "^2.1.1",
-    "node-zalo-bot": "^0.1.6"
+    "node-zalo-bot": "^0.1.6",
+    "zca-js": "^2.2.0"
   }
 }

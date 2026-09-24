@@ -40,10 +40,17 @@ function resolveBotDisplayName({ botId, verifiedName, configuredName }) {
     return normalizeBotId(botId) || LEGACY_BOT_ID;
 }
 
-// Nhãn hiển thị đầy đủ: "Bot Micano · bot2" khi có tên, ngược lại chỉ botId.
+// Nhãn hiển thị đầy đủ: "Bot Micano · bot2", hoặc "Tài khoản A · zca:123" cho tài
+// khoản cá nhân.
+//
+// Nếu chưa biết danh tính thì CHỈ trả về tên — tuyệt đối không ghép thêm bot1,
+// vì như vậy là trình bày nhầm một tài khoản ZCA thành bot chính thức.
 function formatBotLabel(bot) {
-    const botId = normalizeBotId(bot?.botId) || LEGACY_BOT_ID;
+    const rawId = String(bot?.botId == null ? "" : bot.botId).trim();
+    const botId = normalizeBotId(rawId);
     const name = String(bot?.displayName == null ? "" : bot.displayName).trim();
+
+    if (!botId) return name || "không rõ danh tính";
     if (!name || name === botId) return botId;
     return `${name} · ${botId}`;
 }
@@ -76,16 +83,57 @@ function extractBotName(response) {
 // rõ trong tài liệu.
 const DEFAULT_MONTHLY_MESSAGE_WARNING = 3000;
 
+// Loại nhà cung cấp. Mỗi danh tính trong hệ thống thuộc về đúng một loại:
+//   official — bot trên Zalo Bot Platform, xác thực bằng token
+//   zca      — tài khoản Zalo cá nhân qua zca-js, xác thực bằng phiên đăng nhập
+const PROVIDER_TYPES = Object.freeze({ OFFICIAL: "official", ZCA: "zca" });
+
+// Danh tính ZCA: "zca:<uid Zalo>". UID đến từ api.getOwnId() nên ổn định qua các
+// lần khởi động — KHÔNG dùng id ngẫu nhiên vì khóa lưu trữ phụ thuộc vào nó.
+const ZCA_ID_PREFIX = "zca:";
+const ZCA_ID_PATTERN = /^zca:[A-Za-z0-9_-]{1,64}$/;
+
+function zcaId(uid) {
+    const value = String(uid == null ? "" : uid).trim();
+    if (!value) return null;
+    const candidate = `${ZCA_ID_PREFIX}${value}`.toLowerCase();
+    return ZCA_ID_PATTERN.test(candidate) ? candidate : null;
+}
+
+function zcaUidOf(botId) {
+    const normalized = normalizeBotId(botId);
+    if (!normalized || !normalized.startsWith(ZCA_ID_PREFIX)) return null;
+    return normalized.slice(ZCA_ID_PREFIX.length);
+}
+
+function isZcaId(botId) {
+    const normalized = normalizeBotId(botId);
+    return Boolean(normalized && normalized.startsWith(ZCA_ID_PREFIX));
+}
+
+// Loại nhà cung cấp của một danh tính. Danh tính không nhận ra ⇒ official, vì
+// mọi dữ liệu cũ đều thuộc bot trên Zalo Bot Platform.
+function providerTypeOf(botId) {
+    return isZcaId(botId) ? PROVIDER_TYPES.ZCA : PROVIDER_TYPES.OFFICIAL;
+}
+
+// Chuẩn hoá danh tính nhà cung cấp. Chấp nhận cả botN lẫn zca:<uid>.
+//
+// ĐÂY LÀ CHỐT QUAN TRỌNG NHẤT của lớp danh tính: có hơn hai chục nơi gọi hàm này
+// để quyết định khóa lưu trữ. Nếu nó không nhận ra danh tính ZCA thì mọi bản ghi
+// ZCA sẽ bị coi là của bot 1 và ghi đè lên dữ liệu bot 1.
 function normalizeBotId(value) {
     const raw = String(value == null ? "" : value).trim().toLowerCase();
     if (!raw) return null;
-    if (!BOT_ID_PATTERN.test(raw)) return null;
-    return raw;
+    if (BOT_ID_PATTERN.test(raw)) return raw;
+    if (ZCA_ID_PATTERN.test(raw)) return raw;
+    return null;
 }
 
+// Chỉ số của bot chính thức (bot1 → 1). Danh tính ZCA không có chỉ số.
 function botIndex(botId) {
     const normalized = normalizeBotId(botId);
-    if (!normalized) return null;
+    if (!normalized || !BOT_ID_PATTERN.test(normalized)) return null;
     const index = Number(normalized.slice(3));
     return Number.isInteger(index) && index >= 1 ? index : null;
 }
@@ -210,13 +258,16 @@ function scopeKey(botId, key) {
 
 // Tách botId khỏi một khóa đã có tiền tố. Khóa không tiền tố thuộc về bot 1 —
 // đây chính là quy tắc giữ tương thích cho dữ liệu cũ.
+//
+// Danh tính ZCA có dấu ":" bên trong ("zca:123::chat"), nên phải tách ở dấu "::"
+// ĐẦU TIÊN chứ không thể tách theo ":".
 function parseScopedKey(key) {
     const raw = String(key == null ? "" : key);
-    const match = raw.match(/^(bot\d+)::(.*)$/);
-    if (!match) return { botId: LEGACY_BOT_ID, key: raw, scoped: false };
-    const botId = normalizeBotId(match[1]);
+    const separator = raw.indexOf("::");
+    if (separator <= 0) return { botId: LEGACY_BOT_ID, key: raw, scoped: false };
+    const botId = normalizeBotId(raw.slice(0, separator));
     if (!botId) return { botId: LEGACY_BOT_ID, key: raw, scoped: false };
-    return { botId, key: match[2], scoped: true };
+    return { botId, key: raw.slice(separator + 2), scoped: true };
 }
 
 // Mô tả bot an toàn để đưa vào log, API và dashboard: TUYỆT ĐỐI không có token.
@@ -246,8 +297,13 @@ module.exports = {
     botIndex,
     describeBot,
     describeBots,
+    PROVIDER_TYPES,
     extractBotName,
     formatBotLabel,
+    isZcaId,
+    providerTypeOf,
+    zcaId,
+    zcaUidOf,
     isLegacyBotId,
     isMaskedToken,
     normalizeBotId,

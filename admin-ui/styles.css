@@ -973,3 +973,39 @@ dialog h3:first-of-type { margin-top: var(--s-4); }
     font-weight: 700;
     white-space: nowrap;
 }
+
+/* ---------------------------------------------------------------------------
+   Nhà cung cấp: bot chính thức và tài khoản Zalo cá nhân là hai loại danh tính
+   khác nhau, nên thẻ phải phân biệt được bằng mắt.
+   --------------------------------------------------------------------------- */
+
+.bot-card.provider-official {
+    border-left: 3px solid var(--accent);
+}
+
+.bot-card.provider-zca {
+    border-left: 3px solid var(--blue);
+}
+
+.bot-card .row-actions {
+    margin-top: var(--s-2);
+    display: flex;
+    gap: var(--s-2);
+    flex-wrap: wrap;
+}
+
+/* Ảnh QR đăng nhập: chỉ hiển thị trong hộp thoại, không lưu ra đĩa. */
+.qr-box {
+    display: flex;
+    justify-content: center;
+    padding: var(--s-4);
+    background: #ffffff;
+    border-radius: var(--r-md);
+    margin: var(--s-3) 0;
+}
+
+.qr-box img {
+    width: 260px;
+    height: 260px;
+    image-rendering: pixelated;
+}

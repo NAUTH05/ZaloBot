@@ -85,6 +85,16 @@ if (!/data-chat-bot|data-user-bot/.test(app)) fail("Row actions must carry the b
 // Bộ chọn người nhận không được gộp hai bot làm một.
 if (!app.includes("const keyOf = (user)")) fail("Target user merging must key by (bot, user), not userId alone");
 if (!app.includes("botLabel(recordBotId(user))")) fail("Target user options must show which bot they belong to");
+// Nhà cung cấp: bot chính thức và tài khoản Zalo cá nhân phải phân biệt được, và
+// tài khoản cá nhân không bao giờ được trình bày như một bot có token.
+if (!app.includes("function providerStatusLabel")) fail("Dashboard must map provider statuses to labels");
+if (!app.includes("isPersonalAccount")) fail("Dashboard must distinguish personal accounts from official bots");
+if (!app.includes("provider-zca")) fail("Dashboard must style the ZCA provider card distinctly");
+if (!app.includes("/api/admin/providers/zca/login")) fail("Dashboard must offer ZCA QR login through the authenticated API");
+if (!/uid/.test(app)) fail("Dashboard must show the ZCA account UID");
+// Không được tham chiếu tới các trường BÍ MẬT của phiên ZCA. Chỉ kiểm tra đúng
+// tên các trường nhạy cảm — chữ "phiên"/"session" xuất hiện hợp lệ trong nhãn UI.
+if (/session\.json|sessionFilePath|\bimei\b|userAgent|zpsid/i.test(app)) fail("Dashboard must never reference ZCA session secrets");
 if (!app.includes("function renderBotGrid")) fail("Dashboard must show per-bot status");
 if (!app.includes("data-chat-bot")) fail("Chat row actions must carry the bot id, or a bot-2 chat opens bot-1's record");
 if (!app.includes("botId: recordBotId(")) fail("Chat and subscription writes must send the bot id");

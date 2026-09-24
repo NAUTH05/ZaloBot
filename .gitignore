@@ -33,3 +33,12 @@ adminSettings.json
 # Sao lưu cục bộ do scripts/migrateNotificationTargetDays.js và
 # scripts/cleanupBirthdayData.js ghi ra trước khi thay đổi dữ liệu.
 migration-backups/
+
+# Phiên đăng nhập ZCA (tài khoản Zalo cá nhân).
+# Đây là thông tin xác thực: có nó là đăng nhập được vào tài khoản Zalo.
+# TUYỆT ĐỐI không commit.
+data/
+zca-session/
+session.json
+session.lock
+*.session.json

@@ -133,17 +133,114 @@ function populateBotControls() {
   }
 }
 
-// Thẻ trạng thái từng bot. Số liệu đếm riêng vì mỗi bot là một danh tính.
+// Trạng thái nhà cung cấp → nhãn hiển thị.
+const PROVIDER_STATUS_LABELS = {
+  disabled: "Đang tắt",
+  starting: "Đang khởi động",
+  waiting_for_qr: "Cần quét mã QR",
+  authentication_required: "Cần đăng nhập",
+  authenticated: "Đã xác thực",
+  connected: "Đang hoạt động",
+  reconnecting: "Đang kết nối lại",
+  disconnected: "Mất kết nối",
+  running: "Đang hoạt động",
+  error: "Lỗi",
+  polling_failed: "Lỗi kết nối"
+};
+
+function providerStatusLabel(status) {
+  return PROVIDER_STATUS_LABELS[status] || status || "không rõ";
+}
+
+function providerStatusTone(status) {
+  if (["connected", "running", "authenticated"].includes(status)) return "success";
+  if (["waiting_for_qr", "authentication_required", "reconnecting", "starting"].includes(status)) return "warning";
+  if (["error", "polling_failed", "disconnected"].includes(status)) return "danger";
+  return "neutral";
+}
+
+// Thẻ nhà cung cấp.
+//
+// Bot chính thức và tài khoản Zalo cá nhân là HAI loại danh tính khác nhau, nên
+// thẻ phải nói rõ loại và không được trình bày tài khoản cá nhân như một bot có
+// token — tài khoản cá nhân không có token nào để hiển thị.
 function renderBotGrid() {
   const target = $("#botGrid");
   if (!target) return;
   const stats = workspace.botStats || [];
   if (!bots.length) { target.innerHTML = ""; return; }
+
   target.innerHTML = bots.map((bot) => {
     const stat = stats.find((item) => item.botId === bot.botId) || {};
-    const tone = bot.status === "running" ? "success" : bot.enabled === false ? "neutral" : "warning";
-    return `<article class="bot-card"><header><strong>${escapeHtml(bot.botId)}</strong>${badge(bot.status || (bot.enabled === false ? "disabled" : "unknown"), tone)}</header><p class="muted">Token: <code>${escapeHtml(bot.tokenFingerprint || "-")}</code> · nguồn <code>${escapeHtml(bot.tokenSource || "-")}</code></p><dl><div><dt>Chat</dt><dd>${stat.chatCount ?? 0}</dd></div><div><dt>User</dt><dd>${stat.userCount ?? 0}</dd></div><div><dt>Đăng ký</dt><dd>${stat.subscriptionCount ?? 0}</dd></div><div><dt>Đang bật</dt><dd>${stat.enabledSubscriptionCount ?? 0}</dd></div><div><dt>Lỗi gửi</dt><dd>${stat.deliveryErrorCount ?? 0}</dd></div></dl></article>`;
+    const isZca = bot.providerType === "zca" || bot.isPersonalAccount === true;
+    const status = bot.status || (bot.enabled === false ? "disabled" : "unknown");
+    const typeBadge = isZca
+      ? badge("Tài khoản Zalo cá nhân", "warning")
+      : badge("Bot chính thức", "info");
+
+    // Dòng danh tính: bot chính thức dùng vân tay token, tài khoản cá nhân dùng UID
+    // và trạng thái phiên. Không bao giờ hiển thị token hay nội dung phiên.
+    const identityLine = isZca
+      ? `<p class="muted">UID: <code>${escapeHtml(bot.uid || "chưa rõ")}</code> · xác thực: <code>${bot.health?.authenticated ? "phiên đã lưu" : "chưa đăng nhập"}</code></p>`
+      : `<p class="muted">Token: <code>${escapeHtml(bot.tokenFingerprint || "-")}</code> · nguồn <code>${escapeHtml(bot.tokenSource || "-")}</code></p>`;
+
+    const counters = `<dl><div><dt>Chat</dt><dd>${stat.chatCount ?? 0}</dd></div><div><dt>User</dt><dd>${stat.userCount ?? 0}</dd></div><div><dt>Đăng ký</dt><dd>${stat.subscriptionCount ?? 0}</dd></div><div><dt>Đang bật</dt><dd>${stat.enabledSubscriptionCount ?? 0}</dd></div><div><dt>Lỗi gửi</dt><dd>${stat.deliveryErrorCount ?? 0}</dd></div></dl>`;
+
+    // Chỉ tài khoản cá nhân mới cần QR, và chỉ khi thực sự đang chờ quét.
+    const needsQr = isZca && ["waiting_for_qr", "authentication_required"].includes(status);
+    const qrActions = isZca
+      ? `<div class="row-actions">${needsQr ? `<button type="button" class="small" data-zca-login="1">Đăng nhập bằng QR</button>` : ""}<button type="button" class="small" data-zca-session-status="1">Kiểm tra phiên</button></div>`
+      : "";
+
+    const errorLine = bot.health?.lastError
+      ? `<p class="error-cell">${escapeHtml(bot.health.lastError)}</p>`
+      : "";
+
+    return `<article class="bot-card${isZca ? " provider-zca" : " provider-official"}" data-provider="${escapeHtml(bot.botId)}"><header><strong>${escapeHtml(bot.label || bot.displayName || bot.botId)}</strong>${badge(providerStatusLabel(status), providerStatusTone(status))}</header><p>${typeBadge}</p>${identityLine}${counters}${errorLine}${qrActions}</article>`;
   }).join("");
+
+  $$('[data-zca-login]').forEach((button) => button.addEventListener("click", () => beginZcaLogin()));
+  $$('[data-zca-session-status]').forEach((button) => button.addEventListener("click", () => showZcaSessionStatus()));
+}
+
+// Bắt đầu đăng nhập QR rồi hiện mã. Ảnh QR chỉ nằm trong bộ nhớ của tiến trình,
+// không bao giờ được ghi ra đĩa và không đi kèm thông tin phiên.
+async function beginZcaLogin() {
+  const outcome = await runAction(async () => {
+    const result = await api("/api/admin/providers/zca/login", { method: "POST" });
+    if (result?.error) throw new Error(result.error);
+    return result;
+  }, "Không bắt đầu được đăng nhập ZCA");
+  if (!outcome.ok) return;
+
+  setDataState("loading", "Đang tạo mã QR...");
+  // loginQR tạo mã bất đồng bộ nên phải chờ một nhịp rồi hỏi lại vài lần.
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await new Promise((resolve) => window.setTimeout(resolve, 1000));
+    const qr = await api("/api/admin/providers/zca/qr").then((data) => data.qr).catch(() => null);
+    if (qr?.image) {
+      setDataState("success", "Đã tạo mã QR. Quét bằng ứng dụng Zalo trên điện thoại.");
+      showDialog("Đăng nhập Zalo cá nhân", `<p>Mở Zalo trên điện thoại → <strong>Cá nhân</strong> → <strong>Thiết bị đăng nhập</strong> → quét mã dưới đây.</p><div class="qr-box"><img alt="Mã QR đăng nhập Zalo" src="data:image/png;base64,${escapeHtml(qr.image)}" /></div><p class="muted">Mã chỉ tồn tại trong bộ nhớ và hết hạn sau ít phút. Không chia sẻ ảnh này.</p>`);
+      return;
+    }
+  }
+  setDataState("error", "Chưa tạo được mã QR. Kiểm tra log của tiến trình rồi thử lại.");
+}
+
+// Trạng thái phiên: chỉ hiển thị thông tin mô tả. Nội dung phiên (thông tin xác
+// thực) không bao giờ được trả về trình duyệt.
+async function showZcaSessionStatus() {
+  const zca = bots.find((bot) => bot.providerType === "zca");
+  showDialog("Phiên Zalo cá nhân", `<div class="detail-grid"><div class="detail"><span>Danh tính</span><strong>${escapeHtml(zca?.label || "-")}</strong></div><div class="detail"><span>UID</span><code>${escapeHtml(zca?.uid || "chưa rõ")}</code></div><div class="detail"><span>Trạng thái</span><strong>${escapeHtml(providerStatusLabel(zca?.status))}</strong></div><div class="detail"><span>Đã xác thực</span><strong>${zca?.health?.authenticated ? "Có" : "Không"}</strong></div></div><p class="muted">Phiên được lưu trên máy chủ và nội dung của nó không bao giờ được hiển thị. Xoá phiên bằng nút bên dưới nếu cần đăng nhập tài khoản khác.</p><div class="row-actions"><button type="button" class="danger-text" data-zca-clear-session="1">Xoá phiên đã lưu</button></div>`);
+  $$('[data-zca-clear-session]').forEach((button) => button.addEventListener("click", async () => {
+    if (!confirm("Xoá phiên Zalo cá nhân đã lưu? Lần khởi động sau cần quét mã QR lại.")) return;
+    const outcome = await runAction(async () => {
+      await api("/api/admin/providers/zca/session", { method: "DELETE" });
+      $("#detailDialog").close();
+      await loadData();
+    }, "Không xoá được phiên ZCA");
+    if (outcome.ok) setDataState("success", "Đã xoá phiên ZCA. Cần đăng nhập lại bằng QR.");
+  }));
 }
 function emptyRow(cols, text) { return `<tr><td colspan="${cols}" class="empty-state">${escapeHtml(text)}</td></tr>`; }
 // Nhãn ngày đích: 0 = homnay, 1 = homsau. Dùng thống nhất với chat.

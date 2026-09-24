@@ -355,6 +355,216 @@ Blocks are separated by a blank line so the existing `sendMessage()` chunker sti
 Public `/help` is grouped by category:
 
 ```text
+## ZCA Personal Account Provider
+
+An **additional** messaging provider that connects a **personal Zalo account** using
+[`zca-js`](https://www.npmjs.com/package/zca-js). It runs **alongside** the official
+Zalo Bot Platform bots in the same process, sharing all command, schedule and
+notification logic. It does not replace them and it does not lift any official
+platform limit.
+
+> **Unofficial integration — read this first.** `zca-js` is not an official Zalo
+> SDK. It drives a personal account the way a logged-in client would. Using it can
+> carry **account and platform compatibility risk**: behaviour can change without
+> notice, and an account may be challenged or restricted. Use it on an account you
+> are willing to take that risk with, and prefer a dedicated account over a
+> personal one.
+
+### 1. What it is
+
+A provider adapter around `zca-js`. It logs in with a QR code, keeps a session on
+disk, listens for incoming messages over a WebSocket and sends replies through the
+same personal account.
+
+### 2. How it differs from an official bot
+
+| | Official bot | ZCA personal account |
+| --- | --- | --- |
+| Platform | Zalo Bot Platform | A normal personal Zalo account |
+| Credential | A bot token | A QR-authenticated session (cookie + IMEI + user agent) |
+| Identity | `bot1` / `bot2` / `bot3` | `zca:<Zalo UID>` |
+| Dashboard card | "Bot chính thức" | "Tài khoản Zalo cá nhân" |
+| Limits | Platform limits apply, unchanged | No platform bot quota — it is an ordinary account |
+| Stability | Vendor-supported | Unofficial; may break |
+
+The ZCA account is **never** presented as an official bot, and it has no token to
+display. It is a separate identity with its own storage namespace, so its users and
+chats never mix with bot 1's.
+
+### 3. How to enable it
+
+```env
+ZCA_ENABLED=true
+ZCA_SESSION_PATH=./data/zca-session
+ZCA_AUTO_RECONNECT=true
+ZCA_LANGUAGE=vi
+# ZCA_DISPLAY_NAME=            # optional label when the account name is unknown
+# ZCA_NAME_TIMEOUT_MS=5000     # name lookup timeout; never blocks startup
+```
+
+Then install the dependency and start as usual:
+
+```bash
+npm install
+npm start
+```
+
+ZCA is off unless `ZCA_ENABLED` is truthy (`1`, `true`, `yes`, `on`). Disabled, the
+official bots behave exactly as before.
+
+### 4. First QR login
+
+1. Start the process. With no saved session the log shows:
+   `[ZCA][zca:pending] CẦN QUÉT MÃ QR: ...`
+2. Open the admin dashboard → **Tổng quan**. The ZCA card shows
+   `Cần quét mã QR` and a **Đăng nhập bằng QR** button.
+3. Press it, then scan the displayed code with Zalo on your phone:
+   **Cá nhân → Thiết bị đăng nhập → quét mã**.
+4. On success the card switches to `Đang hoạt động`, and the log shows
+   `[ZCA][zca:<uid>] danh tính: zca:pending → zca:<uid>`.
+
+The QR image lives only in the process memory. It is never written to disk and is
+only served through the authenticated admin API. Treat a QR screenshot like a
+password.
+
+On a headless VPS the dashboard is the practical way to scan. If you cannot reach
+the dashboard, `zca-js` can also write the QR to a file via its `qrPath` option,
+but this project does not enable that by default because it leaves a credential
+artifact on disk.
+
+### 5. Session persistence
+
+`zca-js` exposes exactly two login paths, and this project uses both:
+
+- `zalo.loginQR(options, callback)` — first-time login. The callback's
+  `GotLoginInfo` event yields `{ cookie, imei, userAgent }`.
+- `zalo.login(credentials)` — restores that same object on later starts.
+
+The session is written atomically (temp file + rename) so a PM2 restart mid-write
+cannot leave a truncated credential file.
+
+### 6. Linux / VPS setup
+
+```bash
+mkdir -p ./data/zca-session
+chmod 700 ./data/zca-session
+```
+
+The session file is written with mode `0600` where the filesystem supports it. On
+a shared host, make sure the deploy user is the only one who can read `data/`.
+
+### 7. PM2 restart behaviour
+
+The session is restored automatically after a normal restart. Nothing else is
+required:
+
+```bash
+pm2 restart zalo-bot
+pm2 logs zalo-bot --lines 50   # look for "[ZCA] khôi phục phiên thành công"
+```
+
+A session lock (`data/zca-session/session.lock`) prevents two processes from using
+the same session at once. A stale lock from a crashed process is reclaimed
+automatically on the next start. **Do not run two instances against one session** —
+they will disconnect each other.
+
+### 8. Dashboard status
+
+The ZCA card reports the account label, UID, authentication state and runtime
+status. Statuses you may see:
+
+| Status | Meaning |
+| --- | --- |
+| `disabled` | `ZCA_ENABLED` is not set |
+| `starting` | Boot in progress |
+| `waiting_for_qr` / `authentication_required` | Needs a QR scan |
+| `authenticated` | Logged in, listener starting |
+| `connected` | Listening for messages |
+| `reconnecting` | Dropped, retrying with backoff |
+| `disconnected` | Stopped, or retries exhausted |
+| `error` | Startup or lock failure |
+
+### 9. Account and session security
+
+- `data/` is in `.gitignore`; **never** commit a session file.
+- The session is never logged, never returned by any API, and never rendered in
+  the dashboard. Logs and API responses carry only a UID and a presence flag.
+- QR login and session clearing sit behind the existing admin authentication.
+- The session grants full access to the account. If you suspect it leaked, delete
+  `data/zca-session/` and remove the device from Zalo → **Thiết bị đăng nhập**.
+
+### 10. Troubleshooting
+
+| Symptom | Cause and fix |
+| --- | --- |
+| Stays on `authentication_required` | No valid session. Scan the QR again. |
+| `phiên đã lưu không dùng được` | The session expired or was invalidated. It is deleted automatically; log in again. |
+| `không giành được khóa phiên` | Another process holds the session lock. Stop the duplicate instance. |
+| Messages arrive but nothing replies | Check `selfListen` is off (it is by default) and that the message is not from the account itself. |
+| Reconnect attempts stop | The bounded retry gave up after repeated failures. Restart the process, or log in again if auth failed. |
+
+### 11. Listener conflicts with Zalo Web / PC
+
+Opening the same account in **Zalo Web or Zalo PC** while the bot is running will
+usually disconnect the listener. `zca-js` reports this as close code `3000`
+(duplicate connection) or `3003` (kicked). The log states the reason explicitly:
+
+```
+[ZCA][zca:...] listener ngắt kết nối: 3000 (trùng kết nối — có nơi khác đang dùng cùng phiên ZCA ...)
+```
+
+Reconnection is deliberately paced rather than immediate — retrying instantly
+would just fight the other session. For reliable operation, **use the account for
+the bot only** and do not open it in Zalo Web/PC.
+
+### 12. How to disable ZCA
+
+Set `ZCA_ENABLED=false` (or remove it) and restart. The official bots and the
+dashboard are unaffected, and no session data is touched. To also remove the
+credentials, delete `data/zca-session/`.
+
+### 13. How the providers run together
+
+All providers are registered in one registry and started independently:
+
+```
+Official Bot #1 ─┐
+Official Bot #2 ─┤
+Official Bot #N ─┼── shared command / schedule / notification logic
+ZCA account    ─┘
+```
+
+- **One command engine.** There is no separate `zcaCommands.js`. Incoming events
+  from every provider are normalised into the same internal message shape, so
+  `/lich`, `/help`, `/start` and the rest work identically through either.
+- **Replies follow the transport.** Each message is handled inside its own
+  provider's context, so a reply goes back through the provider that received it.
+  A ZCA user's answer is never sent from an official bot, and vice versa.
+- **Separate identities.** Storage keys are namespaced per provider. The same
+  User ID or Chat ID under bot 1 and under ZCA are different people and stay
+  separate in the dashboard, filters, details and updates.
+- **Failure isolation.** A provider crash never stops the others and never calls
+  `process.exit`. A ZCA listener drop leaves the official bots and the dashboard
+  running; an official bot failure leaves ZCA running. If the ZCA login fails at
+  startup, the process still boots and the dashboard reports
+  `Cần đăng nhập`.
+- **No shared scheduler.** The existing scheduler is reused. A scheduled record
+  resolves the provider that owns it, so official notifications still go out
+  through their original official bot and ZCA notifications go through ZCA.
+
+### Official Bot Platform limits are unchanged
+
+Adding ZCA does **not** modify official API requests or attempt to evade any
+server-side permission check. If an official bot receives:
+
+```
+EZALO 422 You are not permitted to send messages to this chat_id
+```
+
+that stays an official-provider error, handled exactly as before and isolated from
+ZCA. ZCA is an independent provider on an independent account; it is not a way
+around the official platform's quota.
+
 # ZALOBOT HƯỚNG DẪN
 
 ## BẮT ĐẦU        /start, /luumssv

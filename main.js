@@ -101,6 +101,8 @@ const { DEFAULT_SHUTDOWN_TIMEOUT_MS, createShutdownController } = require("./shu
 const { recordSystemLog } = require("./operationalLog");
 const { getConfiguredAdminIds, isConfiguredAdmin } = require("./adminSettings");
 const { LEGACY_BOT_ID, extractBotName, normalizeBotId, resolveBotConfigs, resolveBotDisplayName, scopeKey } = require("./bots");
+const { createOfficialProvider } = require("./providers/officialProvider");
+const { createZcaProvider } = require("./providers/zca/zcaProvider");
 const {
     bindBot,
     describeRegisteredBots,
@@ -109,6 +111,7 @@ const {
     listBots,
     listEnabledBots,
     registerBots,
+    rekeyBot,
     runWithBot
 } = require("./botContext");
 
@@ -117,6 +120,13 @@ const isTestEnv = process.env.NODE_ENV === "test" || require.main !== module;
 // Cấu hình nhiều bot trên cùng một codebase và một Firestore database.
 // BOT_TOKEN cũ vẫn là đường tương thích của bot 1; thiếu BOT_2_TOKEN/BOT_3_TOKEN
 // chỉ đơn giản là bot đó tắt.
+// Đọc cờ bật/tắt từ .env. Chấp nhận các cách viết thường gặp để tránh việc
+// ZCA_ENABLED=false lại bị hiểu là bật.
+function isTruthyEnv(value) {
+    const raw = String(value == null ? "" : value).trim().toLowerCase();
+    return ["1", "true", "yes", "on"].includes(raw);
+}
+
 const botConfigResult = resolveBotConfigs(process.env);
 
 // Bot 1 là danh tính gốc: nó sở hữu không gian khóa cũ và là đường tương thích
@@ -131,29 +141,42 @@ if (botConfigResult.bots.length === 0 || !hasLegacyBot) {
 }
 for (const warning of botConfigResult.warnings) console.log(`[Bots] ${warning}`);
 
-// Một runtime cho mỗi bot đang bật: client riêng, con trỏ polling riêng, handler
-// riêng. Không bao giờ dùng chung một token cho hai bot.
-function createBotRuntime(config) {
-    return {
-        botId: config.botId,
-        token: config.token,
-        source: config.source,
-        fingerprint: config.fingerprint,
-        configuredName: config.configuredName || null,
-        verifiedName: config.verifiedName || null,
-        displayName: config.displayName || config.configuredName || config.botId,
-        enabled: true,
-        client: new ZaloBot(config.token, { polling: false }),
-        monthlyMessageWarning: config.monthlyMessageWarning,
-        status: "starting",
-        lastError: null,
-        lastErrorAt: null,
-        pollingStartedAt: null
-    };
-}
+// Một nhà cung cấp cho mỗi bot chính thức đang bật: client riêng, con trỏ polling
+// riêng, handler riêng. Không bao giờ dùng chung một token cho hai bot.
+//
+// Hành vi không đổi so với trước — vẫn là node-zalo-bot — nhưng nay được đặt sau
+// giao diện nhà cung cấp chung để ZCA chạy song song mà không phải sửa logic.
+const officialProviders = botConfigResult.bots.map((config) => createOfficialProvider(config));
 
-const botRuntimes = botConfigResult.bots.map((config) => createBotRuntime(config));
-registerBots(botRuntimes);
+// Nhà cung cấp ZCA — tài khoản Zalo CÁ NHÂN qua zca-js. Tắt mặc định.
+//
+// Đây là nhà cung cấp độc lập, KHÔNG thay thế và không nới giới hạn của các bot
+// chính thức. Lỗi của nó không bao giờ được làm dừng phần còn lại của hệ thống.
+const zcaProvider = createZcaProvider({
+    enabled: isTruthyEnv(process.env.ZCA_ENABLED),
+    sessionPath: process.env.ZCA_SESSION_PATH,
+    autoReconnect: process.env.ZCA_AUTO_RECONNECT === undefined ? true : isTruthyEnv(process.env.ZCA_AUTO_RECONNECT),
+    displayName: process.env.ZCA_DISPLAY_NAME || null,
+    language: process.env.ZCA_LANGUAGE || "vi",
+    // Tin nhắn ZCA phải chạy trong ngữ cảnh của CHÍNH nhà cung cấp ZCA.
+    //
+    // handleIncomingMessage() gửi phản hồi qua currentProvider(), mà nó lấy nhà
+    // cung cấp từ ngữ cảnh. Listener của zca-js gọi lại từ ngoài mọi ngữ cảnh, nên
+    // thiếu bước này thì ngữ cảnh rơi về mặc định là bot 1 và phản hồi cho người
+    // dùng ZCA bị gửi nhầm bằng bot chính thức.
+    //
+    // Dùng runWithBot (chạy ngay) chứ KHÔNG phải bindBot (trả về hàm bọc dùng cho
+    // event handler) — bindBot ở đây sẽ khiến handler không bao giờ được gọi.
+    onMessage: (provider, message) => runWithBot(provider, () => handleIncomingMessage(provider, message)),
+    // UID chỉ biết được sau khi đăng nhập, nên danh tính đăng ký được đổi khóa
+    // ngay tại đây. Mọi bản ghi về sau dùng khóa "zca:<uid>" thật.
+    onIdentityChanged: (provider, newBotId, previousBotId) => {
+        const moved = rekeyBot(previousBotId, newBotId);
+        console.log(`[ZCA] danh tính: ${previousBotId} → ${newBotId}${moved ? "" : " (giữ nguyên khóa cũ)"}`);
+    }
+});
+
+registerBots([...officialProviders, zcaProvider]);
 
 // Hỏi Zalo tên thật của từng bot bằng chính token của bot đó (getMe).
 //
@@ -173,11 +196,17 @@ function withTimeout(promise, ms, label) {
 async function resolveBotNames() {
     await Promise.all(listBots().map(async (runtime) => {
         try {
-            if (typeof runtime.client?.getMe !== "function") return;
-            const response = await withTimeout(Promise.resolve(runtime.client.getMe()), BOT_NAME_TIMEOUT_MS, `${runtime.botId} getMe`);
+            // Mỗi nhà cung cấp tự biết cách lấy tên của mình: bot chính thức hỏi
+            // Zalo Bot Platform bằng token; tài khoản cá nhân đã có tên từ phiên.
+            if (typeof runtime.fetchIdentityName !== "function") return;
+            const response = await withTimeout(
+                Promise.resolve(runtime.fetchIdentityName()),
+                BOT_NAME_TIMEOUT_MS,
+                `${runtime.botId} fetchIdentityName`
+            );
             const name = extractBotName(response);
             if (!name) {
-                console.warn(`[Bots] ${runtime.botId}: getMe không trả về tên; dùng nhãn cấu hình.`);
+                console.warn(`[${runtime.botId}]: không lấy được tên; dùng nhãn cấu hình.`);
                 return;
             }
             runtime.verifiedName = name;
@@ -186,10 +215,10 @@ async function resolveBotNames() {
                 verifiedName: name,
                 configuredName: runtime.configuredName
             });
-            console.log(`[Bots] ${runtime.botId}: tên từ Zalo = ${name}`);
+            console.log(`[${runtime.botId}]: tên từ Zalo = ${name}`);
         } catch (error) {
-            // Lỗi tra tên chỉ là thông tin: bot vẫn chạy với nhãn cấu hình/botId.
-            console.warn(`[Bots] ${runtime.botId}: không lấy được tên bot (${error.message}); dùng nhãn cấu hình.`);
+            // Lỗi tra tên chỉ là thông tin: nhà cung cấp vẫn chạy với nhãn cấu hình.
+            console.warn(`[${runtime.botId}]: không lấy được tên (${error.message}); dùng nhãn cấu hình.`);
         }
     }));
 }
@@ -241,12 +270,31 @@ function logDiscord(level, message) {
 
 // Client Zalo của bot đang xử lý. Không có ngữ cảnh thì rơi về bot 1 — đây là
 // đường tương thích cho mọi lối gọi cũ và cho bản triển khai một token.
-function currentClient() {
+// Nhà cung cấp đang xử lý. Mọi lần gửi đi qua đây, nên phản hồi luôn đi ra bằng
+// ĐÚNG nhà cung cấp đã nhận tin nhắn — không bao giờ trả lời người dùng ZCA bằng
+// một bot chính thức hay ngược lại.
+function currentProvider() {
     const runtime = getCurrentBot();
-    if (!runtime || !runtime.client) {
-        throw new Error("Không xác định được bot nào để gửi tin nhắn");
+    if (!runtime) {
+        throw new Error("Không xác định được nhà cung cấp nào để gửi tin nhắn");
     }
-    return runtime.client;
+    if (typeof runtime.sendMessage === "function") return runtime;
+    // Tương thích: runtime cũ chỉ có trường client của node-zalo-bot.
+    if (runtime.client) {
+        return { ...runtime, sendMessage: (chatId, text, options) => runtime.client.sendMessage(chatId, text, options), supportsMarkdown: true };
+    }
+    throw new Error("Nhà cung cấp hiện tại không gửi được tin nhắn");
+}
+
+// Chuyển nội dung có markdown của Zalo Bot Platform sang plain text.
+//
+// Dùng cho hai việc: gửi lại khi markdown bị từ chối, và cho những nhà cung cấp
+// không hiểu markdown (tài khoản Zalo cá nhân qua ZCA).
+function toPlainText(text) {
+    return String(text)
+        .replace(/\{(?:green|red|orange|blue)\}(.*?)\{\/(?:green|red|orange|blue)\}/g, "$1")
+        .replace(/^#+\s+/gm, "")
+        .replace(/\\([\\*_~`>])/g, "$1");
 }
 
 async function sendMessage(chatId, text, options = {}) {
@@ -283,26 +331,32 @@ async function sendMessage(chatId, text, options = {}) {
         }
     }
     if (current.trim()) chunks.push(current.trim());
+    const provider = currentProvider();
+    // Nhà cung cấp không hiểu markdown của Zalo Bot Platform (tài khoản cá nhân
+    // qua ZCA) nhận plain text ngay từ đầu, thay vì gửi lỗi rồi gửi lại.
+    const supportsMarkdown = provider.supportsMarkdown !== false;
+    const sendOptions = supportsMarkdown ? messageOptions : { ...otherOptions };
     for (let index = 0; index < chunks.length; index += 1) {
         const prefix = index > 0 && continuationHeader ? `${continuationHeader}\n\n` : "";
-        const payload = `${prefix}${chunks[index]}`;
+        const rawPayload = `${prefix}${chunks[index]}`;
+        const payload = supportsMarkdown ? rawPayload : toPlainText(rawPayload);
         const commandContext = dashboardCommandContext.getStore();
         if (commandContext && String(commandContext.chatId) === String(chatId)) {
             commandContext.messages.push({ chatId: String(chatId), text: payload });
         }
         try {
-            await Promise.resolve(currentClient().sendMessage(chatId, payload, messageOptions));
+            await Promise.resolve(provider.sendMessage(chatId, payload, sendOptions));
         } catch (error) {
-            const permanentChatError = Number(error?.response?.statusCode || error?.statusCode || 0) === 410 || /410\s+The chat_id is invalid/i.test(String(error?.message || ""));
-            if (messageOptions.parse_mode && !permanentChatError) {
+            // Nhà cung cấp tự quyết định lỗi nào là vĩnh viễn (ví dụ 410 của Zalo
+            // Bot Platform). ZCA không dùng chung cách nhận diện đó.
+            const permanentChatError = typeof provider.isPermanentChatError === "function"
+                ? provider.isPermanentChatError(error)
+                : false;
+            if (sendOptions.parse_mode && !permanentChatError) {
                 console.warn(`Lỗi gửi markdown Zalo (${error.message}), đang gửi lại dạng plain text...`);
-                const plainPayload = payload
-                    .replace(/\{(?:green|red|orange|blue)\}(.*?)\{\/(?:green|red|orange|blue)\}/g, "$1")
-                    .replace(/^#+\s+/gm, "")
-                    .replace(/\\([\\*_~`>])/g, "$1");
                 const fallbackOptions = { ...otherOptions };
                 delete fallbackOptions.parse_mode;
-                await Promise.resolve(currentClient().sendMessage(chatId, plainPayload, fallbackOptions));
+                await Promise.resolve(provider.sendMessage(chatId, toPlainText(payload), fallbackOptions));
             } else {
                 throw error;
             }
@@ -1520,14 +1574,17 @@ function cancelSchedulerJobs() {
 // node-zalo-bot không có stopPolling công khai; instance Polling nội bộ có stop().
 // Chỉ gọi khi thư viện thực sự cung cấp, không tự phát minh API.
 // Hủy yêu cầu long-poll đang chờ để không phải đợi hết timeout của Zalo.
+// Dừng MỘT nhà cung cấp. Mỗi nhà cung cấp tự biết cách dừng; nếu nó không cung
+// cấp stop() thì thử cách cũ của node-zalo-bot.
 function stopOneBotPolling(runtime) {
+    if (runtime && typeof runtime.stop === "function") return Promise.resolve(runtime.stop());
     const client = runtime?.client;
     if (client && typeof client.stopPolling === "function") return Promise.resolve(client.stopPolling());
     const polling = client && client._polling;
     if (polling && typeof polling.stop === "function") {
         return Promise.resolve(polling.stop({ cancel: true, reason: "Bot is shutting down" }));
     }
-    console.warn(`[Runtime] ${runtime?.botId || "?"}: thư viện Zalo không cung cấp API dừng polling; bỏ qua bước này.`);
+    console.warn(`[Runtime] ${runtime?.botId || "?"}: không có API dừng; bỏ qua bước này.`);
     return Promise.resolve();
 }
 
@@ -1653,7 +1710,33 @@ async function startRuntime() {
             chatId,
             "# {orange}[ADMIN TEST]{/orange}\n\nĐang kiểm tra khả năng gửi thông báo tới cuộc trò chuyện này.",
             { feature: "broadcast", operation: "admin_dashboard_retry", bypassEligibility: true }
-        )
+        ),
+
+        // Đăng nhập QR cho tài khoản Zalo cá nhân, chỉ qua API đã xác thực admin.
+        getZcaQr: () => (zcaProvider.enabled ? zcaProvider.getQr() : null),
+
+        // Bắt đầu đăng nhập QR rồi trả về NGAY. loginQR() chỉ kết thúc khi người
+        // dùng quét xong, nên chờ nó sẽ treo request của dashboard.
+        beginZcaLogin: async () => {
+            if (!zcaProvider.enabled) {
+                return { ok: false, error: "ZCA đang tắt. Đặt ZCA_ENABLED=true rồi khởi động lại." };
+            }
+            if (zcaProvider.getStatus().authenticated) {
+                return { ok: true, already: true, status: zcaProvider.getStatus() };
+            }
+            // Không await: chạy nền, dashboard hỏi /qr để lấy ảnh.
+            zcaProvider.beginQrLogin().catch((error) => {
+                console.error(`[ZCA] đăng nhập QR thất bại: ${error.message}`);
+            });
+            return { ok: true, started: true };
+        },
+
+        clearZcaSession: async () => {
+            if (!zcaProvider.enabled) return { ok: false, error: "ZCA đang tắt." };
+            await zcaProvider.stop();
+            const cleared = zcaProvider.clearSession();
+            return { ok: cleared, cleared };
+        }
     });
     await new Promise((resolve, reject) => {
         adminRuntime.server.once("error", reject);
@@ -1670,28 +1753,37 @@ async function startRuntime() {
     // không được ngăn bot khởi động.
     await resolveBotNames();
 
-    // Bước 5: polling Zalo sau cùng — mỗi bot một consumer riêng, không dùng
-    // chung token nên không bao giờ có hai consumer trên cùng một danh tính.
+    // Bước 5: khởi động từng nhà cung cấp ĐỘC LẬP.
+    //
+    // Ranh giới lỗi nằm ở đây: một nhà cung cấp hỏng không được ngăn những nhà
+    // cung cấp khác chạy. Cụ thể, ZCA chưa đăng nhập hoặc listener lỗi chỉ khiến
+    // ZCA ở trạng thái riêng của nó, còn bot chính thức và dashboard vẫn chạy.
     const started = [];
+    const failed = [];
     for (const runtime of listEnabledBots()) {
         try {
-            await runtime.client.startPolling();
-            runtime.pollingStartedAt = new Date().toISOString();
-            runtime.status = "running";
+            await runtime.start();
             started.push(runtime.botId);
-            console.log(`[Runtime] ${runtime.botId}: Zalo polling started (${TIME_ZONE})`);
+            console.log(`[Runtime] ${runtime.botId}: đã khởi động (${runtime.providerType || "official"})`);
         } catch (error) {
+            failed.push({ botId: runtime.botId, message: error.message });
             runtime.status = "polling_failed";
             runtime.lastError = error.message;
             runtime.lastErrorAt = new Date().toISOString();
-            console.error(`[Runtime] ${runtime.botId}: không khởi động được polling - ${error.message}`);
-            logDiscord("ERROR", `polling_start_failed[${runtime.botId}]: ${error.message}`);
+            console.error(`[Runtime] ${runtime.botId}: không khởi động được - ${error.message}`);
+            logDiscord("ERROR", `provider_start_failed[${runtime.botId}]: ${error.message}`);
         }
     }
-    if (started.length === 0) {
-        throw new Error("Không bot nào khởi động được polling Zalo");
+
+    // Chỉ coi là lỗi chí mạng khi KHÔNG nhà cung cấp CHÍNH THỨC nào lên được:
+    // đó mới là hệ thống hỏng. ZCA hỏng một mình là trạng thái bình thường và
+    // được báo cáo trên dashboard.
+    const startedOfficial = started.filter((botId) => !botId.startsWith("zca:"));
+    if (startedOfficial.length === 0) {
+        throw new Error(`Không bot chính thức nào khởi động được: ${failed.map((item) => `${item.botId} (${item.message})`).join("; ")}`);
     }
-    logDiscord("INFO", `Bot đã khởi động - timezone ${TIME_ZONE} - bots: ${started.join(", ")}`);
+
+    logDiscord("INFO", `Đã khởi động - timezone ${TIME_ZONE} - providers: ${started.join(", ")}`);
     await flushPersistenceWrites();
 }
 
@@ -1757,9 +1849,14 @@ async function handleIncomingMessage(runtime, msg) {
     await flushPersistenceWrites();
 }
 
-// Đăng ký handler riêng cho từng bot. Mọi handler chạy trong ngữ cảnh của chính
-// bot đó, nên phản hồi luôn đi ra bằng đúng danh tính đã nhận tin nhắn.
+// Đăng ký handler cho MỘT nhà cung cấp chính thức. Mọi handler chạy trong ngữ
+// cảnh của chính nhà cung cấp đó, nên phản hồi luôn đi ra bằng đúng danh tính đã
+// nhận tin nhắn.
+//
+// Nhà cung cấp không phải chính thức (ZCA) tự gắn listener của nó bên trong
+// provider và gọi lại qua `onMessage`, nên không đi qua đường này.
 function registerBotHandlers(runtime) {
+    if (!runtime?.client || typeof runtime.client.on !== "function") return runtime;
     const label = runtime.botId;
     runtime.client.on("message", bindBot(runtime, asyncCommand((msg) => handleIncomingMessage(runtime, msg))));
 
@@ -1799,6 +1896,10 @@ module.exports = {
     closeDashboardServer,
     formatGeneralHelp,
     formatAdminHelp,
+    // Dùng cho bài kiểm tra cách ly nhà cung cấp: chứng minh phản hồi đi ra bằng
+    // ĐÚNG nhà cung cấp đã nhận tin nhắn.
+    handleIncomingMessage,
+    sendMessage,
     registerShutdownHandlers,
     stopZaloPolling,
     getBroadcastTargets,

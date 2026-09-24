@@ -154,9 +154,15 @@ test("mô tả bot không bao giờ chứa token", () => {
         assert.ok(!serialized.includes(token), `mô tả bot bị lộ token ${token}`);
     }
     for (const bot of described) {
-        assert.equal(typeof bot.tokenFingerprint, "string");
-        assert.equal(bot.tokenFingerprint.length, 8);
-        assert.equal(bot.token, undefined);
+        assert.equal(bot.token, undefined, "mô tả không được chứa token");
+        if (bot.providerType === "official") {
+            assert.equal(typeof bot.tokenFingerprint, "string");
+            assert.equal(bot.tokenFingerprint.length, 8);
+        } else {
+            // Tài khoản cá nhân không có token: không bao giờ được bịa ra một cái.
+            assert.equal(bot.tokenFingerprint, null);
+            assert.equal(bot.isPersonalAccount, true);
+        }
     }
 });
 
@@ -349,7 +355,7 @@ test("dừng polling dừng mọi bot, một bot lỗi không chặn bot khác",
 
     try {
         const stopped = await main.stopZaloPolling();
-        assert.equal(stopped, 2, "phải thử dừng cả hai bot");
+        assert.equal(stopped, listBots().length, "phải thử dừng mọi nhà cung cấp đã đăng ký");
         assert.deepEqual(calls.sort(), [TOKEN_1, TOKEN_2].sort());
     } finally {
         ZaloBot.prototype.stopPolling = original;
@@ -372,6 +378,9 @@ test("khởi động polling cho mọi bot đang bật", async () => {
     }
 });
 
-test("listBots luôn trả về các bot đã đăng ký", () => {
-    assert.deepEqual(listBots().map((bot) => bot.botId).sort(), ["bot1", "bot2"]);
+test("listBots trả về mọi nhà cung cấp đã đăng ký, gồm cả ZCA", () => {
+    const ids = listBots().map((bot) => bot.botId).sort();
+    assert.ok(ids.includes("bot1") && ids.includes("bot2"), "phải có hai bot chính thức");
+    // ZCA đăng ký dưới khóa tạm cho tới khi đăng nhập mới biết UID thật.
+    assert.ok(ids.some((id) => id.startsWith("zca:")), "phải có nhà cung cấp ZCA");
 });
