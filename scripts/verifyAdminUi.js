@@ -81,7 +81,19 @@ if (!app.includes("function botCell")) fail("Dashboard must render a Bot column"
 if (!app.includes("${botCell(")) fail("Users and Chat directory rows must use the Bot column");
 // Thao tác quản trị phải báo lỗi ra giao diện thay vì để Promise bị từ chối âm thầm.
 if (!app.includes("async function runAction")) fail("Dashboard actions must be wrapped so failures are reported");
-if (!/data-chat-bot|data-user-bot/.test(app)) fail("Row actions must carry the bot id");
+// Mọi thao tác trên dòng phải mang theo NGUỒN ĐÃ XÁC MINH, và phải đi qua
+// actionButton() — nơi chặn thao tác khi nguồn chưa xác minh. Không được truyền
+// nhãn hiển thị làm căn cứ định tuyến.
+if (!app.includes("function actionButton")) fail("Row actions must go through actionButton so unverified sources can be blocked");
+if (!app.includes("data-record-bot")) fail("Row actions must carry the verified source id");
+if (!app.includes("function requireVerifiedSource")) fail("Opening a detail view must refuse an unverified source");
+if (!app.includes("function recordSourceVerified")) fail("Dashboard must expose verified-source state");
+if (!app.includes("UNVERIFIED_BOT_ID")) fail("Dashboard must give unverified records their own filter bucket");
+if (!/bot-chip-unverified/.test(app)) fail("Unverified sources must be visually distinct from a real bot");
+// Danh tính ZCA phải được chấp nhận: trước đây regex chỉ nhận botN nên ZCA bị đổi
+// thành bot1 — đúng lỗi đang sửa.
+if (!/zca:/.test(app)) fail("Dashboard must recognise zca:<uid> identities instead of relabelling them as bot1");
+if (/return \/\^bot\\d\+\$\/\.test\(value\) \? value : LEGACY_BOT_ID/.test(app)) fail("Dashboard must not default a missing botId to bot1");
 // Bộ chọn người nhận không được gộp hai bot làm một.
 if (!app.includes("const keyOf = (user)")) fail("Target user merging must key by (bot, user), not userId alone");
 if (!app.includes("botLabel(recordBotId(user))")) fail("Target user options must show which bot they belong to");
@@ -94,9 +106,26 @@ if (!app.includes("/api/admin/providers/zca/login")) fail("Dashboard must offer 
 if (!/uid/.test(app)) fail("Dashboard must show the ZCA account UID");
 // Không được tham chiếu tới các trường BÍ MẬT của phiên ZCA. Chỉ kiểm tra đúng
 // tên các trường nhạy cảm — chữ "phiên"/"session" xuất hiện hợp lệ trong nhãn UI.
-if (/session\.json|sessionFilePath|\bimei\b|userAgent|zpsid/i.test(app)) fail("Dashboard must never reference ZCA session secrets");
+if (!/session\.json|sessionFilePath|\bimei\b|userAgent|zpsid/i.test(app)) { /* ok */ } else fail("Dashboard must never reference ZCA session secrets");
+// Feedback / Support: danh tính hội thoại phải là (botId, ticketId), và trạng thái
+// gửi phải phản ánh thật — không bao giờ báo "đã gửi" khi Zalo từ chối.
+if (!html.includes('data-tab="feedback"')) fail("Dashboard must expose a Feedback / Support tab");
+if (!html.includes('data-panel="feedback"')) fail("Dashboard must render the feedback panel");
+if (!app.includes("function renderFeedback")) fail("Dashboard must render the feedback list");
+if (!app.includes("function renderFeedbackDetail")) fail("Dashboard must render a ticket thread");
+// Mọi lời gọi API hỗ trợ phải kèm botId.
+if (!/feedback\/detail\?botId=/.test(app)) fail("Opening a ticket must send botId");
+if (!/body: JSON\.stringify\(\{ botId: selectedFeedback\.botId/.test(app)) fail("Reply and status changes must send botId");
+if (!app.includes("replyDeliveryBadge")) fail("Dashboard must show per-reply delivery status");
+if (!app.includes('badge("Gửi lỗi"')) fail("Dashboard must show a delivery failure instead of success");
+// Nội dung do người dùng gửi phải được escape trước khi chèn vào DOM.
+if (!/feedbackSnippet[\s\S]{0,200}escapeHtml/.test(app)) fail("Feedback content must be escaped before rendering");
+if (!/escapeHtml\(item\.message\)/.test(app)) fail("Thread messages must be escaped before rendering");
 if (!app.includes("function renderBotGrid")) fail("Dashboard must show per-bot status");
-if (!app.includes("data-chat-bot")) fail("Chat row actions must carry the bot id, or a bot-2 chat opens bot-1's record");
+// Chat/subscription vẫn phải gửi botId lên API khi thao tác; chỉ đổi cách gắn
+// trên HTML (data-record-bot) để mọi nút đi qua actionButton và bị chặn khi chưa
+// xác minh nguồn.
+if (!/data-record-bot/.test(app)) fail("Chat row actions must carry the verified source id, or a bot-2 chat opens bot-1's record");
 if (!app.includes("botId: recordBotId(")) fail("Chat and subscription writes must send the bot id");
 // Lệnh gửi tin phải có bot, và người nhận phải thuộc đúng bot đó.
 if (!app.includes('$("#commandBot")')) fail("Command console must require an explicit bot selection");

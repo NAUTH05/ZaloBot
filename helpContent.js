@@ -204,6 +204,16 @@ const HELP_COMMANDS = [
         examples: ["/myid"]
     },
     {
+        command: "feedback",
+        usage: "/feedback [nội dung]",
+        group: HELP_GROUPS.PUBLIC,
+        category: CATEGORY.HELP,
+        permission: "user",
+        description: "Gửi góp ý hoặc yêu cầu hỗ trợ tới quản trị viên.",
+        examples: ["/feedback Lịch học hôm nay không được gửi tới"],
+        note: "Quản trị viên trả lời ngay trong cuộc trò chuyện này. Gửi tiếp bằng /feedback [mã yêu cầu] [nội dung]."
+    },
+    {
         command: "help",
         usage: "/help",
         group: HELP_GROUPS.PUBLIC,

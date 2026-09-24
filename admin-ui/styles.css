@@ -1009,3 +1009,113 @@ dialog h3:first-of-type { margin-top: var(--s-4); }
     height: 260px;
     image-rendering: pixelated;
 }
+
+/* ---------------------------------------------------------------------------
+   Feedback / Support
+   --------------------------------------------------------------------------- */
+
+.metric-grid.compact .metric-card {
+    padding: var(--s-3);
+}
+
+.metric-grid.compact .metric-card strong {
+    font-size: var(--fs-lg, 1.25rem);
+}
+
+.feedback-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+    gap: var(--s-4);
+    align-items: start;
+}
+
+@media (max-width: 1100px) {
+    .feedback-layout {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+/* Dòng đang mở phải nhìn ra được ngay. */
+tr.row-selected {
+    background: var(--accent-soft);
+}
+
+/* Luồng hội thoại: người dùng bên trái, quản trị viên bên phải. */
+.thread-message {
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    padding: var(--s-3);
+    background: var(--surface);
+}
+
+.thread-message.from-admin {
+    border-left: 3px solid var(--accent);
+}
+
+.thread-message.from-user {
+    border-left: 3px solid var(--blue);
+}
+
+.thread-message header {
+    display: flex;
+    align-items: center;
+    gap: var(--s-2);
+    flex-wrap: wrap;
+    margin-bottom: var(--s-2);
+}
+
+.thread-message p {
+    margin: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+/* Nhắc rõ trả lời sẽ đi tới đâu, trước khi bấm gửi. */
+.reply-target {
+    border: 1px solid var(--border-strong);
+    border-radius: var(--r-md);
+    padding: var(--s-3);
+    margin-bottom: var(--s-3);
+    background: var(--bg);
+}
+
+.reply-target dl {
+    display: flex;
+    gap: var(--s-4);
+    flex-wrap: wrap;
+    margin: var(--s-2) 0 0;
+}
+
+.reply-target dt {
+    color: var(--muted);
+    font-size: var(--fs-xs, 0.75rem);
+}
+
+.reply-target dd {
+    margin: 0;
+    font-weight: 600;
+}
+
+.error-cell {
+    color: var(--danger);
+    font-size: var(--fs-sm, 0.875rem);
+    display: block;
+    margin-top: var(--s-1);
+}
+
+/* ---------------------------------------------------------------------------
+   Nguồn gốc bản ghi
+   --------------------------------------------------------------------------- */
+
+/* Bản ghi chưa xác minh nguồn: nhìn là thấy ngay, không giống một bot cụ thể. */
+.bot-chip-unverified {
+    background: var(--warning-soft, rgba(247, 181, 3, 0.16));
+    color: var(--warning, #b8860b);
+    border: 1px dashed currentColor;
+}
+
+/* Nút thao tác bị chặn vì nguồn chưa xác minh. */
+button[disabled] {
+    opacity: 0.55;
+    cursor: not-allowed;
+}

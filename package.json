@@ -1,25 +1,29 @@
 {
-  "name": "zalo-bot-lich-hoc-lhu",
-  "version": "1.0.0",
-  "private": true,
-  "description": "Zalo bot tra cứu và thông báo lịch học LHU",
-  "main": "main.js",
-  "scripts": {
-    "start": "node main.js",
-    "admin:hash-password": "node hashAdminPassword.js",
-    "migrate:firestore": "node migrateToFirestore.js recent_json",
-    "migrate:target-day": "node scripts/migrateNotificationTargetDays.js",
-    "verify:firebase-admin": "node scripts/verifyFirebaseAdmin.js",
-    "build:admin": "node scripts/verifyAdminUi.js",
-    "test": "node --test --test-force-exit",
-    "cleanup:birthday-data": "node scripts/cleanupBirthdayData.js",
-    "migrate:bot-ownership": "node scripts/migrateBotOwnership.js"
-  },
-  "dependencies": {
-    "dotenv": "^17.2.1",
-    "firebase-admin": "^14.2.0",
-    "node-schedule": "^2.1.1",
-    "node-zalo-bot": "^0.1.6",
-    "zca-js": "^2.2.0"
-  }
+    "name": "zalo-bot-lich-hoc-lhu",
+    "version": "1.0.0",
+    "private": true,
+    "description": "Zalo bot tra cứu và thông báo lịch học LHU",
+    "main": "main.js",
+    "scripts": {
+        "start": "node main.js",
+        "admin:hash-password": "node hashAdminPassword.js",
+        "migrate:firestore": "node migrateToFirestore.js recent_json",
+        "migrate:target-day": "node scripts/migrateNotificationTargetDays.js",
+        "verify:firebase-admin": "node scripts/verifyFirebaseAdmin.js",
+        "build:admin": "node scripts/verifyAdminUi.js",
+        "test": "node --test --test-force-exit",
+        "cleanup:birthday-data": "node scripts/cleanupBirthdayData.js",
+        "migrate:bot-ownership": "node scripts/migrateBotOwnership.js",
+        "audit:attribution": "node scripts/auditAttribution.js",
+        "audit:attribution-deep": "node scripts/auditAttributionDeep.js",
+        "migrate:attribution": "node scripts/reconcileAttribution.js",
+        "migrate:attribution-apply": "node scripts/reconcileAttribution.js --apply"
+    },
+    "dependencies": {
+        "dotenv": "^17.2.1",
+        "firebase-admin": "^14.2.0",
+        "node-schedule": "^2.1.1",
+        "node-zalo-bot": "^0.1.6",
+        "zca-js": "^2.2.0"
+    }
 }

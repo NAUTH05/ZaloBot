@@ -14,6 +14,12 @@ const {
 } = require("./chatDirectory");
 const { getInteractionTargets, removeInteractionMember, upsertInteractionMember } = require("./interactionRegistry");
 const {
+    getCounts: getFeedbackCounts,
+    listTickets: listFeedbackTickets,
+    markTicketRead: markFeedbackRead,
+    setTicketStatus: setFeedbackStatus
+} = require("./feedback");
+const {
     getAdminSettings,
     getConfiguredAdminIds,
     removeAdmin,
@@ -649,6 +655,89 @@ async function handleApi(request, response, url, options = {}) {
             return json(response, 400, { error: error.message });
         }
     }
+    // ---------------------------------------------------------------------
+    // Hỗ trợ / góp ý.
+    //
+    // Mọi route nằm sau requireAdmin ở trên, nên chỉ quản trị viên đã đăng nhập
+    // mới đọc và trả lời được. Danh tính hội thoại LUÔN là (botId, ticketId):
+    // thiếu botId thì từ chối, không đoán bot 1.
+    // ---------------------------------------------------------------------
+    if (url.pathname === `${API_PREFIX}/feedback` && request.method === "GET") {
+        const botId = url.searchParams.get("botId");
+        return json(response, 200, {
+            tickets: listFeedbackTickets({
+                botId: botId || null,
+                status: url.searchParams.get("status") || "all",
+                search: url.searchParams.get("search") || "",
+                unreadOnly: url.searchParams.get("unread") === "true"
+            }),
+            counts: getFeedbackCounts()
+        });
+    }
+    if (url.pathname === `${API_PREFIX}/feedback/detail` && request.method === "GET") {
+        const botId = url.searchParams.get("botId");
+        const ticketId = url.searchParams.get("ticketId");
+        if (!botId) return json(response, 400, { error: "Thiếu botId — chat ID chỉ có nghĩa trong phạm vi một bot" });
+        if (!ticketId) return json(response, 400, { error: "Thiếu ticketId" });
+        // Đọc chi tiết coi như đã xem.
+        const ticket = markFeedbackRead(botId, ticketId);
+        if (!ticket) return json(response, 404, { error: "Không tìm thấy yêu cầu trong bot này" });
+        return json(response, 200, { ticket, counts: getFeedbackCounts() });
+    }
+    if (url.pathname === `${API_PREFIX}/feedback/reply` && request.method === "POST") {
+        if (typeof options.replyToFeedback !== "function") {
+            return json(response, 503, { error: "Chức năng trả lời chưa sẵn sàng" });
+        }
+        let body;
+        try {
+            body = await readBody(request);
+        } catch (error) {
+            return json(response, 400, { error: error.message });
+        }
+        const botId = String(body?.botId || "").trim();
+        const ticketId = String(body?.ticketId || "").trim();
+        const message = String(body?.message || "").trim();
+        if (!botId) return json(response, 400, { error: "Thiếu botId" });
+        if (!ticketId) return json(response, 400, { error: "Thiếu ticketId" });
+        if (!message) return json(response, 400, { error: "Nội dung trả lời không được để trống" });
+
+        try {
+            const result = await options.replyToFeedback({
+                botId,
+                ticketId,
+                message,
+                adminName: request.admin?.displayName || request.admin?.username || "quản trị viên"
+            });
+            audit("feedback.reply", request, { ticketId, botId, result: result?.delivered ? "sent" : "failed" });
+            // Trả 200 kèm trạng thái gửi: giao diện hiển thị đúng thất bại thay vì
+            // luôn báo "đã gửi".
+            return json(response, 200, result);
+        } catch (error) {
+            audit("feedback.reply", request, { ticketId, botId, result: "error", error: error.message });
+            return json(response, 400, { error: error.message });
+        }
+    }
+    if (url.pathname === `${API_PREFIX}/feedback/status` && request.method === "POST") {
+        let body;
+        try {
+            body = await readBody(request);
+        } catch (error) {
+            return json(response, 400, { error: error.message });
+        }
+        const botId = String(body?.botId || "").trim();
+        const ticketId = String(body?.ticketId || "").trim();
+        const status = String(body?.status || "").trim();
+        if (!botId) return json(response, 400, { error: "Thiếu botId" });
+        if (!ticketId) return json(response, 400, { error: "Thiếu ticketId" });
+        if (!["open", "resolved"].includes(status)) {
+            return json(response, 400, { error: "Trạng thái chỉ nhận open hoặc resolved" });
+        }
+        const ticket = setFeedbackStatus(botId, ticketId, status);
+        if (!ticket) return json(response, 404, { error: "Không tìm thấy yêu cầu trong bot này" });
+        audit("feedback.status", request, { ticketId, botId, status });
+        return json(response, 200, { ticket, counts: getFeedbackCounts() });
+    }
+
     if (url.pathname === `${API_PREFIX}/chats` && request.method === "GET") {
         const filter = String(url.searchParams.get("status") || "all");
         const type = String(url.searchParams.get("type") || "all");

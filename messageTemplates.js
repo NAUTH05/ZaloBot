@@ -96,8 +96,58 @@ function formatClassStartStatus(subscription) {
         : "Dùng **/batnhaclich** để bật tính năng này."}`;
 }
 
+// ---------------------------------------------------------------------------
+// Hỗ trợ / góp ý
+//
+// Lời lẽ ngắn gọn, nói rõ hai điều người dùng cần biết: mã yêu cầu, và việc quản
+// trị viên trả lời NGAY TRONG cuộc trò chuyện này (không cần kết bạn Zalo riêng).
+// ---------------------------------------------------------------------------
+
+function formatFeedbackUsage() {
+    return `# {orange}GỬI GÓP Ý / HỖ TRỢ{/orange}
+
+> Gõ nội dung bạn muốn gửi ngay sau lệnh.
+
+**Ví dụ:**
+**/feedback Lịch học hôm nay không được gửi tới**
+
+Mình sẽ gửi tới quản trị viên và trả lời bạn ngay trong cuộc trò chuyện này.`;
+}
+
+function formatFeedbackAck(ticketId) {
+    return `# {green}✓ ĐÃ GHI NHẬN{/green}
+
+> **Mã yêu cầu:** ${escapeMarkdown(ticketId)}
+
+Quản trị viên sẽ trả lời bạn **ngay trong cuộc trò chuyện này**. Không cần kết bạn Zalo với ai.
+
+Muốn viết thêm, dùng:
+**/feedback ${escapeMarkdown(ticketId)} [nội dung]**`;
+}
+
+function formatFeedbackDuplicateAck(ticketId) {
+    // Zalo gửi lại cùng một update: yêu cầu đã có, không tạo bản sao.
+    return `# {green}✓ YÊU CẦU ĐÃ CÓ{/green}
+
+> **Mã yêu cầu:** ${escapeMarkdown(ticketId)}
+
+Yêu cầu này đã được ghi nhận trước đó. Quản trị viên sẽ trả lời trong cuộc trò chuyện này.`;
+}
+
+function formatFeedbackFollowUpAck(ticketId) {
+    return `# {green}✓ ĐÃ GỬI THÊM{/green}
+
+> **Mã yêu cầu:** ${escapeMarkdown(ticketId)}
+
+Nội dung đã được thêm vào yêu cầu này. Quản trị viên sẽ đọc cùng lúc.`;
+}
+
 module.exports = {
     GENERIC_ERROR_MESSAGE,
+    formatFeedbackAck,
+    formatFeedbackDuplicateAck,
+    formatFeedbackFollowUpAck,
+    formatFeedbackUsage,
     formatAdminHelp,
     formatClassStartEnabled,
     formatClassStartStatus,

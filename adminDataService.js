@@ -3,6 +3,10 @@ const { getInteractionTargets } = require("./interactionRegistry");
 const { getAllSubscriptions, isCurrentSubscription, normalizeNotificationTimes } = require("./subscriptions");
 const { getAccessSummary } = require("./accessControl");
 const { parseScopedKey, normalizeBotId, storageKeyPrefix, LEGACY_BOT_ID } = require("./bots");
+const { SOURCE_CONFIDENCE, isVerifiedConfidence, resolveRecordSource, scopedIdentityKey } = require("./sourceAttribution");
+
+// Dấu hiệu nhóm chưa xác minh trong khóa gộp. Phải trùng với sourceAttribution.
+const UNVERIFIED_KEY_MARKER = "__unverified__";
 
 function normalizeType(value) {
     const raw = String(value || "").toLowerCase();
@@ -27,34 +31,115 @@ function latestIso(...values) {
     return values.filter(Boolean).sort((a, b) => String(b).localeCompare(String(a)))[0] || null;
 }
 
-// Bot của một bản ghi: ưu tiên trường botId, nếu thiếu thì suy ra từ tiền tố
-// khóa (`botN::`), còn lại thuộc về bot 1 — đúng quy tắc giữ tương thích dữ liệu cũ.
-function botIdOf(record, key = "") {
-    const fromRecord = normalizeBotId(record?.botId);
-    if (fromRecord) return fromRecord;
-    return parseScopedKey(key).botId;
+// Các trường nguồn gốc đưa ra ngoài cho dashboard.
+//
+// `canSend` là chốt an toàn: nguồn chưa xác minh thì giao diện phải chặn mọi thao
+// tác có thể gửi tin, vì gửi sai bot là gửi cho người khác.
+function sourceFields(source) {
+    return {
+        sourceConfidence: source.confidence,
+        sourceLabel: source.label,
+        sourceReason: source.reason || null,
+        sourceVerified: isVerifiedConfidence(source.confidence),
+        canSend: Boolean(source.canSend)
+    };
 }
 
-// Khóa gộp phải gồm botId: cùng một Chat ID ở bot 1 và bot 2 là hai cuộc trò
+// Nguồn gốc của một bản ghi.
+//
+// Trước đây hàm này lấy parseScopedKey(key).botId, mà hàm đó trả bot1 cho MỌI
+// khóa không có phạm vi — và cờ `scoped: false` bị bỏ qua. Nghĩa là bản ghi cũ
+// không rõ nguồn bị gán cho bot1 mà không có dấu hiệu nào.
+//
+// Nay dùng quy tắc dùng chung ở sourceAttribution.js: thiếu bằng chứng thì trả về
+// CHƯA XÁC MINH thay vì đoán bot1.
+function sourceOf(record, key = "") {
+    return resolveRecordSource(record, key);
+}
+
+// botId đã xác minh, hoặc null nếu chưa đủ căn cứ. KHÔNG bao giờ tự gán bot1.
+function botIdOf(record, key = "") {
+    return sourceOf(record, key).botId;
+}
+
+// Khóa gộp phải gồm nguồn: cùng một Chat ID ở bot 1 và bot 2 là hai cuộc trò
 // chuyện khác nhau, gộp theo chatId trần sẽ trộn dữ liệu của hai bot.
+//
+// Bản ghi CHƯA XÁC MINH (botId = null) dùng một khóa riêng, không trộn vào bot
+// nào và cũng không bị coi là bot1.
 function scopedChatId(botId, chatId) {
-    return `${botId}::${chatId}`;
+    return scopedIdentityKey(botId, String(chatId));
+}
+
+// Tách lại khóa gộp. Trả botId = null cho nhóm chưa xác minh.
+function parseScopedChatId(chatKey) {
+    const separator = chatKey.indexOf("::");
+    if (separator < 0) return { botId: null, chatId: chatKey };
+    const rawBotId = chatKey.slice(0, separator);
+    return {
+        botId: rawBotId === UNVERIFIED_KEY_MARKER ? null : rawBotId,
+        chatId: chatKey.slice(separator + 2)
+    };
 }
 
 function buildAdminData() {
     const rawChats = getAllChats();
     const interactions = getInteractionTargets();
     const rawSubscriptions = Object.entries(getAllSubscriptions());
-    const interactionByChat = new Map(interactions.map((item) => [scopedChatId(botIdOf(item), String(item.chatId)), item]));
+
+    // Nguồn suy ra từ CHAT mà một bản ghi tham chiếu.
+    //
+    // Bản ghi tương tác không có trường botId và getInteractionTargets() không trả
+    // về khóa lưu trữ, nên không thể đọc nguồn từ khóa. Nhưng nó trỏ tới một chatId
+    // cụ thể, và nếu chat đó chỉ thuộc ĐÚNG MỘT bot đã xác minh thì nguồn của chat
+    // chính là nguồn của bản ghi.
+    //
+    // Nếu chatId thuộc nhiều bot (cùng Chat ID ở hai bot) thì KHÔNG suy ra — để
+    // nguyên là chưa xác minh thay vì đoán.
+    const verifiedChatOwners = new Map();
+    for (const chat of rawChats) {
+        const source = sourceOf(chat);
+        if (!source.botId) continue;
+        const chatId = String(chat.chatId);
+        if (!verifiedChatOwners.has(chatId)) verifiedChatOwners.set(chatId, new Set());
+        verifiedChatOwners.get(chatId).add(source.botId);
+    }
+    const ownerFromChatId = (chatId) => {
+        const owners = verifiedChatOwners.get(String(chatId));
+        return owners && owners.size === 1 ? [...owners][0] : null;
+    };
+
+    const interactionSource = (item) => {
+        const declared = sourceOf(item);
+        if (declared.botId) return declared;
+        const inherited = ownerFromChatId(item.chatId);
+        if (!inherited) return declared;
+        return {
+            botId: inherited,
+            confidence: SOURCE_CONFIDENCE.FROM_SCOPED_KEY,
+            label: "Đã xác minh (theo chat tham chiếu)",
+            canSend: true,
+            declaredBotId: null,
+            keyBotId: inherited,
+            reason: null
+        };
+    };
+
+    const interactionByChat = new Map(interactions.map((item) => [
+        scopedChatId(interactionSource(item).botId, String(item.chatId)),
+        item
+    ]));
     const subscriptionsByChat = new Map();
     const users = new Map();
 
     const subscriptions = rawSubscriptions.map(([key, raw]) => {
         const current = isCurrentSubscription(raw);
-        const botId = botIdOf(raw, key);
+        const source = sourceOf(raw, key);
+        const botId = source.botId;
         const item = {
             key,
             botId,
+            ...sourceFields(source),
             schema: current ? "current" : "legacy",
             chatId: String(raw?.chatId ?? (!key.includes("::") ? key : "")),
             userId: raw?.userId == null ? null : String(raw.userId),
@@ -79,8 +164,8 @@ function buildAdminData() {
 
     // Mỗi cặp (botId, chatId) là một dòng riêng trong dashboard.
     const allChatKeys = new Set([
-        ...rawChats.map((chat) => scopedChatId(botIdOf(chat), String(chat.chatId))),
-        ...interactions.map((item) => scopedChatId(botIdOf(item), String(item.chatId))),
+        ...rawChats.map((chat) => scopedChatId(sourceOf(chat).botId, String(chat.chatId))),
+        ...interactions.map((item) => scopedChatId(interactionSource(item).botId, String(item.chatId))),
         ...subscriptions.filter((item) => item.chatId).map((item) => scopedChatId(item.botId, item.chatId))
     ]);
 
@@ -89,18 +174,18 @@ function buildAdminData() {
     // (bot1 không tiền tố, botN có tiền tố) nên phải so bằng storageKeyPrefix.
     const deletedKeys = new Set(getDeletedChatIds());
     for (const chatKey of [...allChatKeys]) {
-        const separator = chatKey.indexOf("::");
-        const botId = chatKey.slice(0, separator);
-        const chatId = chatKey.slice(separator + 2);
-        if (deletedKeys.has(`${storageKeyPrefix(botId)}${chatId}`)) allChatKeys.delete(chatKey);
+        const { botId, chatId } = parseScopedChatId(chatKey);
+        // Chỉ so tombstone khi đã biết nguồn: khóa tombstone phụ thuộc bot.
+        if (botId && deletedKeys.has(`${storageKeyPrefix(botId)}${chatId}`)) allChatKeys.delete(chatKey);
     }
 
     const chats = [...allChatKeys].map((chatKey) => {
-        const separator = chatKey.indexOf("::");
-        const botId = chatKey.slice(0, separator);
-        const chatId = chatKey.slice(separator + 2);
-        const chat = rawChats.find((item) => botIdOf(item) === botId && String(item.chatId) === chatId)
-            || { chatId, botId, status: "active" };
+        const { botId, chatId } = parseScopedChatId(chatKey);
+        const chatRecord = rawChats.find((item) => sourceOf(item).botId === botId && String(item.chatId) === chatId);
+        const chat = chatRecord || { chatId, botId, status: "active" };
+        const chatSource = chatRecord
+            ? sourceOf(chatRecord)
+            : { botId, confidence: botId ? SOURCE_CONFIDENCE.FROM_SCOPED_KEY : SOURCE_CONFIDENCE.UNVERIFIED_LEGACY, canSend: Boolean(botId), label: null };
         const interaction = interactionByChat.get(chatKey);
         const chatSubscriptions = subscriptionsByChat.get(chatKey) || [];
         const memberIds = new Set([
@@ -138,7 +223,8 @@ function buildAdminData() {
             enabledSubscriptionCount: chatSubscriptions.filter((item) => item.notificationsEnabled).length,
             studentIds: [...new Set(chatSubscriptions.map((item) => item.studentId).filter(Boolean))],
             lastInboundInteractionAt: chat.lastInboundInteractionAt || interaction?.lastInteractionAt || null,
-            firstInteractionAt: chat.firstInteractionAt || interaction?.firstInteractionAt || null
+            firstInteractionAt: chat.firstInteractionAt || interaction?.firstInteractionAt || null,
+            ...sourceFields(chatSource)
         };
 
         for (const userId of memberIds) {
@@ -146,6 +232,7 @@ function buildAdminData() {
             const userSubscriptions = chatSubscriptions.filter((item) => item.userId === userId);
             // Khóa theo (bot, user): một người dùng cả hai bot có cấu hình riêng cho
             // từng bot, và dashboard phải hiển thị chúng tách biệt.
+            // Khóa gộp gồm nguồn: null (chưa xác minh) có nhóm riêng, không trộn vào bot1.
             const userKey = `${botId}::${userId}`;
             const existing = users.get(userKey) || {
                 key: userKey,
@@ -156,7 +243,8 @@ function buildAdminData() {
                 subscriptions: [],
                 studentIds: [],
                 firstInteractionAt: null,
-                lastInteractionAt: null
+                lastInteractionAt: null,
+                ...sourceFields(chatSource)
             };
             existing.displayName = existing.displayName || member.displayName || userSubscriptions.find((item) => item.userDisplayName)?.userDisplayName || (chatType === "private" ? displayName : "") || `User ${userId}`;
             existing.chats.push({ chatId, botId, chatType, chatName: displayName, status: record.status, memberStatus: member.status || "active" });
@@ -204,10 +292,12 @@ function buildAdminData() {
     }));
 
     // Thống kê theo từng bot — mỗi bot là một danh tính riêng nên đếm riêng.
+    // Thống kê theo bot. Bản ghi CHƯA XÁC MINH (botId = null) không thuộc bot nào
+    // nên không được đếm vào đây — nếu không chúng sẽ bị cộng nhầm cho một bot.
     const botIds = [...new Set([
         ...chats.map((chat) => chat.botId),
         ...normalizedSubscriptions.map((item) => item.botId)
-    ])].sort();
+    ])].filter(Boolean).sort();
     const botStats = botIds.map((botId) => ({
         botId,
         chatCount: chats.filter((chat) => chat.botId === botId).length,

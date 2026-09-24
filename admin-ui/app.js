@@ -67,17 +67,52 @@ function formatDate(value) { if (!value) return "-"; const date = new Date(value
 function statusTone(status) { return status === "active" ? "success" : status === "inactive" ? "danger" : status === "disabled" ? "warning" : "neutral"; }
 
 // ---------------------------------------------------------------------------
-// Bot: bộ lọc dùng chung cho mọi danh sách + nhãn bot trên từng dòng.
-// Bản ghi không có botId thuộc về bot 1 — đúng quy tắc dữ liệu cũ.
+// Nguồn gốc của bản ghi.
+//
+// TRƯỚC ĐÂY: recordBotId() chỉ chấp nhận /^bot\d+$/, nên danh tính "zca:<uid>"
+// không khớp và bị đổi thành bot1 — đó là nguyên nhân trực tiếp khiến người dùng
+// của tài khoản Zalo cá nhân hiển thị là "bot1". Bản ghi thiếu botId cũng bị gán
+// bot1 mà không có dấu hiệu gì.
+//
+// NAY: dùng đúng quy tắc của server (sourceAttribution.js). Server đã tính sẵn
+// sourceConfidence/sourceVerified/canSend cho từng bản ghi, nên giao diện chỉ đọc
+// lại — không tự suy đoán, tránh hai bên lệch nhau.
 // ---------------------------------------------------------------------------
-const LEGACY_BOT_ID = "bot1";
+const UNVERIFIED_BOT_ID = "__unverified__";
 
-function recordBotId(record) {
-  const value = String(record?.botId || "").trim().toLowerCase();
-  return /^bot\d+$/.test(value) ? value : LEGACY_BOT_ID;
+function isBotIdLike(value) {
+  // Chấp nhận cả botN lẫn zca:<uid>. Không tự bịa danh tính.
+  return /^bot\d+$/.test(value) || /^zca:[a-z0-9_-]+$/.test(value);
 }
 
-// Bộ lọc bot đang chọn. "all" = không lọc.
+// botId đã xác minh của bản ghi, hoặc null nếu chưa đủ căn cứ.
+// KHÔNG bao giờ mặc định về bot1.
+function recordBotId(record) {
+  const value = String(record?.botId || "").trim().toLowerCase();
+  if (isBotIdLike(value)) return value;
+  return null;
+}
+
+// Bản ghi có nguồn đã xác minh không. Server là nguồn quyết định; nếu vì lý do gì
+// đó thiếu trường, suy ra từ botId đã xác minh.
+function recordSourceVerified(record) {
+  if (typeof record?.sourceVerified === "boolean") return record.sourceVerified;
+  return Boolean(recordBotId(record));
+}
+
+function recordCanSend(record) {
+  if (typeof record?.canSend === "boolean") return record.canSend;
+  return recordSourceVerified(record);
+}
+
+// Nhãn nguồn gốc: tên bot thật nếu biết, ngược lại nói rõ là chưa xác minh.
+function recordSourceLabel(record) {
+  const botId = recordBotId(record);
+  if (!botId) return record?.sourceLabel || "Chưa xác minh";
+  return botLabel(botId);
+}
+
+// Lọc theo bot: bản ghi chưa xác minh có mục lọc riêng, không lẫn vào bot1.
 function activeBotFilter() {
   return $("#botFilter")?.value || "all";
 }
@@ -85,31 +120,56 @@ function activeBotFilter() {
 function filterByBot(list) {
   const botId = activeBotFilter();
   if (botId === "all") return list;
+  if (botId === UNVERIFIED_BOT_ID) return list.filter((item) => !recordBotId(item));
   return list.filter((item) => recordBotId(item) === botId);
 }
 
 // Nhãn bot: ưu tiên tên thật lấy từ Zalo, rồi tới nhãn BOT_N_NAME, cuối cùng là
 // botId. Server trả sẵn `label` nên giao diện không phải tự ghép.
 function botLabel(botId) {
+  if (!botId) return "Chưa xác minh";
   const known = bots.find((bot) => bot.botId === botId);
+  // Danh tính lạ (ví dụ ZCA chưa kịp nạp vào danh sách bot): hiện thẳng botId,
+  // KHÔNG thay bằng bot1.
   if (!known) return botId;
   const label = known.label || known.displayName || botId;
   return known.enabled === false ? `${label} (tắt)` : label;
 }
 
-// Ô "Bot" cho bảng Users và Chat directory. Luôn hiển thị, kể cả khi đang lọc một
-// bot — cột phải ổn định để bảng không nhảy cột khi đổi bộ lọc.
+// Ô "Nguồn" cho bảng Users và Chat directory. Luôn hiển thị, kể cả khi đang lọc
+// một nguồn — cột phải ổn định để bảng không nhảy cột khi đổi bộ lọc.
+//
+// Bản ghi chưa xác minh hiển thị rõ là "Chưa xác minh" kèm lý do, KHÔNG hiển thị
+// như một bot cụ thể — đó chính là lỗi trước đây.
 function botCell(record) {
   const botId = recordBotId(record);
-  const known = bots.find((bot) => bot.botId === botId);
-  return `<td><span class="bot-chip" title="${escapeHtml(botId)}">${escapeHtml(botLabel(botId))}</span></td>`;
+  if (!botId) {
+    const reason = record?.sourceReason || "Không đủ căn cứ xác định nguồn.";
+    return `<td><span class="bot-chip bot-chip-unverified" title="${escapeHtml(reason)}">Chưa xác minh</span></td>`;
+  }
+  const kind = botId.startsWith("zca:") ? "Tài khoản Zalo cá nhân" : "Bot chính thức";
+  return `<td><span class="bot-chip" title="${escapeHtml(`${botId} · ${kind}`)}">${escapeHtml(botLabel(botId))}</span><small class="block">${escapeHtml(kind)}</small></td>`;
 }
 
-// Nhãn bot chỉ hiện khi xem tất cả — lọc một bot rồi thì nó là thừa.
+// Nhãn nguồn chỉ hiện khi xem tất cả — lọc một nguồn rồi thì nó là thừa.
 function botBadge(record) {
   if (activeBotFilter() !== "all") return "";
   const botId = recordBotId(record);
-  return badge(botLabel(botId), botId === LEGACY_BOT_ID ? "neutral" : "info");
+  if (!botId) return badge("Chưa xác minh", "warning");
+  return badge(botLabel(botId), botId.startsWith("zca:") ? "info" : "neutral");
+}
+
+// Nút thao tác trên một bản ghi.
+//
+// Nguồn CHƯA XÁC MINH thì nút bị vô hiệu và nêu rõ lý do: mở chi tiết hay gửi tin
+// theo một nguồn đoán mò có thể liên hệ nhầm người hoặc nhầm tài khoản.
+function actionButton(attribute, value, botId, record, label, className = "table-action") {
+  if (!botId) {
+    const reason = record?.sourceReason || "Chưa xác định được nguồn của bản ghi này.";
+    return `<button class="${escapeHtml(className)}" disabled title="${escapeHtml(`Không thể thao tác: ${reason}`)}">${escapeHtml(label)}</button>` +
+      `<small class="block error-cell">Cần xác minh nguồn</small>`;
+  }
+  return `<button class="${escapeHtml(className)}" ${attribute}="${escapeHtml(value)}" data-record-bot="${escapeHtml(botId)}">${escapeHtml(label)}</button>`;
 }
 
 function botOptionsHtml(includeAll) {
@@ -117,13 +177,16 @@ function botOptionsHtml(includeAll) {
   return (includeAll ? '<option value="all">Tất cả bot</option>' : '<option value="">-- Chọn bot --</option>') + options;
 }
 
-// Đổ danh sách bot vào bộ lọc và bộ chọn bot, giữ lựa chọn hiện tại nếu còn.
+// Đổ danh sách nguồn vào bộ lọc và bộ chọn bot, giữ lựa chọn hiện tại nếu còn.
 function populateBotControls() {
   const filter = $("#botFilter");
   if (filter) {
     const previous = filter.value || "all";
-    filter.innerHTML = botOptionsHtml(true);
-    filter.value = bots.some((bot) => bot.botId === previous) || previous === "all" ? previous : "all";
+    // "Chưa xác minh" là một mục lọc RIÊNG, không gộp vào bot1: những bản ghi này
+    // không chứng minh được là của bot nào.
+    filter.innerHTML = botOptionsHtml(true) +
+      `<option value="${UNVERIFIED_BOT_ID}">Chưa xác minh</option>`;
+    filter.value = bots.some((bot) => bot.botId === previous) || previous === "all" || previous === UNVERIFIED_BOT_ID ? previous : "all";
   }
   const selector = $("#commandBot");
   if (selector) {
@@ -291,7 +354,7 @@ function renderUsers() {
   const users = filterByBot(workspace.users).filter((user) => JSON.stringify(user).toLowerCase().includes(query));
   $("#userRows").innerHTML = users.map((user) => {
     const times = user.subscriptions.flatMap((item) => item.notificationTimes.map((time) => ({ ...time, chatName: item.chatName })));
-    return `<tr><td><strong>${escapeHtml(user.displayName)}</strong><code>${escapeHtml(user.userId)}</code></td>${botCell(user)}<td>${user.chats.map((chat) => `<div class="context-line">${badge(chat.chatType, chat.chatType === "group" ? "info" : "neutral")} ${escapeHtml(chat.chatName)} <code>${escapeHtml(chat.chatId)}</code></div>`).join("")}</td><td>${user.studentIds.length ? user.studentIds.map((id) => badge(id, "info")).join(" ") : `<span class="muted">Chưa có MSSV</span>`}</td><td>${timeChips(times)}</td><td>${badge(user.status, statusTone(user.status))} ${badge(user.notificationsEnabled ? "Nhận lịch: bật" : "Nhận lịch: tắt", user.notificationsEnabled ? "success" : "neutral")}</td><td><button class="table-action" data-user="${escapeHtml(user.userId)}" data-user-bot="${escapeHtml(recordBotId(user))}">Quản lý</button></td></tr>`;
+    return `<tr><td><strong>${escapeHtml(user.displayName)}</strong><code>${escapeHtml(user.userId)}</code></td>${botCell(user)}<td>${user.chats.map((chat) => `<div class="context-line">${badge(chat.chatType, chat.chatType === "group" ? "info" : "neutral")} ${escapeHtml(chat.chatName)} <code>${escapeHtml(chat.chatId)}</code></div>`).join("")}</td><td>${user.studentIds.length ? user.studentIds.map((id) => badge(id, "info")).join(" ") : `<span class="muted">Chưa có MSSV</span>`}</td><td>${timeChips(times)}</td><td>${badge(user.status, statusTone(user.status))} ${badge(user.notificationsEnabled ? "Nhận lịch: bật" : "Nhận lịch: tắt", user.notificationsEnabled ? "success" : "neutral")}</td><td>${actionButton("data-user", user.userId, recordBotId(user), user, "Quản lý")}</td></tr>`;
   }).join("") || emptyRow(7, "Không tìm thấy người dùng phù hợp.");
   $$('[data-user]').forEach((button) => button.addEventListener("click", () => openUser(button.dataset.user, button.dataset.userBot)));
 }
@@ -299,7 +362,7 @@ function renderUsers() {
 function renderGroups() {
   const query = $("#groupSearch").value.trim().toLowerCase();
   const groups = filterByBot(workspace.groups).filter((group) => JSON.stringify(group).toLowerCase().includes(query));
-  $("#groupCards").innerHTML = groups.map((group) => `<article class="group-card"><div class="card-heading"><div><span class="eyebrow">${escapeHtml(group.typeSource)}</span><h2>${escapeHtml(group.displayName)}</h2><code>${escapeHtml(group.chatId)}</code> <span class="bot-chip">${escapeHtml(botLabel(recordBotId(group)))}</span></div>${badge(group.status, statusTone(group.status))}</div><div class="group-stats"><span><strong>${group.memberCount}</strong> thành viên</span><span><strong>${group.studentIds.length}</strong> MSSV</span><span><strong>${group.enabledSubscriptionCount}</strong> đang nhận lịch</span></div><div class="member-preview">${group.members.slice(0, 6).map((member) => `<div><strong>${escapeHtml(member.displayName)}</strong><small>${escapeHtml(member.studentIds.join(", ") || "Chưa có MSSV")}</small></div>`).join("") || `<span class="muted">Chưa có dữ liệu thành viên</span>`}</div><button class="secondary full" data-chat-detail="${escapeHtml(group.chatId)}" data-chat-bot="${escapeHtml(recordBotId(group))}">Xem toàn bộ nhóm</button></article>`).join("") || `<div class="empty-state panel">Không có nhóm phù hợp.</div>`;
+  $("#groupCards").innerHTML = groups.map((group) => `<article class="group-card"><div class="card-heading"><div><span class="eyebrow">${escapeHtml(group.typeSource)}</span><h2>${escapeHtml(group.displayName)}</h2><code>${escapeHtml(group.chatId)}</code> <span class="bot-chip">${escapeHtml(botLabel(recordBotId(group)))}</span></div>${badge(group.status, statusTone(group.status))}</div><div class="group-stats"><span><strong>${group.memberCount}</strong> thành viên</span><span><strong>${group.studentIds.length}</strong> MSSV</span><span><strong>${group.enabledSubscriptionCount}</strong> đang nhận lịch</span></div><div class="member-preview">${group.members.slice(0, 6).map((member) => `<div><strong>${escapeHtml(member.displayName)}</strong><small>${escapeHtml(member.studentIds.join(", ") || "Chưa có MSSV")}</small></div>`).join("") || `<span class="muted">Chưa có dữ liệu thành viên</span>`}</div>${actionButton("data-chat-detail", group.chatId, recordBotId(group), group, "Xem toàn bộ nhóm", "secondary full")}</article>`).join("") || `<div class="empty-state panel">Không có nhóm phù hợp.</div>`;
   $$('#groupCards [data-chat-detail]').forEach((button) => button.addEventListener("click", () => openChat(button.dataset.chatDetail, button.dataset.chatBot)));
 }
 
@@ -307,21 +370,21 @@ function renderDirectory() {
   const query = $("#directorySearch").value.trim().toLowerCase();
   const type = $("#directoryType").value;
   const chats = filterByBot(workspace.chats).filter((chat) => (type === "all" || chat.chatType === type) && JSON.stringify(chat).toLowerCase().includes(query));
-  $("#directoryRows").innerHTML = chats.map((chat) => `<tr><td><strong>${escapeHtml(chat.displayName)}</strong><code>${escapeHtml(chat.chatId)}</code></td>${botCell(chat)}<td>${badge(chat.chatType, chat.chatType === "group" ? "info" : chat.chatType === "unknown" ? "warning" : "neutral")}<small class="block">${escapeHtml(chat.typeSource)}</small></td><td><code>${escapeHtml(chat.userId || "-")}</code></td><td>${badge(chat.status, statusTone(chat.status))}</td><td>${escapeHtml(chat.memberCount)} thành viên<small class="block">${escapeHtml(chat.studentIds.join(", ") || "Chưa có MSSV")}</small></td><td><small>Tương tác: ${escapeHtml(formatDate(chat.lastInboundInteractionAt))}</small><small class="block">Gửi thành công: ${escapeHtml(formatDate(chat.lastSuccessfulDeliveryAt))}</small></td><td><button class="table-action" data-chat-detail="${escapeHtml(chat.chatId)}" data-chat-bot="${escapeHtml(recordBotId(chat))}">Quản lý</button></td></tr>`).join("") || emptyRow(8, "Không có cuộc trò chuyện phù hợp.");
+  $("#directoryRows").innerHTML = chats.map((chat) => `<tr><td><strong>${escapeHtml(chat.displayName)}</strong><code>${escapeHtml(chat.chatId)}</code></td>${botCell(chat)}<td>${badge(chat.chatType, chat.chatType === "group" ? "info" : chat.chatType === "unknown" ? "warning" : "neutral")}<small class="block">${escapeHtml(chat.typeSource)}</small></td><td><code>${escapeHtml(chat.userId || "-")}</code></td><td>${badge(chat.status, statusTone(chat.status))}</td><td>${escapeHtml(chat.memberCount)} thành viên<small class="block">${escapeHtml(chat.studentIds.join(", ") || "Chưa có MSSV")}</small></td><td><small>Tương tác: ${escapeHtml(formatDate(chat.lastInboundInteractionAt))}</small><small class="block">Gửi thành công: ${escapeHtml(formatDate(chat.lastSuccessfulDeliveryAt))}</small></td><td>${actionButton("data-chat-detail", chat.chatId, recordBotId(chat), chat, "Quản lý")}</td></tr>`).join("") || emptyRow(8, "Không có cuộc trò chuyện phù hợp.");
   $$('#directoryRows [data-chat-detail]').forEach((button) => button.addEventListener("click", () => openChat(button.dataset.chatDetail, button.dataset.chatBot)));
 }
 
 function renderNotifications() {
   const filter = $("#notificationFilter").value;
   const list = filterByBot(workspace.subscriptions).filter((item) => filter === "all" || (filter === "enabled" && item.notificationsEnabled) || (filter === "disabled" && !item.notificationsEnabled) || (filter === "legacy" && item.schema === "legacy"));
-  $("#notificationRows").innerHTML = list.map((item) => `<tr><td><strong>${escapeHtml(item.userDisplayName || item.userId || "Bản ghi cũ")}</strong> ${botBadge(item)}<code>${escapeHtml(item.userId || "-")}</code><div>${badge(item.studentId || "Chưa có MSSV", item.studentId ? "info" : "neutral")} ${escapeHtml(item.studentName)}</div></td><td><strong>${escapeHtml(item.chatName)}</strong><code>${escapeHtml(item.chatId)}</code></td><td>${badge(item.chatType, item.chatType === "group" ? "info" : "neutral")}</td><td>${timeChips(item.notificationTimes)}</td><td>${badge(item.schema, item.schema === "current" ? "success" : "warning")} ${badge(item.notificationsEnabled ? "Đang bật" : "Đang tắt", item.notificationsEnabled ? "success" : "neutral")}</td><td><button class="table-action" data-subscription="${escapeHtml(item.key)}">Quản lý</button></td></tr>`).join("") || emptyRow(6, "Không có đăng ký phù hợp.");
+  $("#notificationRows").innerHTML = list.map((item) => `<tr><td><strong>${escapeHtml(item.userDisplayName || item.userId || "Bản ghi cũ")}</strong> ${botBadge(item)}<code>${escapeHtml(item.userId || "-")}</code><div>${badge(item.studentId || "Chưa có MSSV", item.studentId ? "info" : "neutral")} ${escapeHtml(item.studentName)}</div></td><td><strong>${escapeHtml(item.chatName)}</strong><code>${escapeHtml(item.chatId)}</code></td><td>${badge(item.chatType, item.chatType === "group" ? "info" : "neutral")}</td><td>${timeChips(item.notificationTimes)}</td><td>${badge(item.schema, item.schema === "current" ? "success" : "warning")} ${badge(item.notificationsEnabled ? "Đang bật" : "Đang tắt", item.notificationsEnabled ? "success" : "neutral")}</td><td>${actionButton("data-subscription", item.key, recordBotId(item), item, "Quản lý")}</td></tr>`).join("") || emptyRow(6, "Không có đăng ký phù hợp.");
   $$('[data-subscription]').forEach((button) => button.addEventListener("click", () => openSubscription(button.dataset.subscription)));
 }
 
 function renderHealth() {
   const status = $("#healthFilter").value; const type = $("#healthType").value;
   const chats = filterByBot(workspace.chats).filter((chat) => (status === "all" || chat.status === status) && (type === "all" || chat.chatType === type));
-  $("#healthRows").innerHTML = chats.map((chat) => `<tr><td><strong>${escapeHtml(chat.displayName)}</strong><code>${escapeHtml(chat.chatId)}</code></td>${botCell(chat)}<td>${badge(chat.chatType, chat.chatType === "group" ? "info" : chat.chatType === "unknown" ? "warning" : "neutral")}<small class="block">${escapeHtml(chat.typeSource)}</small></td><td>${badge(chat.status, statusTone(chat.status))}</td><td>${chat.memberCount}</td><td>${escapeHtml(formatDate(chat.lastSuccessfulDeliveryAt))}</td><td class="error-cell">${escapeHtml(chat.lastError?.message || "-")}</td><td><button class="table-action" data-chat-detail="${escapeHtml(chat.chatId)}" data-chat-bot="${escapeHtml(recordBotId(chat))}">Chi tiết</button></td></tr>`).join("") || emptyRow(8, "Không có chat phù hợp.");
+  $("#healthRows").innerHTML = chats.map((chat) => `<tr><td><strong>${escapeHtml(chat.displayName)}</strong><code>${escapeHtml(chat.chatId)}</code></td>${botCell(chat)}<td>${badge(chat.chatType, chat.chatType === "group" ? "info" : chat.chatType === "unknown" ? "warning" : "neutral")}<small class="block">${escapeHtml(chat.typeSource)}</small></td><td>${badge(chat.status, statusTone(chat.status))}</td><td>${chat.memberCount}</td><td>${escapeHtml(formatDate(chat.lastSuccessfulDeliveryAt))}</td><td class="error-cell">${escapeHtml(chat.lastError?.message || "-")}</td><td>${actionButton("data-chat-detail", chat.chatId, recordBotId(chat), chat, "Chi tiết")}</td></tr>`).join("") || emptyRow(8, "Không có chat phù hợp.");
   $$('#healthRows [data-chat-detail]').forEach((button) => button.addEventListener("click", () => openChat(button.dataset.chatDetail, button.dataset.chatBot)));
 }
 
@@ -890,7 +953,12 @@ function paginateRendered(selector, key) {
   pager(`#${key}Pagination`, key, { page, size, totalPages, total: items.length }, applyPaginationViews);
 }
 function applyPaginationViews() { ensurePaginationViews(); paginateRendered("#directoryRows", "directory"); paginateRendered("#userRows", "users"); paginateRendered("#groupCards", "groups"); paginateRendered("#notificationRows", "notifications"); paginateRendered("#healthRows", "health"); paginateRendered("#systemLogList", "systemLogs"); paginateRendered("#deliveryLogList", "deliveryLogs"); }
-function renderAll() { populateBotControls(); renderBotGrid(); renderOverview(); renderDirectory(); renderUsers(); renderGroups(); renderNotifications(); renderHealth(); renderSettings(); renderLogs(); setupCommandConsole(); renderCommands(); ensurePaginationViews(); applyPaginationViews(); $("#healthPill").textContent = `${dashboard.bot.status} · ${dashboard.bot.health}`; $("#generatedAt").textContent = formatDate(workspace.generatedAt); }
+// Yêu cầu hỗ trợ: danh sách, bộ đếm và yêu cầu đang mở.
+let feedbackTickets = [];
+let feedbackCounts = { total: 0, unread: 0, open: 0, resolved: 0 };
+let selectedFeedback = null;
+
+function renderAll() { populateBotControls(); renderBotGrid(); renderOverview(); renderDirectory(); renderUsers(); renderGroups(); renderNotifications(); renderHealth(); renderSettings(); renderLogs(); setupCommandConsole(); renderCommands(); setupFeedback(); renderFeedback(); ensurePaginationViews(); applyPaginationViews(); $("#healthPill").textContent = `${dashboard.bot.status} · ${dashboard.bot.health}`; $("#generatedAt").textContent = formatDate(workspace.generatedAt); }
 
 async function loadData() {
   setDataState("loading", "Loading admin data...");
@@ -904,6 +972,7 @@ async function loadData() {
     const remoteTargetUsers = await targetUserRequest;
     targetUsers = mergeTargetUsers(remoteTargetUsers === null ? targetUsersFromWorkspace(workspace) : remoteTargetUsers);
     renderAll();
+    await loadFeedback();
     applyTargetUserState();
     setDataState("success", "Updated just now");
     window.setTimeout(() => setDataState("success", ""), 1800);
@@ -925,9 +994,25 @@ function openCreateUser() {
   $("#createUserForm").addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); await api("/api/admin/users", { method: "POST", body: JSON.stringify(Object.fromEntries(form.entries())) }); $("#detailDialog").close(); await loadData(); });
 }
 
+// Chốt an toàn ở tầng mở chi tiết.
+//
+// Nút thao tác trên bản ghi chưa xác minh đã bị vô hiệu, nhưng đây là lớp thứ hai:
+// nếu vì lý do gì đó vẫn vào được, phải chặn thay vì gửi botId rỗng lên API — gửi
+// thiếu botId có thể khiến thao tác rơi vào một bot khác.
+function requireVerifiedSource(botId, what = "bản ghi này") {
+  if (botId) return true;
+  showDialog("Chưa xác minh nguồn",
+    `<div class="empty-state"><p><strong>Không thể thao tác trên ${escapeHtml(what)}.</strong></p>` +
+    `<p class="muted">Bản ghi này không có trường botId và khóa lưu trữ cũng không có phạm vi, nên chưa xác định được nó thuộc bot nào. ` +
+    `Thao tác lúc này có thể gửi tin cho nhầm người hoặc nhầm tài khoản.</p>` +
+    `<p class="muted">Cách xử lý: chạy <code>npm run migrate:attribution</code> để xem báo cáo, và chỉ gán nguồn khi có bằng chứng.</p></div>`);
+  return false;
+}
+
 function openUser(userId, botId) {
   // Cùng một User ID ở hai bot là hai danh tính khác nhau, nên phải khớp cả bot.
   const wantedBot = recordBotId({ botId });
+  if (!requireVerifiedSource(wantedBot, "người dùng này")) return;
   const user = workspace.users.find((item) => item.userId === userId && recordBotId(item) === wantedBot);
   if (!user) return;
   showDialog(user.displayName, `<div class="detail-grid"><div class="detail"><span>Bot</span><strong>${escapeHtml(botLabel(wantedBot))}</strong></div><div class="detail"><span>User ID</span><code>${escapeHtml(user.userId)}</code></div><div class="detail"><span>MSSV</span><strong>${escapeHtml(user.studentIds.join(", ") || "Chưa có MSSV")}</strong></div><div class="detail"><span>Tương tác đầu tiên</span><strong>${escapeHtml(formatDate(user.firstInteractionAt))}</strong></div><div class="detail"><span>Hoạt động gần nhất</span><strong>${escapeHtml(formatDate(user.lastInteractionAt))}</strong></div></div><h3>Ngữ cảnh chat</h3><div class="stack">${user.chats.map((chat) => `<article class="stack-item"><form class="userContextForm" data-user-chat="${escapeHtml(chat.chatId)}"><div class="form-grid"><label>Tên hiển thị<input name="displayName" value="${escapeHtml(user.displayName)}" /></label><label>Trạng thái thành viên<select name="status"><option value="active" ${chat.memberStatus === "active" ? "selected" : ""}>Đang hoạt động</option><option value="disabled" ${chat.memberStatus === "disabled" ? "selected" : ""}>Đã tắt</option><option value="removed" ${chat.memberStatus === "removed" ? "selected" : ""}>Đã xóa</option></select></label></div><p>${escapeHtml(chat.chatType)} · chat ${escapeHtml(chat.status)} · <code>${escapeHtml(chat.chatId)}</code></p><div class="row-actions"><button type="submit">Lưu người dùng</button><button type="button" data-open-chat="${escapeHtml(chat.chatId)}">Mở chat</button><button type="button" data-user-admin="${escapeHtml(chat.chatId)}">Cấp quyền admin</button><button type="button" class="danger-text" data-user-remove="${escapeHtml(chat.chatId)}">Xóa khỏi chat</button></div></form></article>`).join("")}</div><h3>Đăng ký nhận lịch</h3><div class="stack">${user.subscriptions.map((item) => `<article class="stack-item horizontal"><div><strong>${escapeHtml(item.studentId || "Chưa có MSSV")} · ${escapeHtml(item.chatName)}</strong><p>${escapeHtml(item.notificationsEnabled ? "Đang bật" : "Đang tắt")} · ${escapeHtml(item.notificationTimes.map((time) => `${time.time} ${targetDayLabel(time.targetDayOffset)}`).join(", ") || "Chưa có giờ nhận lịch")}</p></div><button data-open-sub="${escapeHtml(item.key)}">Quản lý</button></article>`).join("") || `<div class="empty-state">Không có đăng ký nhận lịch.</div>`}</div>`);
@@ -939,7 +1024,9 @@ function openUser(userId, botId) {
 }
 
 async function openChat(chatId, botId) {
-  const scoped = `botId=${encodeURIComponent(recordBotId({ botId }))}`;
+  const verifiedBotId = recordBotId({ botId });
+  if (!requireVerifiedSource(verifiedBotId, "cuộc trò chuyện này")) return;
+  const scoped = `botId=${encodeURIComponent(verifiedBotId)}`;
   const data = await api(`/api/admin/chats/${encodeURIComponent(chatId)}?${scoped}`); const chat = data.chat;
   showDialog(chat.displayName || chat.chatId, `<form id="chatMetadataForm"><div class="form-grid"><label>Chat ID<input value="${escapeHtml(chat.chatId)}" disabled /></label><label>User ID<input name="userId" value="${escapeHtml(chat.userId || "")}" /></label><label>Display name<input name="displayName" value="${escapeHtml(chat.displayName || "")}" /></label><label>Type<select name="chatType"><option value="private" ${chat.chatType === "private" ? "selected" : ""}>Private</option><option value="group" ${chat.chatType === "group" ? "selected" : ""}>Group</option><option value="unknown" ${chat.chatType === "unknown" ? "selected" : ""}>Unknown</option></select></label></div><button class="primary" type="submit">Lưu metadata</button></form><div class="action-bar"><button data-chat-status="active">Reactivate</button><button data-chat-status="disabled">Disable</button><button data-chat-status="removed">Soft remove</button><button data-chat-retry="1">Retry</button><button data-make-admin="1">Make admin</button><button class="danger-text" data-chat-hard-delete="1">Xóa vĩnh viễn</button></div><div class="detail-grid"><div class="detail"><span>Bot</span><strong>${escapeHtml(botLabel(recordBotId({ botId })))}</strong></div><div class="detail"><span>Last inbound</span><strong>${escapeHtml(formatDate(chat.lastInboundInteractionAt))}</strong></div><div class="detail"><span>Last success</span><strong>${escapeHtml(formatDate(chat.lastSuccessfulDeliveryAt))}</strong></div><div class="detail"><span>Last error</span><strong>${escapeHtml(chat.lastError?.message || "-")}</strong></div><div class="detail"><span>Error time</span><strong>${escapeHtml(formatDate(chat.lastError?.at))}</strong></div></div><h3>Members & MSSV</h3><div class="stack">${(data.members || []).map((user) => `<article class="stack-item"><strong>${escapeHtml(user.displayName)}</strong><p><code>${escapeHtml(user.userId)}</code> · ${escapeHtml(user.studentIds.join(", ") || "No MSSV")}</p></article>`).join("") || `<div class="empty-state">Không có member record.</div>`}</div><h3>Subscriptions</h3><div class="stack">${(data.subscriptions || []).map((item) => `<article class="stack-item horizontal"><div><strong>${escapeHtml(item.userDisplayName || item.userId || "Legacy")}</strong><p>${escapeHtml(item.studentId || "No MSSV")} · ${escapeHtml(item.notificationTimes.map((time) => `${time.time} ${targetDayLabel(time.targetDayOffset)}`).join(", ") || "No times")}</p></div><button data-open-sub="${escapeHtml(item.key)}">Quản lý</button></article>`).join("") || `<div class="empty-state">Không có subscription.</div>`}</div>`);
   $("#chatMetadataForm").addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); await runAction(async () => { await api(`/api/admin/chats/${encodeURIComponent(chatId)}`, { method: "PATCH", body: JSON.stringify({ botId: recordBotId({ botId }), action: "metadata", userId: form.get("userId"), displayName: form.get("displayName"), chatType: form.get("chatType") }) }); $("#detailDialog").close(); await loadData(); }, "Không lưu được metadata chat"); });
@@ -1034,3 +1121,237 @@ $("#commandAdminIdentity")?.addEventListener("change", () => {});
 $$('.tab-button').forEach((button) => button.addEventListener("click", () => switchTab(button.dataset.tab)));
 applyTheme(localStorage.getItem("zalobot-admin-theme") || "dark"); switchTab(localStorage.getItem("zalobot-admin-tab") || "overview");
 loadData().then(() => showAuthenticated(true)).catch((error) => { showAuthenticated(false); if (error.status !== 401) $("#loginError").textContent = error.message; });
+
+/* ---------------------------------------------------------------------------
+   Feedback / Support
+
+   Danh tính hội thoại là (botId, ticketId). Mọi thao tác đọc/ghi đều gửi kèm
+   botId, vì chat ID chỉ có nghĩa trong phạm vi một bot — thiếu botId là có thể
+   mở hoặc trả lời nhầm yêu cầu của bot khác.
+   --------------------------------------------------------------------------- */
+
+function feedbackQuery() {
+  const params = new URLSearchParams();
+  const botId = $("#feedbackBotFilter")?.value || "";
+  const status = $("#feedbackStatusFilter")?.value || "all";
+  const search = $("#feedbackSearch")?.value || "";
+  const unread = $("#feedbackUnreadFilter")?.value || "false";
+  if (botId) params.set("botId", botId);
+  if (status !== "all") params.set("status", status);
+  if (search.trim()) params.set("search", search.trim());
+  if (unread === "true") params.set("unread", "true");
+  return params.toString();
+}
+
+async function loadFeedback() {
+  try {
+    const data = await api(`/api/admin/feedback${feedbackQuery() ? `?${feedbackQuery()}` : ""}`);
+    feedbackTickets = Array.isArray(data.tickets) ? data.tickets : [];
+    feedbackCounts = data.counts || { total: 0, unread: 0, open: 0, resolved: 0 };
+  } catch (error) {
+    feedbackTickets = [];
+    feedbackCounts = { total: 0, unread: 0, open: 0, resolved: 0 };
+    console.warn("Không tải được yêu cầu hỗ trợ:", error.message);
+  }
+  renderFeedback();
+}
+
+function feedbackStatusBadge(ticket) {
+  if (ticket.status === "resolved") return badge("Đã xử lý", "success");
+  if (ticket.unread) return badge("Chưa đọc", "warning");
+  return badge("Đang mở", "info");
+}
+
+function feedbackSnippet(value) {
+  // Nội dung do người dùng gửi: escape trước khi hiển thị để không chèn được HTML.
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return escapeHtml(text.length > 60 ? `${text.slice(0, 59)}…` : text);
+}
+
+function renderFeedback() {
+  const countsTarget = $("#feedbackCounts");
+  if (countsTarget) {
+    countsTarget.innerHTML = [
+      { label: "Tổng", value: feedbackCounts.total ?? 0 },
+      { label: "Chưa đọc", value: feedbackCounts.unread ?? 0 },
+      { label: "Đang mở", value: feedbackCounts.open ?? 0 },
+      { label: "Đã xử lý", value: feedbackCounts.resolved ?? 0 }
+    ].map((item) => `<article class="metric-card"><span>${escapeHtml(item.label)}</span><strong>${Number(item.value) || 0}</strong></article>`).join("");
+  }
+
+  // Bộ lọc bot dùng chung danh sách bot đã tải, giữ nguyên lựa chọn hiện tại.
+  const botFilter = $("#feedbackBotFilter");
+  if (botFilter) {
+    const current = botFilter.value;
+    const options = ['<option value="">Mọi bot</option>'].concat(
+      bots.map((bot) => `<option value="${escapeHtml(bot.botId)}">${escapeHtml(bot.label || bot.displayName || bot.botId)}</option>`)
+    );
+    botFilter.innerHTML = options.join("");
+    botFilter.value = current;
+  }
+
+  const rows = $("#feedbackRows");
+  if (rows) {
+    if (!feedbackTickets.length) {
+      rows.innerHTML = emptyRow(6, "Chưa có yêu cầu hỗ trợ nào.");
+    } else {
+      rows.innerHTML = feedbackTickets.map((ticket) => {
+        const selected = selectedFeedback && selectedFeedback.ticketId === ticket.ticketId && selectedFeedback.botId === ticket.botId;
+        const bot = bots.find((item) => item.botId === ticket.botId);
+        return `<tr class="${selected ? "row-selected" : ""}"><td><code>${escapeHtml(ticket.ticketId)}</code></td>` +
+          `<td>${escapeHtml(bot?.label || ticket.botId)}</td>` +
+          `<td>${escapeHtml(ticket.displayName || ticket.userId || "-")}<br><small class="muted">${escapeHtml(ticket.chatId)}</small></td>` +
+          `<td>${feedbackSnippet(ticket.message)}</td>` +
+          `<td>${feedbackStatusBadge(ticket)}</td>` +
+          `<td>${escapeHtml(formatDate(ticket.updatedAt))}</td></tr>`;
+      }).join("");
+      $$("[data-feedback-open]").forEach((node) => node.remove());
+      rows.querySelectorAll("tr").forEach((row, index) => {
+        row.addEventListener("click", () => openFeedbackTicket(feedbackTickets[index]));
+      });
+    }
+  }
+}
+
+async function openFeedbackTicket(ticket) {
+  if (!ticket) return;
+  try {
+    const data = await api(`/api/admin/feedback/detail?botId=${encodeURIComponent(ticket.botId)}&ticketId=${encodeURIComponent(ticket.ticketId)}`);
+    selectedFeedback = data.ticket;
+    feedbackCounts = data.counts || feedbackCounts;
+    renderFeedbackDetail();
+    renderFeedback();
+  } catch (error) {
+    setDataState("error", error.message || "Không mở được yêu cầu");
+  }
+}
+
+function renderFeedbackDetail() {
+  const thread = $("#feedbackThread");
+  const form = $("#feedbackReplyForm");
+  const hint = $("#feedbackDetailHint");
+  const target = $("#feedbackReplyTarget");
+  if (!thread || !form) return;
+
+  if (!selectedFeedback) {
+    thread.innerHTML = "";
+    form.classList.add("hidden");
+    if (hint) hint.textContent = "Chưa chọn yêu cầu nào.";
+    return;
+  }
+
+  const ticket = selectedFeedback;
+  const bot = bots.find((item) => item.botId === ticket.botId);
+  if (hint) {
+    hint.textContent = `${ticket.ticketId} · ${ticket.chatType === "group" ? "nhóm" : "chat riêng"} · ${ticket.status === "resolved" ? "đã xử lý" : "đang mở"}`;
+  }
+
+  const messages = [
+    {
+      author: "user", at: ticket.createdAt,
+      name: ticket.displayName || ticket.userId || "người dùng",
+      message: ticket.message, deliveryStatus: null, error: null
+    },
+    ...(ticket.replies || [])
+  ];
+
+  thread.innerHTML = messages.map((item) => {
+    const isAdmin = item.author === "admin";
+    const status = isAdmin ? replyDeliveryBadge(item) : "";
+    return `<article class="thread-message ${isAdmin ? "from-admin" : "from-user"}">` +
+      `<header><strong>${escapeHtml(isAdmin ? (item.adminName || "quản trị viên") : item.name)}</strong><span class="muted">${escapeHtml(formatDate(item.at))}</span>${status}</header>` +
+      `<p>${escapeHtml(item.message).replace(/\n/g, "<br>")}</p></article>`;
+  }).join("");
+
+  // Nói rõ trước khi gửi: trả lời sẽ đi tới bot nào và cuộc trò chuyện nào.
+  if (target) {
+    target.innerHTML = `<p class="muted">Trả lời sẽ được gửi tới:</p><dl><div><dt>Bot</dt><dd>${escapeHtml(bot?.label || ticket.botId)}</dd></div><div><dt>Cuộc trò chuyện</dt><dd><code>${escapeHtml(ticket.chatId)}</code></dd></div><div><dt>Loại</dt><dd>${ticket.chatType === "group" ? "Nhóm" : "Chat riêng"}</dd></div></dl>`;
+  }
+  form.classList.remove("hidden");
+}
+
+// Trạng thái gửi của một trả lời. Chỉ hiện "Đã gửi" khi Zalo thực sự nhận.
+function replyDeliveryBadge(item) {
+  if (item.deliveryStatus === "sent") return badge("Đã gửi", "success");
+  if (item.deliveryStatus === "failed") {
+    return badge("Gửi lỗi", "danger") + `<span class="error-cell">${escapeHtml(item.error || "")}</span>`;
+  }
+  return badge("Chưa gửi", "neutral");
+}
+
+async function sendFeedbackReply(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const message = String(new FormData(form).get("message") || "").trim();
+  const messageTarget = $("#feedbackReplyMessage");
+  if (messageTarget) messageTarget.textContent = "";
+  if (!selectedFeedback) return;
+  if (!message) {
+    if (messageTarget) messageTarget.textContent = "Nội dung trả lời không được để trống.";
+    return;
+  }
+
+  const outcome = await runAction(async () => {
+    const result = await api("/api/admin/feedback/reply", {
+      method: "POST",
+      body: JSON.stringify({ botId: selectedFeedback.botId, ticketId: selectedFeedback.ticketId, message })
+    });
+    if (result?.error) throw new Error(result.error);
+    return result;
+  }, "Không gửi được trả lời");
+
+  if (!outcome.ok) {
+    if (messageTarget) messageTarget.textContent = outcome.error?.message || "Không gửi được trả lời.";
+    return;
+  }
+
+  const result = outcome.value;
+  if (result?.ticket) selectedFeedback = result.ticket;
+  form.reset();
+  renderFeedbackDetail();
+
+  if (result?.delivered) {
+    setDataState("success", "Đã gửi trả lời.");
+  } else {
+    // KHÔNG báo thành công khi Zalo từ chối. Nêu rõ lỗi và giữ trả lời để gửi lại.
+    setDataState("error", `Chưa gửi được: ${result?.error || "Zalo từ chối tin nhắn"}`);
+  }
+  window.setTimeout(() => setDataState("success", ""), 2500);
+}
+
+async function changeFeedbackStatus(status) {
+  if (!selectedFeedback) return;
+  const outcome = await runAction(async () => {
+    const result = await api("/api/admin/feedback/status", {
+      method: "POST",
+      body: JSON.stringify({ botId: selectedFeedback.botId, ticketId: selectedFeedback.ticketId, status })
+    });
+    if (result?.error) throw new Error(result.error);
+    return result;
+  }, "Không đổi được trạng thái");
+  if (!outcome.ok) return;
+
+  if (outcome.value?.ticket) selectedFeedback = outcome.value.ticket;
+  if (outcome.value?.counts) feedbackCounts = outcome.value.counts;
+  renderFeedbackDetail();
+  renderFeedback();
+  setDataState("success", status === "resolved" ? "Đã đánh dấu xử lý." : "Đã mở lại yêu cầu.");
+  window.setTimeout(() => setDataState("success", ""), 2000);
+}
+
+function setupFeedback() {
+  $("#feedbackReplyForm")?.addEventListener("submit", sendFeedbackReply);
+  $("#feedbackResolveButton")?.addEventListener("click", () => changeFeedbackStatus("resolved"));
+  $("#feedbackReopenButton")?.addEventListener("click", () => changeFeedbackStatus("open"));
+
+  let debounce = null;
+  const reload = () => {
+    window.clearTimeout(debounce);
+    debounce = window.setTimeout(() => loadFeedback(), 250);
+  };
+  for (const id of ["#feedbackSearch", "#feedbackBotFilter", "#feedbackStatusFilter", "#feedbackUnreadFilter"]) {
+    const node = $(id);
+    if (!node) continue;
+    node.addEventListener(id === "#feedbackSearch" ? "input" : "change", reload);
+  }
+}

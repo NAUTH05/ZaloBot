@@ -126,7 +126,10 @@ test("mọi lệnh trong trợ giúp đều được phân loại tường minh"
 test("lệnh công khai chạy được theo từng người, trừ lệnh chỉ có nghĩa với người gõ", () => {
     const publicCommands = HELP_COMMANDS.filter((entry) => entry.group === "public").map((entry) => entry.command);
     const notTargetable = publicCommands.filter((name) => resolveCommandTargeting(name).mode === TARGETING.NONE);
-    assert.deepEqual(notTargetable.sort(), ["myid", "time"]);
+    // /feedback mở yêu cầu từ CHÍNH cuộc trò chuyện đang gõ lệnh, nên chạy nó theo
+    // một người nhận khác là vô nghĩa (sẽ tạo yêu cầu hộ người khác với nội dung của
+    // quản trị viên). Vì vậy nó nằm trong nhóm không chạy theo từng người.
+    assert.deepEqual(notTargetable.sort(), ["feedback", "myid", "time"]);
 });
 
 test("lệnh quản trị toàn cục không bao giờ chạy theo từng người", () => {

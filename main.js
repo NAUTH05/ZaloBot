@@ -64,6 +64,10 @@ const {
     formatClassStartStatus,
     formatDailyNotificationEnabled,
     formatErrorMessage,
+    formatFeedbackAck,
+    formatFeedbackDuplicateAck,
+    formatFeedbackFollowUpAck,
+    formatFeedbackUsage,
     formatGeneralHelp,
     formatMissingStudentIdMessage,
     formatStudentSavedMessage,
@@ -72,7 +76,7 @@ const {
     formatWelcomeMessage
 } = require("./messageTemplates");
 const { resolveCommandName } = require("./helpContent");
-const { getInteractionTargets, recordInteraction } = require("./interactionRegistry");
+const { detectChatType, getInteractionTargets, recordInteraction } = require("./interactionRegistry");
 const {
     getAllChats,
     getChat,
@@ -100,11 +104,19 @@ const { getCommandRegistry } = require("./commandRegistry");
 const { createAdminServer } = require("./adminServer");
 const { DEFAULT_SHUTDOWN_TIMEOUT_MS, createShutdownController } = require("./shutdown");
 const { recordSystemLog } = require("./operationalLog");
-const { getConfiguredAdminIds, isConfiguredAdmin } = require("./adminSettings");
+const { getAdminSettings, getConfiguredAdminIds, isConfiguredAdmin } = require("./adminSettings");
 const { LEGACY_BOT_ID, extractBotName, normalizeBotId, parseScopedKey, resolveBotConfigs, resolveBotDisplayName, scopeKey } = require("./bots");
 const { createOfficialProvider } = require("./providers/officialProvider");
 const { createZcaProvider } = require("./providers/zca/zcaProvider");
 const { createRuntimeMetrics } = require("./runtimeMetrics");
+const {
+    addAdminReply,
+    appendUserMessage,
+    createTicket,
+    findTicket,
+    normalizeTicketId,
+    setReplyDelivery
+} = require("./feedback");
 const { DELIVERY_ERROR_KIND, classifyDeliveryError } = require("./deliveryErrors");
 const { PRIORITY, createProviderQueues } = require("./sendQueue");
 const { getPersistenceQueueStats } = require("./firestorePersistence");
@@ -113,6 +125,7 @@ const {
     describeRegisteredBots,
     getBot,
     getCurrentBot,
+    getCurrentBotId,
     listBots,
     listEnabledBots,
     registerBots,
@@ -909,7 +922,13 @@ function syncChatDirectoryFromLegacyStores() {
 }
 
 async function handleCommand(msg, parsedCommand) {
-    const context = getMessageContext(msg);
+    // Lấy botId từ NGỮ CẢNH đang chạy, không để mặc định về bot 1.
+    //
+    // getMessageContext() mặc định botId là bot 1 khi không được truyền vào. Trước
+    // đây điều đó vô hại vì context.botId không được dùng ở đây; nhưng /feedback
+    // lưu yêu cầu theo botId, nên thiếu bước này thì yêu cầu của bot2/bot3 bị ghi
+    // vào ngăn của bot1 — và trả lời sau đó sẽ gửi tới cuộc trò chuyện của bot1.
+    const context = getMessageContext(msg, { botId: getCurrentBotId() });
     const chatId = context.chatId;
     const { command, argument } = parsedCommand;
 
@@ -1401,6 +1420,8 @@ async function handleCommand(msg, parsedCommand) {
             `> **User ID:** ${escapeMarkdown(context.userId)}\n` +
             `> **Chat ID:** ${escapeMarkdown(context.chatId)}`
         );
+    } else if (command === "feedback") {
+        await handleFeedbackCommand(context, argument, msg);
     } else if (command === "help") {
         await sendMessage(chatId, formatGeneralHelp());
     } else if (command === "helpadmin") {
@@ -1894,7 +1915,10 @@ async function startRuntime() {
             await zcaProvider.stop();
             const cleared = zcaProvider.clearSession();
             return { ok: cleared, cleared };
-        }
+        },
+
+        // Đã tách thành hàm riêng để kiểm thử trực tiếp đường gửi.
+        replyToFeedback: (input) => deliverFeedbackReply(input)
     });
     await new Promise((resolve, reject) => {
         adminRuntime.server.once("error", reject);
@@ -2066,6 +2090,217 @@ function registerBotHandlers(runtime) {
 
 for (const runtime of listBots()) registerBotHandlers(runtime);
 
+/* -------------------------------------------------------------------------- */
+/* Hỗ trợ / góp ý                                                             */
+/* -------------------------------------------------------------------------- */
+
+// Mã tin nhắn nguồn, dùng để chống trùng khi Zalo gửi lại cùng một update.
+//
+// Mỗi nhà cung cấp đặt mã ở chỗ khác nhau: ZCA để trong `meta.msgId`, Zalo Bot
+// Platform để trong trường của update. Trả null nếu không có — khi đó yêu cầu vẫn
+// được lưu, chỉ là không chống trùng được.
+// Danh tính quản trị viên để gửi thông báo về yêu cầu mới.
+//
+// adminSettings không lưu botId (dữ liệu cũ), nên mặc định là bot 1 — bot sở hữu
+// không gian khóa cũ và là nơi quản trị viên đăng ký từ trước tới nay.
+function getAdminIdentities() {
+    const settings = getAdminSettings();
+    const identities = [];
+    for (const admin of settings.admins || []) {
+        if (admin.enabled === false) continue;
+        const chatId = String(admin.chatId || "").trim();
+        if (!chatId) continue;
+        identities.push({ botId: normalizeBotId(admin.botId) || LEGACY_BOT_ID, chatId });
+    }
+    for (const chatId of getConfiguredAdminIds().chatIds) {
+        const normalized = String(chatId || "").trim();
+        if (normalized) identities.push({ botId: LEGACY_BOT_ID, chatId: normalized });
+    }
+    // Bỏ trùng theo (botId, chatId).
+    const seen = new Set();
+    return identities.filter((item) => {
+        const key = `${item.botId}::${item.chatId}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+}
+
+function resolveSourceMessageId(msg) {
+    const candidates = [
+        msg?.meta?.msgId,
+        msg?.message_id,
+        msg?.messageId,
+        msg?.update_id,
+        msg?.updateId,
+        msg?.data?.msgId
+    ];
+    for (const candidate of candidates) {
+        const value = String(candidate == null ? "" : candidate).trim();
+        if (value) return value;
+    }
+    return null;
+}
+
+// /feedback [mã yêu cầu] [nội dung]
+//
+// Có mã yêu cầu ⇒ gửi tiếp vào yêu cầu đó. Không có ⇒ mở yêu cầu mới.
+//
+// Yêu cầu luôn được lưu trong ngăn của BOT HIỆN TẠI, và việc tra cứu cũng chỉ
+// trong ngăn đó, nên không thể vô tình ghi vào yêu cầu của bot khác.
+async function handleFeedbackCommand(context, argument, msg) {
+    const chatId = context.chatId;
+    const rawArgument = String(argument || "").trim();
+
+    // Chưa có nội dung: hướng dẫn cách dùng thay vì lưu một yêu cầu rỗng.
+    if (!rawArgument) {
+        await sendMessage(chatId, formatFeedbackUsage());
+        return;
+    }
+
+    const followUpMatch = rawArgument.match(/^(FB-?[0-9A-Fa-f]{8})\s+([\s\S]+)$/);
+    const sourceMessageId = resolveSourceMessageId(msg);
+    const botId = context.botId || getCurrentBotId();
+
+    if (followUpMatch) {
+        const ticketId = normalizeTicketId(followUpMatch[1]);
+        const existing = ticketId ? findTicket(botId, ticketId) : null;
+
+        if (existing) {
+            const updated = appendUserMessage(botId, ticketId, followUpMatch[2]);
+            if (!updated) {
+                await sendMessage(chatId, formatErrorMessage(new Error("Không ghi được nội dung bổ sung.")));
+                return;
+            }
+            await sendMessage(chatId, formatFeedbackFollowUpAck(ticketId));
+            logDiscord("INFO", `Yêu cầu ${ticketId}: người dùng gửi tiếp (bot ${botId})`);
+            return;
+        }
+
+        if (ticketId) {
+            // Có mã nhưng không thuộc bot này ⇒ nói rõ, đừng im lặng mở yêu cầu mới
+            // với nội dung bắt đầu bằng mã.
+            await sendMessage(chatId, formatWarningMessage(
+                "KHÔNG TÌM THẤY YÊU CẦU",
+                `> Không có yêu cầu **${escapeMarkdown(ticketId)}** trong cuộc trò chuyện với bot này.\n\n` +
+                "> Kiểm tra lại mã, hoặc gửi **/feedback [nội dung]** để mở yêu cầu mới."
+            ));
+            return;
+        }
+    }
+
+    let created;
+    try {
+        created = createTicket({
+            botId,
+            chatId,
+            chatType: detectChatType(msg),
+            userId: context.userId,
+            displayName: context.userDisplayName,
+            message: rawArgument,
+            sourceMessageId
+        });
+    } catch (error) {
+        // KHÔNG bao giờ báo đã gửi khi lưu thất bại.
+        console.error(`[Feedback] không lưu được yêu cầu: ${error.message}`);
+        await sendMessage(chatId, formatErrorMessage(new Error("Chưa lưu được yêu cầu. Bạn thử lại sau ít phút nhé.")));
+        return;
+    }
+
+    const ticket = created.ticket;
+    // Không log nội dung góp ý: chỉ log mã yêu cầu và định danh hội thoại.
+    console.log(`[Feedback] ${ticket.ticketId} từ bot ${botId} chat ${chatId}${created.duplicate ? " (trùng, đã có)" : ""}`);
+    logDiscord("INFO", `Yêu cầu hỗ trợ mới: ${ticket.ticketId} (bot ${botId})`);
+
+    await sendMessage(chatId, created.duplicate
+        ? formatFeedbackDuplicateAck(ticket.ticketId)
+        : formatFeedbackAck(ticket.ticketId));
+
+    // Báo cho quản trị viên. Lỗi ở bước này không được làm hỏng việc đã lưu.
+    await notifyAdminsOfFeedback(ticket).catch((error) => {
+        console.warn(`[Feedback] không báo được cho quản trị viên: ${error.message}`);
+    });
+}
+
+// Báo quản trị viên về yêu cầu mới, trong đúng ngữ cảnh bot của họ.
+//
+// Cố ý KHÔNG gửi kèm nội dung góp ý: chỉ một dòng để quản trị viên mở dashboard.
+async function notifyAdminsOfFeedback(ticket) {
+    const recipients = getAdminIdentities();
+    if (recipients.length === 0) return;
+
+    const text = "# {orange}[HỖ TRỢ] YÊU CẦU MỚI{/orange}\n\n" +
+        `> **Mã:** ${escapeMarkdown(ticket.ticketId)}\n` +
+        `> **Bot:** ${escapeMarkdown(ticket.botId)}\n` +
+        `> **Chat:** ${escapeMarkdown(ticket.chatId)}\n\n` +
+        "Mở **Feedback / Support** trên dashboard để đọc và trả lời.";
+
+    for (const admin of recipients) {
+        try {
+            const runtime = getBot(admin.botId) || getBot(LEGACY_BOT_ID);
+            if (!runtime) continue;
+            await runWithBot(runtime, () => sendMessage(admin.chatId, text));
+        } catch (error) {
+            console.warn(`[Feedback] không gửi được thông báo cho ${admin.chatId}: ${error.message}`);
+        }
+    }
+}
+
+// Gửi trả lời của quản trị viên tới đúng cuộc trò chuyện của đúng bot.
+//
+// Đây là điểm dễ sai nhất của cả tính năng: chatId chỉ có nghĩa trong phạm vi một
+// bot, nên gửi bằng bot khác là gửi cho người khác. Vì vậy botId lấy từ CHÍNH yêu
+// cầu (không phải từ tham số người gọi), và lệnh gửi chạy trong ngữ cảnh bot đó.
+//
+// KHÔNG bao giờ tự chuyển sang tài khoản Zalo cá nhân khi bot chính thức gửi lỗi:
+// đó là gửi bằng danh tính khác, không phải phương án dự phòng.
+async function deliverFeedbackReply({ botId, ticketId, message, adminName }) {
+    const ticket = findTicket(botId, ticketId);
+    if (!ticket) {
+        return { delivered: false, error: "Không tìm thấy yêu cầu trong bot này" };
+    }
+
+    // Lấy bot từ CHÍNH yêu cầu, không tin botId do người gọi truyền vào.
+    const runtime = getBot(ticket.botId);
+    if (!runtime) {
+        return { delivered: false, error: `Bot ${ticket.botId} đang tắt nên không gửi được` };
+    }
+
+    const saved = addAdminReply(ticket.botId, ticketId, { message, adminName });
+    if (!saved) return { delivered: false, error: "Không lưu được trả lời" };
+
+    const text = "# {green}[TRẢ LỜI HỖ TRỢ]{/green}\n\n" +
+        `${message}\n\n` +
+        `> **Mã yêu cầu:** ${escapeMarkdown(ticketId)}`;
+
+    try {
+        await runWithBot(runtime, () => sendMessage(ticket.chatId, text));
+        setReplyDelivery(ticket.botId, ticketId, saved.reply.replyId, { status: "sent" });
+        console.log(`[Feedback] ${ticketId}: đã trả lời qua ${ticket.botId}`);
+        return {
+            delivered: true,
+            botId: ticket.botId,
+            chatId: ticket.chatId,
+            replyId: saved.reply.replyId,
+            ticket: findTicket(ticket.botId, ticketId)
+        };
+    } catch (error) {
+        // Ghi nhận thất bại THẬT và giữ trả lời lại để gửi lại. Giao diện phải
+        // hiển thị lỗi này, không được báo "đã gửi".
+        const reason = error?.message || String(error);
+        setReplyDelivery(ticket.botId, ticketId, saved.reply.replyId, { status: "failed", error: reason });
+        console.warn(`[Feedback] ${ticketId}: gửi qua ${ticket.botId} thất bại - ${reason}`);
+        return {
+            delivered: false,
+            botId: ticket.botId,
+            chatId: ticket.chatId,
+            replyId: saved.reply.replyId,
+            error: reason,
+            ticket: findTicket(ticket.botId, ticketId)
+        };
+    }
+}
+
 if (!isTestEnv) {
     startRuntime().catch((error) => {
         console.error("Không thể khởi động persistence/runtime:", error);
@@ -2078,6 +2313,9 @@ if (!isTestEnv) {
 module.exports = {
     cancelSchedulerJobs,
     closeDashboardServer,
+    // Dùng cho bài kiểm tra đường gửi trả lời hỗ trợ: chứng minh trả lời đi tới
+    // đúng bot của yêu cầu, không bao giờ chỉ dựa vào chatId.
+    deliverFeedbackReply,
     formatGeneralHelp,
     formatAdminHelp,
     // Dùng cho bài kiểm tra cách ly nhà cung cấp: chứng minh phản hồi đi ra bằng

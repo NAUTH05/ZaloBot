@@ -614,6 +614,95 @@ that stays an official-provider error, handled exactly as before and isolated fr
 ZCA. ZCA is an independent provider on an independent account; it is not a way
 around the official platform's quota.
 
+## Feedback / Support
+
+Two-way support inside the chat the user is already in. A student sends `/feedback`,
+an admin reads and replies from the dashboard, and the reply is delivered **through
+the same bot to the same conversation**. The user never has to add the bot owner on
+personal Zalo.
+
+### User commands
+
+```
+/feedback [nội dung]              open a new request
+/feedback [mã yêu cầu] [nội dung]  add to an existing request
+```
+
+Sending `/feedback` with no text shows a short usage example rather than saving an
+empty ticket. On success the user gets a short ticket ID (e.g. `FB-0A9A97BE`) and is
+told an admin can reply in that chat. If storage fails, the user is told the request
+was **not** saved — the bot never claims success it cannot back up.
+
+Both commands are listed in `/help` and in the dashboard command registry. `/feedback`
+is intentionally **not** a per-user targeting command: it opens a request from the
+conversation that typed it, so running it "for" someone else would be meaningless.
+
+### Storage
+
+Tickets live in the existing `feedbackTickets.json` store, using the same
+`scopeKey(botId, …)` convention as every other store. No separate database, no schema
+changes to existing stores, and bot1 keeps its unprefixed keys.
+
+Each ticket records: ticket ID, `botId`, `chatId`, `chatType`, `userId`, display name,
+message, `status` (`open` / `resolved`), `unread`, timestamps, and the full reply
+history with per-reply delivery status.
+
+- **(botId, chatId) is the conversation identity.** A reply is never routed by
+  `chatId` alone, and a legacy-looking ID is never assumed to belong to bot1. Two bots
+  may legitimately have the same chat ID; their tickets stay separate.
+- **Duplicate delivery is handled.** Zalo may resend the same update; when the event
+  carries a stable message ID the second delivery returns the existing ticket instead
+  of creating a duplicate.
+- **Length is bounded** (2000 characters, truncated rather than rejected) and at most
+  50 tickets are kept per conversation.
+- **Feedback text is not logged.** Logs carry the ticket ID, bot and chat only.
+
+### Dashboard workflow
+
+**Feedback / Support** shows unread and open counts, a searchable list (by ticket ID,
+chat, user or content) filterable by bot, status and unread, plus the full message
+thread for the selected ticket.
+
+1. Pick a ticket. Opening it marks it read.
+2. The reply box states plainly **which bot and which conversation** will receive it.
+3. Send. The reply is stored and delivered through the ticket's own bot.
+4. **Resolve** or **Reopen** as needed.
+
+Delivery status is shown per reply: `Đã gửi`, `Gửi lỗi` (with the platform error), or
+`Chưa gửi`. A failed reply is **kept**, so the admin can retry; the dashboard never
+shows "sent" for a message Zalo rejected. All ticket and reply endpoints sit behind the
+existing admin authentication, and user-submitted content is HTML-escaped before it is
+rendered.
+
+### Follow-up
+
+A user continues a request with `/feedback <ticket ID> <message>`. This appends to the
+ticket, reopens it if it was resolved, and marks it unread again. A ticket ID that
+belongs to a different bot is reported as not found rather than silently starting a new
+request.
+
+### Delivery failures
+
+If the platform refuses a reply (for example `422 You are not permitted to send
+messages to this chat_id`), the dashboard reports the real error and keeps the reply
+available for retry. **The bot never falls back to the owner's personal Zalo account** —
+sending from a different identity is not a fallback, it is sending as someone else. A
+permanent failure also increments the chat's existing failure counter so later
+broadcasts stop hammering a dead target; no user data is deleted.
+
+### Admin notification
+
+When a ticket is created the bot sends admins a one-line notice (ticket ID, bot, chat)
+so they know to open the dashboard. It deliberately omits the feedback text. This is
+best-effort: if it fails, the request is already saved and the dashboard is sufficient
+on its own.
+
+### Known platform limitation
+
+Reply delivery depends on the Zalo Bot Platform accepting the message. There is no
+supported way to deliver to a chat the bot is no longer permitted to message, and the
+dashboard reports that honestly rather than trying another identity.
+
 # ZALOBOT HƯỚNG DẪN
 
 ## BẮT ĐẦU        /start, /luumssv

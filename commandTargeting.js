@@ -53,6 +53,7 @@ const BROADCAST_COMMANDS = new Set([
 const NOT_TARGETABLE_REASONS = {
     time: "chỉ trả về giờ hệ thống của chính người gõ lệnh.",
     myid: "chỉ trả về User ID và Chat ID của chính người gõ lệnh.",
+    feedback: "gửi góp ý từ chính cuộc trò chuyện của người gõ lệnh — hãy dùng Target Chat ID nếu cần gửi hộ.",
     blockbot: "thay đổi danh sách chặn toàn hệ thống, không gắn với một người.",
     unblockbot: "thay đổi danh sách chặn toàn hệ thống, không gắn với một người.",
     blockai: "thay đổi quyền dùng /ai toàn hệ thống.",

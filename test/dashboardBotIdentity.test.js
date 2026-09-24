@@ -155,10 +155,14 @@ test("thống kê theo bot đếm riêng từng danh tính", () => {
     assert.equal(bot2.subscriptionCount, 2);
 });
 
-test("bản ghi cũ thiếu botId thuộc về bot 1", () => {
+test("bản ghi cũ thiếu botId được đánh dấu CHƯA XÁC MINH, không tự nhận là bot 1", () => {
     registerTwoBots();
     seedStores();
     // Bản ghi legacy: khóa trần, không có trường botId.
+    //
+    // Trước đây trường hợp này bị gán cho bot1. Đó chính là lỗi: bản ghi của kênh
+    // khác (tài khoản Zalo cá nhân) cũng rơi vào đây nên hiển thị nhầm là bot1.
+    // Nay thiếu bằng chứng thì phải nói rõ là chưa xác minh.
     const subscriptions = memoryFiles.get(SUBSCRIPTIONS);
     subscriptions["legacy-chat::legacy-user"] = {
         contextVersion: 2, chatId: "legacy-chat", userId: "legacy-user", userDisplayName: "Legacy",
@@ -169,7 +173,30 @@ test("bản ghi cũ thiếu botId thuộc về bot 1", () => {
 
     const data = buildAdminData();
     const legacy = data.subscriptions.find((item) => item.chatId === "legacy-chat");
-    assert.equal(legacy.botId, "bot1");
+    assert.equal(legacy.botId, null, "không được tự gán bot1 khi thiếu bằng chứng");
+    assert.equal(legacy.sourceConfidence, "unverified_legacy");
+    assert.equal(legacy.sourceVerified, false);
+    assert.equal(legacy.canSend, false, "chưa xác minh thì không được gửi tin");
+});
+
+test("bản ghi cũ CÓ trường botId vẫn được xác minh là bot1", () => {
+    registerTwoBots();
+    seedStores();
+    // Khóa trần NHƯNG có trường botId tường minh: đây là bằng chứng thật.
+    const subscriptions = memoryFiles.get(SUBSCRIPTIONS);
+    subscriptions["verified-chat::verified-user"] = {
+        contextVersion: 2, botId: "bot1", chatId: "verified-chat", userId: "verified-user",
+        userDisplayName: "Đã xác minh",
+        notificationTimes: [{ id: 1, time: "06:30", targetDayOffset: 0 }],
+        notificationsEnabled: true, updatedAt: "2026-09-01T00:00:00.000Z"
+    };
+    memoryFiles.set(SUBSCRIPTIONS, subscriptions);
+
+    const data = buildAdminData();
+    const record = data.subscriptions.find((item) => item.chatId === "verified-chat");
+    assert.equal(record.botId, "bot1");
+    assert.equal(record.sourceVerified, true);
+    assert.equal(record.canSend, true);
 });
 
 /* -------------------------------------------------------------------------- */
