@@ -18,6 +18,7 @@
 const { Zalo, ThreadType } = require("zca-js");
 const { PROVIDER_TYPES, formatBotLabel, zcaId } = require("../../bots");
 const adapter = require("./zcaMessageAdapter");
+const { renderZcaRichText } = require("./zcaRichText");
 const sessionStore = require("./zcaSessionStore");
 
 // Trạng thái vòng đời. Chỉ dùng tập con phù hợp với ZCA.
@@ -431,6 +432,11 @@ function createZcaProvider(options = {}) {
         return true;
     }
 
+    // Gửi tin qua tài khoản Zalo cá nhân.
+    //
+    // zca-js KHÔNG hiểu Markdown. Nội dung gốc của ZaloBot (dùng chung với bot
+    // chính thức) được chuyển tại đây thành rich text GỐC của Zalo: bỏ ký hiệu
+    // định dạng khỏi văn bản và sinh `styles[]` trỏ đúng vào văn bản cuối.
     async function sendMessage(chatId, text) {
         if (!provider.api) {
             throw new Error("ZCA chưa đăng nhập nên không gửi được tin nhắn");
@@ -439,10 +445,30 @@ function createZcaProvider(options = {}) {
         // Phải biết đây là nhóm hay cá nhân để gửi đúng loại luồng. Mặc định là
         // cá nhân vì phần lớn hội thoại là chat riêng.
         const threadType = provider.threadTypes?.get(threadId) === "group" ? ThreadType.Group : ThreadType.User;
-        const result = await provider.api.sendMessage(String(text), threadId, threadType);
-        provider.lastActivityAt = new Date().toISOString();
-        return result;
+
+        const rendered = renderZcaRichText(String(text));
+        const styledPayload = rendered.styles.length > 0
+            ? { msg: rendered.text, styles: rendered.styles }
+            : { msg: rendered.text };
+
+        try {
+            const result = await provider.api.sendMessage(styledPayload, threadId, threadType);
+            provider.lastActivityAt = new Date().toISOString();
+            return result;
+        } catch (error) {
+            // Zalo có thể từ chối payload có styles (ví dụ phiên bản ứng dụng
+            // không hỗ trợ). Thử lại ĐÚNG MỘT LẦN bằng chính văn bản đã bỏ ký hiệu
+            // định dạng — không bao giờ gửi lại nguyên Markdown, và không lặp vô hạn.
+            if (rendered.styles.length === 0) throw error;
+            log("warn", `gửi kèm định dạng thất bại (${error.message}), thử lại không kèm định dạng`);
+            const result = await provider.api.sendMessage({ msg: rendered.text }, threadId, threadType);
+            provider.lastActivityAt = new Date().toISOString();
+            return result;
+        }
     }
+
+    // Cho phép nơi khác (kiểm thử, chẩn đoán) xem trước payload mà không gửi.
+    provider.renderMessage = (text) => renderZcaRichText(String(text));
 
     // Ghi nhớ loại luồng của từng chat để lần gửi sau dùng đúng.
     provider.threadTypes = new Map();

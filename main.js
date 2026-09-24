@@ -332,14 +332,17 @@ async function sendMessage(chatId, text, options = {}) {
     }
     if (current.trim()) chunks.push(current.trim());
     const provider = currentProvider();
-    // Nhà cung cấp không hiểu markdown của Zalo Bot Platform (tài khoản cá nhân
-    // qua ZCA) nhận plain text ngay từ đầu, thay vì gửi lỗi rồi gửi lại.
     const supportsMarkdown = provider.supportsMarkdown !== false;
     const sendOptions = supportsMarkdown ? messageOptions : { ...otherOptions };
     for (let index = 0; index < chunks.length; index += 1) {
         const prefix = index > 0 && continuationHeader ? `${continuationHeader}\n\n` : "";
         const rawPayload = `${prefix}${chunks[index]}`;
-        const payload = supportsMarkdown ? rawPayload : toPlainText(rawPayload);
+        // Nhà cung cấp LUÔN nhận nội dung GỐC, chưa cắt định dạng.
+        //
+        // Bot chính thức gửi thẳng kèm parse_mode. ZCA cần nội dung gốc để tự
+        // chuyển `**bold**` và `{orange}...{/orange}` thành styles[] gốc của Zalo.
+        // Cắt markdown ở đây sẽ làm mất chính dữ liệu định dạng mà ZCA cần.
+        const payload = rawPayload;
         const commandContext = dashboardCommandContext.getStore();
         if (commandContext && String(commandContext.chatId) === String(chatId)) {
             commandContext.messages.push({ chatId: String(chatId), text: payload });

@@ -552,6 +552,55 @@ ZCA account    ─┘
   resolves the provider that owns it, so official notifications still go out
   through their original official bot and ZCA notifications go through ZCA.
 
+### Rich-text formatting on the personal account
+
+The official bots render Markdown through Zalo Bot Platform `parse_mode`. A personal
+account has no such flag, so the ZCA provider converts the SAME shared templates into
+native Zalo style spans instead of sending Markdown through.
+
+The conversion lives in `providers/zca/zcaRichText.js` and produces the payload
+zca-js expects:
+
+```js
+api.sendMessage({ msg: rendered.text, styles: rendered.styles }, threadId, threadType)
+```
+
+Formatting markers are removed from `msg` and re-expressed as `styles[]`, whose
+offsets point at the FINAL text (never the original Markdown).
+
+| In the shared template | On the personal account |
+| --- | --- |
+| `**bold**` | Bold |
+| `*italic*`, `_italic_` | Italic |
+| `__underline__` | Underline |
+| `~~strike~~` | StrikeThrough |
+| `` `code` `` | Bold — Zalo has no monospace style |
+| `# Heading` | Big + Bold |
+| `## Heading`, `### Heading` | Bold |
+| `{green}…{/green}` | Green |
+| `{orange}…{/orange}` | Orange |
+| `{red}…{/red}`, `{yellow}…{/yellow}` | Red, Yellow |
+| `> quote` | `│ quote` — no native quote style |
+| `- item` | UnorderedList |
+| `1. item` | OrderedList |
+| `[label](url)` | `label (url)` — the URL is kept |
+| ```fence``` | fences removed, content kept as plain text |
+
+Formatting may be nested in any order: `**{orange}/help{/orange}**` and
+`# {green}Title{/green}` both apply every style to the same range.
+
+Notes and limits:
+
+- Official bots are untouched. They still receive the original Markdown with
+  `parse_mode: markdown`; the ZCA renderer never runs for them.
+- Long messages are still chunked first, and each chunk is rendered independently,
+  so style offsets are always correct for the chunk they belong to.
+- If Zalo rejects a styled payload, the message is retried **once** without styles —
+  never as raw Markdown, and never in a loop.
+- Zalo personal messages have no monospace and no combined bold+italic style, so
+  inline code maps to Bold and `***text***` maps to Bold.
+- Zalo has no native blockquote, so `>` becomes `│`.
+
 ### Official Bot Platform limits are unchanged
 
 Adding ZCA does **not** modify official API requests or attempt to evade any
