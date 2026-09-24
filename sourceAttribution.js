@@ -24,6 +24,8 @@ const SOURCE_CONFIDENCE = Object.freeze({
     VERIFIED: "verified",
     // Thiếu trường botId nhưng khóa có phạm vi ⇒ khóa chính là bằng chứng.
     FROM_SCOPED_KEY: "from_scoped_key",
+    // Quản trị viên đã xác nhận nguồn và ghi rõ lý do.
+    MANUAL: "manual",
     // Không có trường botId và khóa không có phạm vi ⇒ KHÔNG đủ căn cứ.
     UNVERIFIED_LEGACY: "unverified_legacy",
     // Trường botId mâu thuẫn với phạm vi của khóa ⇒ không tin được cái nào.
@@ -33,13 +35,16 @@ const SOURCE_CONFIDENCE = Object.freeze({
 const CONFIDENCE_LABELS = Object.freeze({
     [SOURCE_CONFIDENCE.VERIFIED]: "Đã xác minh",
     [SOURCE_CONFIDENCE.FROM_SCOPED_KEY]: "Đã xác minh (theo khóa lưu trữ)",
+    [SOURCE_CONFIDENCE.MANUAL]: "Đã xác minh (quản trị viên xác nhận)",
     [SOURCE_CONFIDENCE.UNVERIFIED_LEGACY]: "Chưa xác minh",
     [SOURCE_CONFIDENCE.CONFLICT]: "Nguồn mâu thuẫn"
 });
 
 // Nguồn chưa xác minh thì KHÔNG được gửi tin: gửi sai bot là gửi cho người khác.
 function isVerifiedConfidence(confidence) {
-    return confidence === SOURCE_CONFIDENCE.VERIFIED || confidence === SOURCE_CONFIDENCE.FROM_SCOPED_KEY;
+    return confidence === SOURCE_CONFIDENCE.VERIFIED
+        || confidence === SOURCE_CONFIDENCE.FROM_SCOPED_KEY
+        || confidence === SOURCE_CONFIDENCE.MANUAL;
 }
 
 // Nguồn có phải tài khoản Zalo cá nhân (ZCA) không. Dùng để hiển thị tách bạch
@@ -56,12 +61,37 @@ function describeSourceKind(botId) {
 
 // Quy tắc trung tâm. `key` là khóa lưu trữ thô trong store (có thể có tiền tố
 // `botN::` hoặc `zca:<uid>::`), hoặc rỗng nếu nơi gọi không có khóa.
-function resolveRecordSource(record, key = "") {
+//
+// `options.verification` là bản ghi xác minh của quản trị viên cho đúng bản ghi này
+// (nếu có). Xác minh của người KHÔNG ghi đè bằng chứng kỹ thuật — nó chỉ được dùng
+// khi bằng chứng không đủ để kết luận, tức là đúng những bản ghi đang chưa xác minh.
+function resolveRecordSource(record, key = "", options = {}) {
     const declared = normalizeBotId(record?.botId);
     const parsed = parseScopedKey(key);
     const keyBotId = parsed.scoped ? parsed.botId : null;
+    const verification = options.verification || null;
 
-    // Mâu thuẫn: hai nguồn thông tin nói khác nhau. Không tin cái nào.
+    // Xác minh của quản trị viên đứng trước phần suy đoán, nhưng đứng SAU bằng chứng
+    // kỹ thuật rõ ràng: nếu bản ghi đã có nguồn xác minh được thì không cần tới nó,
+    // và một xác minh cũ không được phép ghi đè dữ liệu mới hơn.
+    const manualFallback = () => {
+        if (!verification || !verification.botId) return null;
+        return {
+            botId: verification.botId,
+            confidence: SOURCE_CONFIDENCE.MANUAL,
+            label: CONFIDENCE_LABELS[SOURCE_CONFIDENCE.MANUAL],
+            canSend: true,
+            declaredBotId: declared,
+            keyBotId,
+            verifiedBy: verification.verifiedBy || null,
+            verifiedAt: verification.verifiedAt || null,
+            verifyReason: verification.reason || null,
+            reason: null
+        };
+    };
+
+    // Mâu thuẫn: hai nguồn thông tin nói khác nhau. Không tin cái nào — kể cả xác
+    // minh của người, vì chính sự mâu thuẫn là điều cần người xem lại.
     if (declared && keyBotId && declared !== keyBotId) {
         return {
             botId: null,
@@ -102,6 +132,9 @@ function resolveRecordSource(record, key = "") {
 
     // Không botId, khóa trần. TRƯỚC ĐÂY trường hợp này bị gán cho bot1.
     // Nay giữ trung lập: không có bằng chứng thì không được đoán.
+    const manual = manualFallback();
+    if (manual) return manual;
+
     return {
         botId: null,
         confidence: SOURCE_CONFIDENCE.UNVERIFIED_LEGACY,

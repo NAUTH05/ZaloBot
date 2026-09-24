@@ -480,7 +480,26 @@ function createZcaProvider(options = {}) {
     provider.start = start;
     provider.stop = stop;
     provider.beginQrLogin = beginQrLogin;
-    provider.fetchIdentityName = async () => null;   // tên tài khoản đến từ QR/phiên
+    // Tên tài khoản, hỏi Zalo khi đã đăng nhập.
+    //
+    // TRƯỚC ĐÂY hàm này luôn trả null, nên resolveBotNames() luôn ghi
+    // "[zca:pending]: không lấy được tên; dùng nhãn cấu hình." — kể cả khi tài khoản
+    // hoàn toàn bình thường. Đó là vấn đề TÊN HIỂN THỊ, không phải lỗi kết nối.
+    //
+    // Chưa đăng nhập thì trả null một cách có chủ ý (chưa có gì để hỏi), và
+    // isReadyForName() bên dưới giúp nơi gọi phân biệt "chưa sẵn sàng" với "hỏng".
+    provider.fetchIdentityName = async () => {
+        if (!provider.authenticated || !provider.api) return null;
+        if (typeof provider.api.fetchAccountInfo !== "function") return null;
+        const info = await provider.api.fetchAccountInfo();
+        const profile = info && info.profile ? info.profile : null;
+        if (!profile) return null;
+        return profile.displayName || profile.zaloName || null;
+    };
+
+    // Tên chỉ lấy được sau khi đăng nhập xong. Nơi gọi dùng cờ này để KHÔNG báo lỗi
+    // khi nhà cung cấp còn đang chờ đăng nhập, và để thử lại sau khi đã sẵn sàng.
+    provider.isReadyForName = () => provider.authenticated === true && Boolean(provider.api);
 
     // Xoá phiên đã lưu. Dùng khi phiên hỏng hoặc khi muốn đăng nhập tài khoản khác.
     provider.clearSession = () => {

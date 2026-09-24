@@ -161,15 +161,29 @@ function botBadge(record) {
 
 // Nút thao tác trên một bản ghi.
 //
-// Nguồn CHƯA XÁC MINH thì nút bị vô hiệu và nêu rõ lý do: mở chi tiết hay gửi tin
+// Nguồn CHƯA XÁC MINH thì nút quản lý bị vô hiệu, nhưng có nút "Xác minh nguồn" để
+// quản trị viên xử lý. KHÔNG mở khoá Quản lý chỉ để dashboard trông gọn — gửi tin
 // theo một nguồn đoán mò có thể liên hệ nhầm người hoặc nhầm tài khoản.
 function actionButton(attribute, value, botId, record, label, className = "table-action") {
   if (!botId) {
     const reason = record?.sourceReason || "Chưa xác định được nguồn của bản ghi này.";
     return `<button class="${escapeHtml(className)}" disabled title="${escapeHtml(`Không thể thao tác: ${reason}`)}">${escapeHtml(label)}</button>` +
-      `<small class="block error-cell">Cần xác minh nguồn</small>`;
+      verifySourceButton(record);
   }
-  return `<button class="${escapeHtml(className)}" ${attribute}="${escapeHtml(value)}" data-record-bot="${escapeHtml(botId)}">${escapeHtml(label)}</button>`;
+  return `<button class="${escapeHtml(className)}" ${attribute}="${escapeHtml(value)}" data-record-bot="${escapeHtml(botId)}">${escapeHtml(label)}</button>` +
+    revokeSourceButton(record);
+}
+
+// Nút mở hộp thoại xác minh nguồn cho bản ghi chưa xác minh.
+function verifySourceButton(record) {
+  return `<button class="table-action" data-verify-source="1" data-source-store="${escapeHtml(record?.sourceStoreId || "")}" data-source-key="${escapeHtml(record?.sourceRecordKey || "")}">Xác minh nguồn</button>` +
+    `<small class="block error-cell">Cần xác minh nguồn</small>`;
+}
+
+// Nút hoàn tác cho bản ghi đã được quản trị viên xác minh (có thể sai).
+function revokeSourceButton(record) {
+  if (record?.sourceConfidence !== "manual") return "";
+  return `<button class="table-action" data-revoke-source="1" data-source-store="${escapeHtml(record?.sourceStoreId || "")}" data-source-key="${escapeHtml(record?.sourceRecordKey || "")}">Hoàn tác xác minh</button>`;
 }
 
 function botOptionsHtml(includeAll) {
@@ -958,7 +972,7 @@ let feedbackTickets = [];
 let feedbackCounts = { total: 0, unread: 0, open: 0, resolved: 0 };
 let selectedFeedback = null;
 
-function renderAll() { populateBotControls(); renderBotGrid(); renderOverview(); renderDirectory(); renderUsers(); renderGroups(); renderNotifications(); renderHealth(); renderSettings(); renderLogs(); setupCommandConsole(); renderCommands(); setupFeedback(); renderFeedback(); ensurePaginationViews(); applyPaginationViews(); $("#healthPill").textContent = `${dashboard.bot.status} · ${dashboard.bot.health}`; $("#generatedAt").textContent = formatDate(workspace.generatedAt); }
+function renderAll() { populateBotControls(); renderBotGrid(); renderOverview(); renderDirectory(); renderUsers(); renderGroups(); renderNotifications(); renderHealth(); renderSettings(); renderLogs(); setupCommandConsole(); renderCommands(); setupFeedback(); renderFeedback(); setupSourceVerification(); ensurePaginationViews(); applyPaginationViews(); $("#healthPill").textContent = `${dashboard.bot.status} · ${dashboard.bot.health}`; $("#generatedAt").textContent = formatDate(workspace.generatedAt); }
 
 async function loadData() {
   setDataState("loading", "Loading admin data...");
@@ -1354,4 +1368,142 @@ function setupFeedback() {
     if (!node) continue;
     node.addEventListener(id === "#feedbackSearch" ? "input" : "change", reload);
   }
+}
+
+/* ---------------------------------------------------------------------------
+   Xác minh nguồn gốc bản ghi.
+
+   Luồng: xem bằng chứng → chọn nguồn → nêu lý do → xác nhận rõ ràng → lưu.
+   Có thể hoàn tác nếu xác minh sai.
+
+   Nguyên tắc: giao diện KHÔNG tự chọn nguồn thay quản trị viên. Nó chỉ gợi ý khi
+   mọi bằng chứng thống nhất, và luôn bắt người dùng tự xác nhận.
+   --------------------------------------------------------------------------- */
+
+function evidenceRow(item) {
+  const tone = item.reliable ? "success" : "warning";
+  return `<article class="stack-item"><header><strong>${escapeHtml(item.label)}</strong>${badge(item.reliable ? "Đáng tin" : "Không kết luận", tone)}</header>` +
+    `<p><code>${escapeHtml(item.value)}</code></p>` +
+    `<p class="muted">${escapeHtml(item.detail)}</p></article>`;
+}
+
+async function openVerifySource(storeId, recordKey) {
+  if (!storeId || !recordKey) {
+    setDataState("error", "Thiếu thông tin bản ghi để xác minh.");
+    return;
+  }
+  const outcome = await runAction(
+    () => api(`/api/admin/source/evidence?storeId=${encodeURIComponent(storeId)}&recordKey=${encodeURIComponent(recordKey)}`),
+    "Không lấy được bằng chứng"
+  );
+  if (!outcome.ok) return;
+
+  const data = outcome.value;
+  const sources = Array.isArray(data.assignableSources) ? data.assignableSources : [];
+  const record = data.record || {};
+
+  const options = sources.map((source) =>
+    `<option value="${escapeHtml(source.botId)}" ${data.suggestion === source.botId ? "selected" : ""}>` +
+    `${escapeHtml(source.label)} — ${escapeHtml(source.botId)} (${source.providerType === "zca" ? "tài khoản cá nhân" : "bot chính thức"})</option>`
+  ).join("");
+
+  const candidates = (data.candidates || []).length
+    ? data.candidates.map((c) => `<li><strong>${escapeHtml(c.label)}</strong> — ${c.sources.length} dấu vết: ${escapeHtml(c.sources.map((s) => s.detail).join("; "))}</li>`).join("")
+    : "<li>Không có nguồn nào được bằng chứng chỉ ra.</li>";
+
+  showDialog("Xác minh nguồn gốc", `
+    <div class="empty-state"><p>${escapeHtml(data.note)}</p></div>
+    <h3>Bản ghi</h3>
+    <div class="detail-grid">
+      <div class="detail"><span>Store</span><strong>${escapeHtml(record.storeId || storeId)}</strong></div>
+      <div class="detail"><span>Khóa</span><code>${escapeHtml(record.key || recordKey)}</code></div>
+      <div class="detail"><span>Chat ID</span><code>${escapeHtml(record.chatId || "-")}</code></div>
+      <div class="detail"><span>User ID</span><code>${escapeHtml(record.userId || "-")}</code></div>
+      <div class="detail"><span>botId hiện tại</span><strong>${escapeHtml(record.declaredBotId || "(không có)")}</strong></div>
+    </div>
+    <h3>Bằng chứng thu thập được</h3>
+    <div class="stack">${(data.evidence || []).map(evidenceRow).join("")}</div>
+    <h3>Nguồn mà bằng chứng chỉ ra</h3>
+    <ul>${candidates}</ul>
+    <form id="verifySourceForm">
+      <label>Gán nguồn cho bản ghi này
+        <select name="botId" required>
+          <option value="">-- Chọn tài khoản/kênh --</option>
+          ${options}
+        </select>
+      </label>
+      <label>Lý do xác minh (bắt buộc)
+        <textarea name="reason" rows="3" required placeholder="Ví dụ: chatId này chỉ xuất hiện trong dữ liệu của tài khoản này"></textarea>
+      </label>
+      <label class="checkbox-line">
+        <input type="checkbox" name="confirmed" required />
+        Tôi đã xem bằng chứng và xác nhận nguồn này là đúng.
+      </label>
+      <p class="muted">Thao tác này chỉ gán NGUỒN cho bản ghi. Nó không gộp hai danh tính người dùng làm một.</p>
+      <div class="row-actions"><button class="primary small" type="submit">Lưu xác minh</button></div>
+      <p id="verifySourceMessage" class="error" role="alert"></p>
+    </form>
+  `);
+
+  const form = $("#verifySourceForm");
+  if (!form) return;
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const formData = new FormData(form);
+    const messageTarget = $("#verifySourceMessage");
+    if (messageTarget) messageTarget.textContent = "";
+
+    const result = await runAction(() => api("/api/admin/source/verify", {
+      method: "POST",
+      body: JSON.stringify({
+        storeId,
+        recordKey,
+        botId: formData.get("botId"),
+        reason: formData.get("reason"),
+        confirmed: formData.get("confirmed") === "on"
+      })
+    }), "Không lưu được xác minh");
+
+    if (!result.ok) {
+      if (messageTarget) messageTarget.textContent = result.error?.message || "Không lưu được xác minh.";
+      return;
+    }
+    $("#detailDialog").close();
+    await loadData();
+    setDataState("success", "Đã xác minh nguồn.");
+    window.setTimeout(() => setDataState("success", ""), 2000);
+  });
+}
+
+async function revokeSource(storeId, recordKey) {
+  const reason = window.prompt("Lý do hoàn tác xác minh (bắt buộc):", "");
+  if (reason == null) return;
+  if (!reason.trim()) {
+    setDataState("error", "Phải nêu lý do hoàn tác.");
+    return;
+  }
+  const outcome = await runAction(() => api("/api/admin/source/revoke", {
+    method: "POST",
+    body: JSON.stringify({ storeId, recordKey, reason: reason.trim() })
+  }), "Không hoàn tác được xác minh");
+  if (!outcome.ok) return;
+
+  await loadData();
+  setDataState("success", "Đã hoàn tác xác minh. Bản ghi trở lại trạng thái chưa xác minh.");
+  window.setTimeout(() => setDataState("success", ""), 2500);
+}
+
+function setupSourceVerification() {
+  $$("[data-verify-source]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openVerifySource(button.dataset.sourceStore, button.dataset.sourceKey);
+    });
+  });
+  $$("[data-revoke-source]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      revokeSource(button.dataset.sourceStore, button.dataset.sourceKey);
+    });
+  });
 }

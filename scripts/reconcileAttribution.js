@@ -21,6 +21,7 @@ const path = require("path");
 const { initializeFirestorePersistence, readJsonStore, writeJsonStore, flushPersistenceWrites } = require("../firestorePersistence");
 const { parseScopedKey, normalizeBotId, LEGACY_BOT_ID } = require("../bots");
 const { SOURCE_CONFIDENCE, resolveRecordSource } = require("../sourceAttribution");
+const { getActiveVerifications, getCounts: getVerificationCounts } = require("../sourceVerifications");
 
 const ROOT = path.join(__dirname, "..");
 const APPLY = process.argv.includes("--apply");
@@ -102,14 +103,22 @@ function main() {
     const scopesOf = (map, id) => map.get(id) || null;
 
     // --- Phân loại ---------------------------------------------------------------
+    // Xác minh do quản trị viên thực hiện: bản ghi đã được người quyết định thì
+    // KHÔNG đề xuất gán lại nữa. Nạp TRƯỚC vòng lặp phân loại vì vòng lặp cần tra.
+    const activeVerifications = getActiveVerifications();
+    const verificationCounts = getVerificationCounts();
+
     const confirmed = [];      // đã có nguồn xác minh và KHÔNG mâu thuẫn bằng chứng
     const recoverable = [];    // có bằng chứng định danh chỉ thuộc một bot khác
     const ambiguous = [];      // không đủ căn cứ
     const conflicting = [];    // botId mâu thuẫn trực tiếp với khóa có phạm vi
 
     for (const item of all) {
-        const source = resolveRecordSource(item.record, item.key);
+        const verification = activeVerifications[item.storeId + "::" + item.key] || null;
+        const source = resolveRecordSource(item.record, item.key, { verification });
         if (source.confidence === SOURCE_CONFIDENCE.CONFLICT) { conflicting.push(item); continue; }
+        // Đã được quản trị viên xác minh ⇒ giữ nguyên, không đề xuất lại.
+        if (source.confidence === SOURCE_CONFIDENCE.MANUAL) { confirmed.push(item); continue; }
 
         // Bằng chứng từ phạm vi của định danh: chatId/userId này CHỈ xuất hiện dưới
         // khóa của một nguồn duy nhất. Đây là bằng chứng mạnh — mạnh hơn cả trường
@@ -152,6 +161,7 @@ function main() {
     console.log(`  CÓ bằng chứng (ghi sai nguồn)      : ${recoverable.length}`);
     console.log(`  KHÔNG đủ căn cứ (giữ nguyên)       : ${ambiguous.length}`);
     console.log(`  Mâu thuẫn (không tự động xử lý)    : ${conflicting.length}`);
+    console.log(`  Quản trị viên đã xác minh (hoàn tác được): ${verificationCounts.active} (đã hoàn tác: ${verificationCounts.revoked})`);
 
     const byStore = (list) => {
         const out = {};

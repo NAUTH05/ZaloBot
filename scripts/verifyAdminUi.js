@@ -141,4 +141,17 @@ if (app.includes('name="targetChatId"')) fail("Command console must not post a s
 if (!app.includes('api("/api/admin/commands/batch"')) fail("Command console must post batches to /api/admin/commands/batch");
 if (!app.includes("/api/admin/commands/batch/")) fail("Command console must poll the batch job endpoint");
 
+// Xác minh nguồn: phải xem được bằng chứng, phải tự chọn nguồn, phải nêu lý do, và
+// phải xác nhận rõ ràng. Không được tự đoán nguồn thay quản trị viên.
+if (!app.includes("function openVerifySource")) fail("Dashboard must expose a Verify source action");
+if (!app.includes("/api/admin/source/evidence")) fail("Verify source must show the collected evidence");
+if (!app.includes("function evidenceRow")) fail("Verify source must render evidence rows");
+if (!app.includes("assignableSources")) fail("Verify source must offer the assignable sources");
+if (!app.includes('name="reason"')) fail("Verify source must require a reason");
+if (!app.includes('name="confirmed"')) fail("Verify source must require explicit confirmation");
+if (!app.includes("function revokeSource")) fail("A mistaken verification must be reversible");
+if (!/không gộp hai danh tính/i.test(app)) fail("Verify source must state it does not merge identities");
+// Bản ghi chưa xác minh KHÔNG được mở khoá Quản lý chỉ để giao diện gọn hơn.
+if (!/function actionButton[\s\S]{0,500}disabled/.test(app)) fail("Unverified records must keep their Manage action disabled");
+
 console.log("Admin UI validation passed");

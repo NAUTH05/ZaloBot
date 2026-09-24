@@ -14,6 +14,14 @@ const {
 } = require("./chatDirectory");
 const { getInteractionTargets, removeInteractionMember, upsertInteractionMember } = require("./interactionRegistry");
 const {
+    getCounts: getVerificationCounts,
+    getVerification,
+    listVerifications,
+    revokeVerification,
+    verifySource
+} = require("./sourceVerifications");
+const { buildEvidence } = require("./sourceEvidence");
+const {
     getCounts: getFeedbackCounts,
     listTickets: listFeedbackTickets,
     markTicketRead: markFeedbackRead,
@@ -44,7 +52,7 @@ const { buildAdminData } = require("./adminDataService");
 const { buildTargetUserOptions, resolveBatchTargets } = require("./targetUsers");
 const { getPersistenceStatus, readJsonStore, writeJsonStore } = require("./firestorePersistence");
 const { getSystemLogs } = require("./operationalLog");
-const { describeRegisteredBots, getBot, listEnabledBots, runWithBot } = require("./botContext");
+const { describeRegisteredBots, getBot, listBots, listEnabledBots, runWithBot } = require("./botContext");
 const { LEGACY_BOT_ID, normalizeBotId } = require("./bots");
 
 // Bản ghi không có botId thuộc về bot 1 — quy tắc giữ tương thích dữ liệu cũ.
@@ -475,6 +483,73 @@ function sessionFor(request) {
     return session;
 }
 
+// Danh sách nguồn được phép gán. Không chứa token hay bí mật phiên.
+function assignableSources() {
+    const sources = listBots()
+        .map((bot) => ({ botId: bot.botId, label: bot.displayName || bot.label || bot.botId, providerType: bot.providerType || "official" }))
+        // "zca:pending" là danh tính TẠM trước khi đăng nhập, không phải tài khoản thật.
+        .filter((bot) => bot.botId !== "zca:pending");
+    return sources;
+}
+
+// Thu thập bằng chứng cho một bản ghi cụ thể.
+//
+// Quét MỌI bản ghi trong các store liên quan để biết một chatId/userId từng xuất
+// hiện dưới phạm vi của những nguồn nào — đó là bằng chứng chính mà quản trị viên cần.
+function buildSourceEvidence(storeId, recordKey) {
+    const readStoreEntries = (id, getter) => {
+        try {
+            const data = getter();
+            if (!data) return [];
+            const out = [];
+            const containers = [];
+            if (data.chats && typeof data.chats === "object") containers.push(data.chats);
+            const flat = {};
+            for (const [k, v] of Object.entries(data)) {
+                if (["schemaVersion", "chats", "tickets", "deletedChatIds", "sourceIndex"].includes(k)) continue;
+                if (v && typeof v === "object") flat[k] = v;
+            }
+            if (Object.keys(flat).length) containers.push(flat);
+            for (const map of containers) {
+                for (const [key, record] of Object.entries(map)) {
+                    if (!record || typeof record !== "object") continue;
+                    out.push({
+                        storeId: id, key, record,
+                        chatId: record.chatId != null ? String(record.chatId) : null,
+                        userId: record.userId != null ? String(record.userId) : (record.lastUserId != null ? String(record.lastUserId) : null)
+                    });
+                }
+            }
+            return out;
+        } catch (error) {
+            console.warn(`Không đọc được ${id} để thu thập bằng chứng: ${error.message}`);
+            return [];
+        }
+    };
+
+    // Đọc thẳng store để có KHÓA THÔ: bằng chứng mạnh nhất nằm ở tiền tố khóa, mà
+    // các hàm tiện ích như getAllChats() đã bỏ tiền tố đi.
+    const storeFile = (name) => path.join(__dirname, `${name}.json`);
+    const readRawStore = (name) => {
+        try {
+            return readJsonStore(storeFile(name), storeFile(name), null);
+        } catch (error) {
+            console.warn(`Không đọc được ${name} để thu thập bằng chứng: ${error.message}`);
+            return null;
+        }
+    };
+
+    const allRecords = [
+        ...readStoreEntries("chatDirectory", () => readRawStore("chatDirectory")),
+        ...readStoreEntries("interactions", () => readRawStore("interactions")),
+        ...readStoreEntries("subscriptions", () => readRawStore("subscriptions"))
+    ];
+
+    const target = allRecords.find((item) => item.storeId === storeId && item.key === recordKey);
+    if (!target) return null;
+    return buildEvidence(target, { allRecords });
+}
+
 function requireAdmin(request, response) {
     if (!adminEnabled()) {
         json(response, 503, { error: "Admin authentication is not configured" });
@@ -736,6 +811,77 @@ async function handleApi(request, response, url, options = {}) {
         if (!ticket) return json(response, 404, { error: "Không tìm thấy yêu cầu trong bot này" });
         audit("feedback.status", request, { ticketId, botId, status });
         return json(response, 200, { ticket, counts: getFeedbackCounts() });
+    }
+
+    // ---------------------------------------------------------------------
+    // Xác minh nguồn gốc bản ghi (chỉ quản trị viên đã đăng nhập).
+    //
+    // Ba bước tách biệt: xem bằng chứng → xác minh (kèm lý do) → có thể hoàn tác.
+    // Giao diện bắt buộc hiển thị bằng chứng và bắt xác nhận rõ ràng trước khi lưu.
+    // ---------------------------------------------------------------------
+    if (url.pathname === `${API_PREFIX}/source/evidence` && request.method === "GET") {
+        const storeId = url.searchParams.get("storeId");
+        const recordKey = url.searchParams.get("recordKey");
+        if (!storeId || !recordKey) return json(response, 400, { error: "Thiếu storeId hoặc recordKey" });
+        const evidence = buildSourceEvidence(storeId, recordKey);
+        if (!evidence) return json(response, 404, { error: "Không tìm thấy bản ghi" });
+        audit("source.evidence", request, { storeId, recordKey });
+        return json(response, 200, {
+            ...evidence,
+            // Nguồn được phép gán. Không bao giờ có token trong danh sách này.
+            assignableSources: assignableSources(),
+            verification: getVerification(storeId, recordKey)
+        });
+    }
+    if (url.pathname === `${API_PREFIX}/source/verify` && request.method === "POST") {
+        let body;
+        try {
+            body = await readBody(request);
+        } catch (error) {
+            return json(response, 400, { error: error.message });
+        }
+        try {
+            const verification = verifySource({
+                storeId: body?.storeId,
+                recordKey: body?.recordKey,
+                botId: body?.botId,
+                reason: body?.reason,
+                // Bắt buộc: giao diện phải gửi cờ này sau khi người dùng xác nhận.
+                confirmed: body?.confirmed === true,
+                verifiedBy: request.admin?.displayName || request.admin?.username || "quản trị viên"
+            });
+            audit("source.verify", request, { storeId: body?.storeId, recordKey: body?.recordKey, botId: verification.botId });
+            return json(response, 200, { verification, counts: getVerificationCounts() });
+        } catch (error) {
+            return json(response, 400, { error: error.message });
+        }
+    }
+    if (url.pathname === `${API_PREFIX}/source/revoke` && request.method === "POST") {
+        let body;
+        try {
+            body = await readBody(request);
+        } catch (error) {
+            return json(response, 400, { error: error.message });
+        }
+        try {
+            const revoked = revokeVerification({
+                storeId: body?.storeId,
+                recordKey: body?.recordKey,
+                reason: body?.reason,
+                revokedBy: request.admin?.displayName || request.admin?.username || "quản trị viên"
+            });
+            if (!revoked) return json(response, 404, { error: "Không có xác minh nào đang hiệu lực cho bản ghi này" });
+            audit("source.revoke", request, { storeId: body?.storeId, recordKey: body?.recordKey });
+            return json(response, 200, { verification: revoked, counts: getVerificationCounts() });
+        } catch (error) {
+            return json(response, 400, { error: error.message });
+        }
+    }
+    if (url.pathname === `${API_PREFIX}/source/verifications` && request.method === "GET") {
+        return json(response, 200, {
+            verifications: listVerifications(),
+            counts: getVerificationCounts()
+        });
     }
 
     if (url.pathname === `${API_PREFIX}/chats` && request.method === "GET") {

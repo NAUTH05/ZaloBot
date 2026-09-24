@@ -9,6 +9,8 @@ scheduleSnapshots.json
 scheduleSnapshots.json.tmp
 interactions.json
 interactions.json.tmp
+sourceVerifications.json
+sourceVerifications.json.tmp
 accessControl.json
 accessControl.json.tmp
 birthdayData.json

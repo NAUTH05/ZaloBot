@@ -78,6 +78,10 @@ function createOfficialProvider(config = {}) {
         },
 
         // Tên thật lấy từ Zalo Bot Platform bằng chính token của bot.
+        // Bot chính thức hỏi được tên ngay khi client tồn tại; không có giai đoạn
+        // chờ đăng nhập như tài khoản cá nhân.
+        isReadyForName: () => Boolean(provider.client),
+
         async fetchIdentityName() {
             if (typeof provider.client.getMe !== "function") return null;
             return provider.client.getMe();

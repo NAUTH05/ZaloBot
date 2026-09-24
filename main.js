@@ -191,6 +191,11 @@ const zcaProvider = createZcaProvider({
     onIdentityChanged: (provider, newBotId, previousBotId) => {
         const moved = rekeyBot(previousBotId, newBotId);
         console.log(`[ZCA] danh tính: ${previousBotId} → ${newBotId}${moved ? "" : " (giữ nguyên khóa cũ)"}`);
+        // Danh tính vừa đổi nghĩa là tài khoản đã đăng nhập xong. Tra tên ngay bây
+        // giờ — lúc khởi động chưa hỏi được nên tên thật chưa có.
+        refreshBotName(newBotId).catch((error) => {
+            console.warn(`[ZCA] không tra lại được tên: ${error.message}`);
+        });
     }
 });
 
@@ -254,8 +259,12 @@ function withTimeout(promise, ms, label) {
 async function resolveBotNames() {
     await Promise.all(listBots().map(async (runtime) => {
         try {
+            // Nhà cung cấp chưa sẵn sàng (ví dụ ZCA đang chờ quét QR) thì bỏ qua
+            // TRONG IM LẶNG. Đây không phải lỗi — chỉ là chưa tới lúc. Báo cảnh báo
+            // ở đây chính là tiếng ồn "[zca:pending]: không lấy được tên".
+            if (typeof runtime.isReadyForName === "function" && !runtime.isReadyForName()) return;
             // Mỗi nhà cung cấp tự biết cách lấy tên của mình: bot chính thức hỏi
-            // Zalo Bot Platform bằng token; tài khoản cá nhân đã có tên từ phiên.
+            // Zalo Bot Platform bằng token; tài khoản cá nhân hỏi hồ sơ tài khoản.
             if (typeof runtime.fetchIdentityName !== "function") return;
             const response = await withTimeout(
                 Promise.resolve(runtime.fetchIdentityName()),
@@ -279,6 +288,38 @@ async function resolveBotNames() {
             console.warn(`[${runtime.botId}]: không lấy được tên (${error.message}); dùng nhãn cấu hình.`);
         }
     }));
+}
+
+// Tra lại tên sau khi một nhà cung cấp vừa sẵn sàng.
+//
+// ZCA chỉ biết danh tính sau khi đăng nhập, mà resolveBotNames() lúc khởi động đã
+// chạy xong từ trước. Không gọi lại thì tên thật không bao giờ được lấy và dashboard
+// mãi hiển thị nhãn dự phòng.
+async function refreshBotName(botId) {
+    const runtime = getBot(botId);
+    if (!runtime) return null;
+    try {
+        if (typeof runtime.isReadyForName === "function" && !runtime.isReadyForName()) return null;
+        if (typeof runtime.fetchIdentityName !== "function") return null;
+        const name = extractBotName(await withTimeout(
+            Promise.resolve(runtime.fetchIdentityName()),
+            BOT_NAME_TIMEOUT_MS,
+            `${runtime.botId} fetchIdentityName`
+        ));
+        if (!name) return null;
+        runtime.verifiedName = name;
+        runtime.displayName = resolveBotDisplayName({
+            botId: runtime.botId,
+            verifiedName: name,
+            configuredName: runtime.configuredName
+        });
+        console.log(`[${runtime.botId}]: tên từ Zalo = ${name}`);
+        return name;
+    } catch (error) {
+        // Không lấy được tên thì vẫn giữ nhãn cấu hình — không ảnh hưởng vận hành.
+        console.warn(`[${runtime.botId}]: không lấy được tên (${error.message}); dùng nhãn cấu hình.`);
+        return null;
+    }
 }
 const dashboardCommandContext = new AsyncLocalStorage();
 const registeredSchedulers = new WeakSet();
