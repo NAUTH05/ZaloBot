@@ -36,6 +36,11 @@ adminSettings.json
 # scripts/cleanupBirthdayData.js ghi ra trước khi thay đổi dữ liệu.
 migration-backups/
 
+# File khôi phục sổ tương tác (scripts/recoverInteractions.js).
+# Chứa Chat ID / User ID thật của người nhận: TUYỆT ĐỐI không commit.
+recovered-interactions.json
+recovered-interactions*.json
+
 # Phiên đăng nhập ZCA (tài khoản Zalo cá nhân).
 # Đây là thông tin xác thực: có nó là đăng nhập được vào tài khoản Zalo.
 # TUYỆT ĐỐI không commit.

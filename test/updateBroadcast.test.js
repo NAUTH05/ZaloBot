@@ -8,9 +8,11 @@ process.env.OWNER_CHAT_ID = "broadcast-owner-chat";
 
 const ELIGIBLE_CHAT = "broadcast-test-chat-a";
 const MUTED_CHAT = "broadcast-test-chat-b";
+// Mỗi đích phải khai báo TÀI KHOẢN sở hữu: đợt phát tin định tuyến theo
+// (botId, chatId), và đích không rõ tài khoản bị bỏ qua chứ không đoán bot 1.
 const TARGETS = [
-    { chatId: ELIGIBLE_CHAT, chatType: "private" },
-    { chatId: MUTED_CHAT, chatType: "private" }
+    { chatId: ELIGIBLE_CHAT, chatType: "private", botId: "bot1" },
+    { chatId: MUTED_CHAT, chatType: "private", botId: "bot1" }
 ];
 // Chat B đã tắt tính năng thông báo chung trong chat directory.
 const MUTED_CHATS = new Set([MUTED_CHAT]);

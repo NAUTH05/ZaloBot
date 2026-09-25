@@ -560,8 +560,44 @@ function resolveQuestionYear(argument, date = new Date()) {
     return Number(getVietnamDateInfo(date).year);
 }
 
+// Nguồn gốc của một đích phát tin: (botId, chatId) — KHÔNG BAO GIỜ chỉ chatId.
+//
+// Vì sao: hai bot có thể cùng gặp một Chat ID (Zalo cấp Chat ID theo từng tài
+// khoản), đó là HAI cuộc trò chuyện khác nhau với hai người khác nhau. Gộp theo
+// chatId trần sẽ làm mất một người nhận, và tệ hơn: gửi tin bằng tài khoản không
+// sở hữu cuộc trò chuyện đó.
+function broadcastKey(botId, chatId) {
+    return `${normalizeBotId(botId) || LEGACY_BOT_ID}::${String(chatId)}`;
+}
+
+// Bot sở hữu một bản ghi tương tác.
+//
+// `botId` là nguồn duy nhất đáng tin: bản ghi do chính bot ghi ra. Bản ghi không
+// khai báo botId là dữ liệu cũ chưa xác minh nguồn — trả null, KHÔNG mặc định bot 1.
+// Không suy từ tiền tố khóa vì getInteractionTargets() đã bỏ mất khóa.
+function interactionOwnerId(target) {
+    return normalizeBotId(target?.botId);
+}
+
+// Đích hợp lệ để phát tin: phải biết chắc tài khoản sở hữu VÀ bot đó đang bật.
+//
+// Bot đang tắt không phải "chưa xác minh": không có tài khoản nào gửi được, nên
+// đích bị loại khỏi đợt phát thay vì để lỗi giữa chừng hoặc rơi về bot khác.
+function resolveBroadcastOwner(target) {
+    const ownerId = interactionOwnerId(target);
+    if (!ownerId) return { ownerId: null, runtime: null, reason: "unverified_source" };
+    const runtime = getBot(ownerId);
+    if (!runtime) return { ownerId, runtime: null, reason: "owner_bot_offline" };
+    return { ownerId, runtime, reason: null };
+}
+
 function getBroadcastTargets(feature = "broadcast") {
+    // Khóa gộp là (botId, chatId). Cùng Chat ID ở hai tài khoản là hai đích riêng.
     const targets = new Map();
+    const skipped = { unverifiedSource: 0, ownerBotOffline: 0 };
+    const addTarget = (key, target) => {
+        if (!targets.has(key)) targets.set(key, target);
+    };
 
     // Ghi sổ chat bằng MỘT lượt đối chiếu gộp thay vì một lần cho mỗi đích.
     //
@@ -577,7 +613,14 @@ function getBroadcastTargets(feature = "broadcast") {
     };
 
     for (const target of getInteractionTargets()) {
-        addEntry(target.botId, {
+        // Bản ghi chưa rõ tài khoản KHÔNG BAO GIỜ được phát tin: không có căn cứ nào
+        // để chọn tài khoản gửi, và đoán sai nghĩa là nhắn cho người khác.
+        const owner = resolveBroadcastOwner(target);
+        if (!owner.ownerId) {
+            skipped.unverifiedSource += 1;
+            continue;
+        }
+        addEntry(owner.ownerId, {
             chatId: target.chatId,
             chatType: target.chatType,
             displayName: target.chatTitle || target.lastUserDisplayName,
@@ -586,7 +629,11 @@ function getBroadcastTargets(feature = "broadcast") {
             lastInboundInteractionAt: target.lastInteractionAt,
             firstInteractionAt: target.firstInteractionAt
         });
-        targets.set(String(target.chatId), target);
+        addTarget(broadcastKey(owner.ownerId, target.chatId), {
+            ...target,
+            chatId: String(target.chatId),
+            botId: owner.ownerId
+        });
     }
 
     // Giữ tương thích với dữ liệu có trước khi sổ tương tác được bổ sung.
@@ -596,12 +643,25 @@ function getBroadcastTargets(feature = "broadcast") {
         const rawChatId = subscription?.chatId ?? legacyChatId;
         if (rawChatId == null) continue;
         const chatId = String(rawChatId);
-        addEntry(subscription?.botId || parseScopedKey(subscriptionKey).botId, {
+        // Trường botId tường minh trước; nếu thiếu thì khóa ĐÃ CÓ PHẠM VI mới là bằng
+        // chứng. Khóa trần là bản ghi cũ chưa xác minh nguồn — bỏ qua thay vì gán bot 1,
+        // vì đoán sai tài khoản nghĩa là nhắn cho người khác.
+        const declared = normalizeBotId(subscription?.botId);
+        const parsedKey = parseScopedKey(subscriptionKey);
+        const botId = declared || (parsedKey.scoped ? parsedKey.botId : null);
+        if (!botId) {
+            skipped.unverifiedSource += 1;
+            continue;
+        }
+        addEntry(botId, {
             chatId,
             chatType: subscription.chatType || "unknown",
             displayName: subscription.chatTitle || subscription.userDisplayName || ""
         });
-        if (!targets.has(chatId)) targets.set(chatId, { chatId, chatType: "unknown" });
+        const key = broadcastKey(botId, chatId);
+        if (!targets.has(key)) {
+            addTarget(key, { chatId, botId, chatType: "unknown" });
+        }
     }
 
     for (const [botId, entries] of entriesByBot) {
@@ -610,7 +670,22 @@ function getBroadcastTargets(feature = "broadcast") {
         if (runtime) runWithBot(runtime, run); else run();
     }
 
-    return [...targets.values()].filter((target) => isChatEligible(target.chatId, feature));
+    const resolved = [];
+    for (const target of targets.values()) {
+        // Quyền truy cập chat được kiểm tra trong ngữ cảnh của bot SỞ HỮU đích, nếu
+        // không bot 2 sẽ bị đánh giá bằng sổ chat của bot 1.
+        const owner = resolveBroadcastOwner(target);
+        if (!owner.runtime) {
+            if (owner.reason === "owner_bot_offline") skipped.ownerBotOffline += 1;
+            else skipped.unverifiedSource += 1;
+            continue;
+        }
+        const eligible = runWithBot(owner.runtime, () => isChatEligible(target.chatId, feature));
+        if (eligible) resolved.push({ ...target, botId: owner.ownerId });
+    }
+
+    // `skipped` chỉ để chẩn đoán và ghi log — không phải danh sách người nhận.
+    return Object.assign(resolved, { skipped });
 }
 
 // Gửi thông báo tới mọi chat đủ điều kiện. Dùng chung cho /thongbao (thông báo
@@ -619,21 +694,38 @@ function getBroadcastTargets(feature = "broadcast") {
 async function sendBotAnnouncement(message, options = {}) {
     const { operation = "announcement", logLabel = "thông báo chung" } = options;
     const targets = getBroadcastTargets();
-    const result = { targets: targets.length, sent: 0, failed: 0 };
+    const skipped = targets.skipped || { unverifiedSource: 0, ownerBotOffline: 0 };
+    const result = { targets: targets.length, sent: 0, failed: 0, skipped };
+    if (skipped.unverifiedSource > 0 || skipped.ownerBotOffline > 0) {
+        console.warn(
+            `[Phát tin] Bỏ qua ${skipped.unverifiedSource} đích chưa rõ tài khoản và ` +
+            `${skipped.ownerBotOffline} đích có bot sở hữu đang tắt.`
+        );
+    }
     // Gửi hàng loạt có kiểm soát.
     //
     // Trước đây vòng lặp này await TUẦN TỰ từng đích: 500 đích × ~200ms = 100 giây.
     // Nay mỗi đích được xếp vào hàng đợi của nhà cung cấp sở hữu nó với mức ưu tiên
     // BULK, nên chạy song song có trần và không chen ngang việc trả lời người dùng.
-    const deliveries = targets.map((target) =>
-        sendNotification(target.chatId, message, {
+    //
+    // Mỗi lần gửi PHẢI chạy trong ngữ cảnh của bot sở hữu đích: nếu không, tin của
+    // bot 2 sẽ đi ra bằng token bot 1 — nhắn cho người khác bằng tài khoản khác.
+    const deliveries = targets.map((target) => {
+        const owner = resolveBroadcastOwner(target);
+        if (!owner.runtime) {
+            return Promise.resolve({
+                target,
+                error: new Error(`Không có bot ${owner.ownerId || "(chưa rõ)"} đang bật để gửi cho chat ${target.chatId}`)
+            });
+        }
+        return runWithBot(owner.runtime, () => sendNotification(target.chatId, message, {
             feature: "broadcast",
             operation,
             priority: PRIORITY.BULK
-        })
+        }))
             .then((delivery) => ({ target, delivery }))
-            .catch((error) => ({ target, error }))
-    );
+            .catch((error) => ({ target, error }));
+    });
 
     const outcomes = await Promise.allSettled(deliveries);
     for (const outcome of outcomes) {
@@ -658,10 +750,15 @@ async function sendBotAnnouncement(message, options = {}) {
 }
 
 function formatBroadcastSummary(title, result) {
+    const skipped = result.skipped || { unverifiedSource: 0, ownerBotOffline: 0 };
+    const skipTotal = skipped.unverifiedSource + skipped.ownerBotOffline;
     return `# {green}✓ ${title}{/green}\n\n` +
         `> **Tổng cuộc trò chuyện:** ${result.targets}\n` +
         `> **Gửi thành công:** ${result.sent}\n` +
-        `> **Gửi lỗi:** ${result.failed}`;
+        `> **Gửi lỗi:** ${result.failed}` +
+        (skipTotal > 0
+            ? `\n> **Bỏ qua:** ${skipTotal} (${skipped.unverifiedSource} chưa rõ tài khoản, ${skipped.ownerBotOffline} bot sở hữu đang tắt)`
+            : "");
 }
 
 
@@ -1498,6 +1595,9 @@ async function sendNotification(chatId, text, options = {}) {
     const configuredThreshold = Number(process.env.CHAT_MAX_CONSECUTIVE_FAILURES || 3);
     const defaultThreshold = Number.isInteger(configuredThreshold) && configuredThreshold > 0 ? configuredThreshold : 3;
     const { feature = "broadcast", operation = feature, maxConsecutiveFailures = defaultThreshold, bypassEligibility = false, priority } = options;
+    // Kiểm tra quyền và GHI NHẬN KẾT QUẢ GỬI đều phải chạy trong ngữ cảnh của bot
+    // sở hữu chat: sổ chat có phạm vi theo bot, nên ghi nhận bằng ngữ cảnh bot 1 sẽ
+    // đánh dấu nhầm lên bản ghi của bot 1 khi chat thuộc bot 2.
     if (!bypassEligibility && !isChatEligible(chatId, feature)) return { skipped: true, reason: "inactive_or_disabled" };
     try {
         await sendMessage(chatId, text, { ...(options.sendOptions || {}), ...(priority === undefined ? {} : { priority }) });

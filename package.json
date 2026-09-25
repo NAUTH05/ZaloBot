@@ -17,7 +17,9 @@
         "audit:attribution": "node scripts/auditAttribution.js",
         "audit:attribution-deep": "node scripts/auditAttributionDeep.js",
         "migrate:attribution": "node scripts/reconcileAttribution.js",
-        "migrate:attribution-apply": "node scripts/reconcileAttribution.js --apply"
+        "migrate:attribution-apply": "node scripts/reconcileAttribution.js --apply",
+        "recover:interactions": "node scripts/recoverInteractions.js",
+        "recover:interactions-apply": "node scripts/recoverInteractions.js --apply"
     },
     "dependencies": {
         "dotenv": "^17.2.1",
