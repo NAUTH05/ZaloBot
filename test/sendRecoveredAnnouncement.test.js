@@ -6,9 +6,18 @@
 // ============================================================================
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+
+// Hậu tố ngẫu nhiên theo lần chạy cho tên chiến dịch.
+//
+// Vì sao không dùng `process.pid` một mình: PID bị hệ điều hành TÁI SỬ DỤNG, nên
+// một checkpoint sót lại từ lần chạy trước có thể trùng tên. Lần chạy sau nạp nó
+// lên, thấy người nhận đã ở mục `sent` rồi nên KHÔNG gửi gì — bài kiểm tra đỏ ngẫu
+// nhiên. Đây là lỗi chập chờn đã gặp thật, không phải giả định.
+const RUN_TAG = crypto.randomBytes(6).toString("hex");
 
 const {
     campaignContentHash,
@@ -218,7 +227,7 @@ test("gửi với nội dung khác nhưng cùng mã chiến dịch thì main T�
     const messageFile = path.join(dir, "msg.txt");
     fs.writeFileSync(messageFile, "Bản gốc.", "utf8");
 
-    const campaign = `hash-test-${process.pid}`;
+    const campaign = `hash-test-${process.pid}-${RUN_TAG}`;
     const t1 = path.join(CHECKPOINT_DIR, `${campaign}.json`);
     t.after(() => fs.rmSync(t1, { force: true }));
 
@@ -277,7 +286,7 @@ test("gửi đúng nhà cung cấp cho cả 4 danh tính, không rơi về bot1"
     fs.writeFileSync(messageFile, "Thông báo.", "utf8");
 
     const { registry, log } = makeFakeRegistry();
-    const campaign = `four-${process.pid}`;
+    const campaign = `four-${process.pid}-${RUN_TAG}`;
     t.after(() => fs.rmSync(path.join(CHECKPOINT_DIR_FOR_TEST(), `${campaign}.json`), { force: true }));
 
     const result = await main(
@@ -307,7 +316,7 @@ test("ZCA không có trong tiến trình thì HOÃN chứ không thất bại", 
     const { registry } = makeFakeRegistry();
     const emptyRegistry = { get: () => null, list: () => [] };
     void registry;
-    const campaign = `zca-defer-${process.pid}`;
+    const campaign = `zca-defer-${process.pid}-${RUN_TAG}`;
     t.after(() => fs.rmSync(path.join(CHECKPOINT_DIR_FOR_TEST(), `${campaign}.json`), { force: true }));
 
     const result = await main(
@@ -333,7 +342,7 @@ test("bot chính thức đã đăng ký nhưng đang tắt ⇒ hoãn (bot_not_co
 
     // Registry chỉ có bot1 — bot3 coi như đang tắt.
     const onlyBot1 = { get: (botId) => (botId === "bot1" ? makeFakeRegistry().registry.get("bot1") : null) };
-    const campaign = `bot3-off-${process.pid}`;
+    const campaign = `bot3-off-${process.pid}-${RUN_TAG}`;
     t.after(() => fs.rmSync(path.join(CHECKPOINT_DIR_FOR_TEST(), `${campaign}.json`), { force: true }));
 
     const result = await main(
@@ -358,7 +367,7 @@ test("normalizeOfficialConfigs chấp nhận cả mảng trần lẫn { bots }",
 /* ------------------------------- báo cáo --------------------------------- */
 
 test("báo cáo đếm đúng người thất bại vĩnh viễn và hoãn", () => {
-    const campaign = `report-${process.pid}`;
+    const campaign = `report-${process.pid}-${RUN_TAG}`;
     writeCheckpoint(campaign, {
         contentHash: "deadbeefcafe1234",
         sent: { "bot1::1": { at: "x" }, "bot2::2": { at: "x" } },

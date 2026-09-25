@@ -900,13 +900,18 @@ async function handleApi(request, response, url, options = {}) {
                 message: body?.message,
                 messageFile: body?.messageFile,
                 resume: body?.resume === true,
+                // Nhịp gửi (ms/đích) do người vận hành chỉ định. Script tự kẹp về khoảng
+                // an toàn; ở đây chỉ chuyển tiếp giá trị thô.
+                intervalMs: body?.intervalMs,
                 confirm: true
             });
             audit("announcement.send", request, {
                 campaign: result?.campaignId || null,
                 sent: result?.sent ?? null,
                 failed: result?.failed ?? null,
-                deferred: result?.deferred ?? null
+                deferred: result?.deferred ?? null,
+                rateLimited: result?.rateLimited ?? null,
+                paused: result?.paused ? Object.keys(result.paused) : null
             });
             return json(response, 200, result);
         } catch (error) {

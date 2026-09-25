@@ -52,6 +52,13 @@
 //    gửi (sẽ gửi lại ở lần --resume), nhưng cũng KHÔNG tự động thử lại ngay trong
 //    cùng một lượt — tránh gửi trùng cho người đã nhận.
 //
+// 5b. NHỊP GỬI THEO TỪNG NHÀ CUNG CẤP (announcementPacing.js). Đợt đầu tiên bắn
+//    196 đích trong ~2 giây và nhận lại 136 lỗi 429. Từ nay mỗi nhà cung cấp có
+//    nhịp riêng: một đích tại một thời điểm, cách nhau `intervalMs`; gặp 429 thì
+//    chờ theo `Retry-After` (hoặc giãn cách tăng dần kèm nhiễu), và 429 lặp lại
+//    trong cửa sổ ⇒ TẠM DỪNG nhà cung cấp đó thay vì thử nốt số còn lại. Nhà cung
+//    cấp bị tạm dừng chỉ ảnh hưởng chính nó; các nhà cung cấp khác tiếp tục.
+//
 // 6. MÃ CHIẾN DỊCH GẮN VỚI NỘI DUNG. Checkpoint lưu vân tay (nguồn + nội dung tin).
 //    Đổi nội dung mà giữ nguyên mã chiến dịch ⇒ TỪ CHỐI chạy, vì người đã nhận bản
 //    cũ sẽ bị bỏ qua âm thầm và không bao giờ nhận bản mới. Phải dùng mã mới.
@@ -77,6 +84,11 @@ const {
     resolveBotConfigs
 } = require("../bots");
 const { classifyDeliveryError, DELIVERY_ERROR_KIND } = require("../deliveryErrors");
+const {
+    PACING_DEFAULTS,
+    createPacingController,
+    resolvePacingOptions
+} = require("../announcementPacing");
 
 const DEFAULT_SOURCE = path.join(__dirname, "..", "recovered-interactions.json");
 const CHECKPOINT_DIR = path.join(__dirname, "..", "data", "announcement-checkpoints");
@@ -271,10 +283,47 @@ function checkpointPath(campaignId) {
     return path.join(CHECKPOINT_DIR, `${safe}.json`);
 }
 
+// Kiểm tra hình dạng trạng thái nhịp đọc từ checkpoint. Một file hỏng/viết dở phải
+// bị BỎ QUA (coi như chưa có), không được làm sập đợt gửi: mất trạng thái tạm dừng
+// chỉ khiến ta thử lại sớm hơn, còn ném lỗi thì cả chiến dịch dừng.
+//
+// Lưu ý về `null`: `Number(null)` là 0 nên nếu chỉ dựa vào `Number.isFinite` thì một
+// phần tử `null` trong `strikes` sẽ lọt qua thành mốc thời gian 0 — vô hại nhưng sai.
+// Vì vậy phải loại tường minh trước khi ép kiểu.
+function sanitizeStrikeList(raw) {
+    if (!Array.isArray(raw)) return [];
+    const result = [];
+    for (const item of raw) {
+        if (item === null || item === undefined || item === "") continue;
+        const numeric = Number(item);
+        if (Number.isFinite(numeric)) result.push(numeric);
+    }
+    return result;
+}
+
+function sanitizePacingState(raw) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+    const result = {};
+    for (const [botId, value] of Object.entries(raw)) {
+        if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+        result[String(botId)] = {
+            strikes: sanitizeStrikeList(value.strikes),
+            strikeCount: Number(value.strikeCount) || 0,
+            pausedUntil: Number(value.pausedUntil) || 0,
+            pauseReason: value.pauseReason || null,
+            sent: Number(value.sent) || 0
+        };
+    }
+    return result;
+}
+
 function readCheckpoint(campaignId) {
     const file = checkpointPath(campaignId);
     if (!fs.existsSync(file)) {
-        return { campaignId, contentHash: null, sent: {}, failed: {}, deferred: {}, updatedAt: null };
+        return {
+            campaignId, contentHash: null, sent: {}, failed: {}, deferred: {},
+            paused: {}, pacing: {}, updatedAt: null
+        };
     }
     try {
         const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
@@ -284,6 +333,11 @@ function readCheckpoint(campaignId) {
             sent: parsed.sent && typeof parsed.sent === "object" ? parsed.sent : {},
             failed: parsed.failed && typeof parsed.failed === "object" ? parsed.failed : {},
             deferred: parsed.deferred && typeof parsed.deferred === "object" ? parsed.deferred : {},
+            // Trạng thái tạm dừng theo nhà cung cấp (nhịp gửi) — đọc lại được sau khi
+            // tiến trình chết, để một nhà cung cấp đang bị khoá tốc độ không bị thử
+            // lại ngay ở lần chạy tiếp.
+            paused: parsed.paused && typeof parsed.paused === "object" ? parsed.paused : {},
+            pacing: sanitizePacingState(parsed.pacing),
             updatedAt: parsed.updatedAt || null
         };
     } catch (error) {
@@ -339,6 +393,12 @@ function readSourceFile(sourcePath) {
 // Gửi một tin qua nhà cung cấp cụ thể, KHÔNG BAO GIỜ rơi về bot khác.
 //
 // `getProvider(botId)` trả về nhà cung cấp đang chạy trong tiến trình, hoặc null.
+//
+// Kết quả trả về có BỐN trạng thái, và chúng khác nhau về hệ quả:
+//   sent       — Zalo đã nhận. Không bao giờ gửi lại.
+//   deferred   — chưa gửi được vì lý do hạ tầng (nhà cung cấp tắt/chưa sẵn sàng).
+//   rate_limit — 429. KHÔNG phải thất bại của người nhận; sẽ thử lại ở lần resume.
+//   failed     — lỗi vĩnh viễn (410/422: bỏ qua mãi mãi) hoặc lỗi tạm thời khác.
 async function sendOne(getProvider, recipient, message) {
     const provider = getProvider(recipient.botId);
     if (!provider) {
@@ -354,6 +414,11 @@ async function sendOne(getProvider, recipient, message) {
         if (classification.kind === DELIVERY_ERROR_KIND.PERMANENT) {
             // Bỏ qua VĨNH VIỄN. Không thử bot khác — không có cơ sở nào để đổi tài khoản.
             return { status: "failed", reason: classification.reason || "permanent", permanent: true };
+        }
+        if (classification.kind === DELIVERY_ERROR_KIND.RATE_LIMIT) {
+            // 429 là chuyện của NHÀ CUNG CẤP, không phải của người nhận. Nơi gọi phải
+            // chậm lại (hoặc tạm dừng) rồi mới thử lại — không bao giờ bắn tiếp.
+            return { status: "rate_limit", reason: classification.reason || "rate_limit", error };
         }
         // Tạm thời / không chắc chắn: giữ lại để lần --resume thử lại. KHÔNG thử lại
         // ngay trong cùng một lượt.
@@ -376,7 +441,10 @@ function parseArgs(argv) {
         report: argv.includes("--report"),
         campaign: get("--campaign") || get("-c"),
         messageFile: get("--message-file") || get("-m"),
-        source: get("--source") || get("-s") || DEFAULT_SOURCE
+        source: get("--source") || get("-s") || DEFAULT_SOURCE,
+        // Nhịp gửi. Mặc định thận trọng (xem PACING_DEFAULTS); cờ này chỉ để người
+        // vận hành điều chỉnh khi cần, và luôn bị kẹp về khoảng an toàn.
+        intervalMs: get("--interval-ms") || get("--interval")
     };
 }
 
@@ -413,8 +481,10 @@ function printReport(campaignId) {
     const failed = Object.keys(checkpoint.failed).length;
     const permanent = Object.values(checkpoint.failed).filter((item) => item?.permanent === true).length;
     const deferred = Object.keys(checkpoint.deferred).length;
+    const rateLimited = Object.values(checkpoint.deferred)
+        .filter((item) => item?.reason === "rate_limited" || item?.reason === "provider_paused_rate_limited").length;
     console.log(`[Announce] Chiến dịch: ${campaignId}`);
-    console.log(`[Announce]   đã gửi: ${sent} · thất bại: ${failed} (vĩnh viễn: ${permanent}) · hoãn: ${deferred}`);
+    console.log(`[Announce]   đã gửi: ${sent} · thất bại: ${failed} (vĩnh viễn: ${permanent}) · hoãn: ${deferred} (429: ${rateLimited})`);
     console.log(`[Announce]   vân tay nội dung: ${checkpoint.contentHash ? checkpoint.contentHash.slice(0, 12) + "…" : "(chưa có)"}`);
     console.log(`[Announce]   cập nhật lần cuối: ${checkpoint.updatedAt || "(chưa chạy)"}`);
     const byBot = {};
@@ -423,12 +493,19 @@ function printReport(campaignId) {
         byBot[bot] = (byBot[bot] || 0) + 1;
     }
     console.log(`[Announce]   đã gửi theo bot: ${formatCounts(byBot)}`);
+    const pausedBots = Object.keys(checkpoint.paused || {});
+    if (pausedBots.length > 0) {
+        console.log(`[Announce]   ĐANG TẠM DỪNG (429): ${pausedBots.join(", ")} — còn lại sẽ thử lại khi chạy resume.`);
+    }
     return {
         campaignId,
         sent,
         failed,
         permanent,
         deferred,
+        rateLimited,
+        paused: checkpoint.paused,
+        pacing: checkpoint.pacing,
         contentHash: checkpoint.contentHash,
         updatedAt: checkpoint.updatedAt,
         perBot: byBot,
@@ -539,42 +616,198 @@ async function main(argv = process.argv.slice(2), options = {}) {
     const officialConfigs = resolveBotConfigs(process.env);
     const getProvider = (botId) => runtimeRegistry.get(botId) || null;
 
+    // Nhịp gửi theo từng nhà cung cấp. Cấu hình lấy từ tham số dòng lệnh > tham số
+    // hàm > biến môi trường > mặc định thận trọng.
+    //
+    // `options.pacing` cho phép ghi đè ngưỡng tạm dừng/khoảng chờ (kiểm thử và vận
+    // hành đặc biệt cần giá trị chặt hơn mặc định). Luôn đi qua `resolvePacingOptions`
+    // để không có đường nào đặt được nhịp nhanh hơn sàn an toàn.
+    const pacingOptions = resolvePacingOptions({
+        intervalMs: args.intervalMs ?? options.intervalMs
+    }, options.env || process.env);
+    const pacing = createPacingController({
+        settings: { ...pacingOptions, ...(options.pacing || {}) },
+        sleep: options.sleep,
+        now: options.now,
+        log: (level, text) => console[level === "warn" ? "warn" : "log"](text)
+    });
+    // Khôi phục trạng thái tạm dừng đã lưu: một nhà cung cấp vừa bị khoá tốc độ ở
+    // lần chạy trước KHÔNG được thử lại ngay lập tức.
+    pacing.restore(checkpoint.pacing);
+    checkpoint.pacing = pacing.snapshot();
+
+    console.log(
+        `[Announce] Nhịp gửi: ${pacingOptions.intervalMs}ms/đích, một đích mỗi nhà cung cấp cùng lúc; ` +
+        `429 ⇒ chờ theo Retry-After hoặc ${pacingOptions.backoffBaseMs}ms×2^n (trần ${pacingOptions.backoffMaxMs}ms); ` +
+        `quá ${pacingOptions.maxRateLimitStrikes} lần 429/${Math.round(pacingOptions.strikeWindowMs / 1000)}s ⇒ tạm dừng ${Math.round(pacingOptions.pauseMs / 1000)}s.`
+    );
+    // Cảnh báo SỚM nhà cung cấp nào còn đang bị tạm dừng từ lần chạy trước, để người
+    // vận hành biết vì sao đợt này có thể bỏ qua cả một tài khoản.
+    const nowAtStart = Date.now();
+    for (const [botId, info] of Object.entries(pacing.stats(nowAtStart))) {
+        if (info.paused) {
+            console.log(
+                `[Announce] LƯU Ý: ${botId} đang tạm dừng (${info.pauseReason}) — ` +
+                `còn ${Math.ceil(info.resumeInMs / 1000)}s. Đích của tài khoản này sẽ được ghi "hoãn".`
+            );
+        }
+    }
+
     // Gắn vân tay NGAY khi bắt đầu ghi, để lần chạy sau đối chiếu được nội dung.
     checkpoint.contentHash = contentHash;
 
     let sent = 0;
     let failed = 0;
     let deferred = 0;
+    let rateLimited = 0;
+
+    // Gom đích theo nhà cung cấp để nhịp của nhà cung cấp này không cản nhà cung cấp
+    // khác. Chạy hết nhóm này rồi mới sang nhóm kế tiếp: tổng thời gian như nhau,
+    // nhưng một tài khoản bị khoá tốc độ chỉ làm chậm chính nó.
+    const groups = new Map();
     for (const recipient of toSend) {
-        const availability = checkProviderAvailability(recipient.botId, runtimeRegistry, officialConfigs);
+        if (!groups.has(recipient.botId)) groups.set(recipient.botId, []);
+        groups.get(recipient.botId).push(recipient);
+    }
+
+    for (const [botId, group] of groups) {
+        // Nhà cung cấp tắt/chưa sẵn sàng ⇒ hoãn cả nhóm, không phải thất bại.
+        const availability = checkProviderAvailability(botId, runtimeRegistry, officialConfigs);
         if (!availability.available) {
-            deferred += 1;
-            checkpoint.deferred[recipient.key] = { reason: availability.reason, at: new Date().toISOString() };
-        } else {
+            for (const recipient of group) {
+                deferred += 1;
+                checkpoint.deferred[recipient.key] = { reason: availability.reason, at: new Date().toISOString() };
+            }
+            writeCheckpoint(args.campaign, checkpoint);
+            continue;
+        }
+
+        let pausing = false;
+        for (const recipient of group) {
+            if (pausing) break;
+
+            // Chờ tới lượt của nhà cung cấp này. Trả về lý do khi nó đang bị TẠM DỪNG
+            // — lúc đó KHÔNG chờ hết thời gian tạm dừng (chờ 10 phút trong một request
+            // là vô nghĩa), mà ghi "hoãn" cho phần còn lại và đi tiếp nhà cung cấp khác.
+            const gate = await pacing.waitTurn(botId);
+            if (gate && gate.reason === "paused") {
+                for (const rest of group.slice(group.indexOf(recipient))) {
+                    deferred += 1;
+                    checkpoint.deferred[rest.key] = {
+                        reason: "provider_paused_rate_limited",
+                        resumeInMs: gate.waitMs,
+                        at: new Date().toISOString()
+                    };
+                }
+                checkpoint.paused[botId] = {
+                    reason: "rate_limited",
+                    resumeInMs: gate.waitMs,
+                    at: new Date().toISOString()
+                };
+                checkpoint.pacing = pacing.snapshot();
+                writeCheckpoint(args.campaign, checkpoint);
+                console.log(
+                    `[Announce] ${botId} đang tạm dừng vì 429 — ${group.length - group.indexOf(recipient)} đích còn lại được ghi "hoãn".`
+                );
+                break;
+            }
+
             const outcome = await sendOne(getProvider, recipient, message);
+            const at = new Date().toISOString();
+
             if (outcome.status === "sent") {
                 sent += 1;
-                checkpoint.sent[recipient.key] = { at: new Date().toISOString() };
+                pacing.onSuccess(botId);
+                checkpoint.sent[recipient.key] = { at };
                 delete checkpoint.deferred[recipient.key];
                 delete checkpoint.failed[recipient.key];
+                delete checkpoint.paused[botId];
             } else if (outcome.status === "deferred") {
                 deferred += 1;
-                checkpoint.deferred[recipient.key] = { reason: outcome.reason, at: new Date().toISOString() };
+                checkpoint.deferred[recipient.key] = { reason: outcome.reason, at };
+            } else if (outcome.status === "rate_limit") {
+                rateLimited += 1;
+                // 429 KHÔNG phải thất bại của người nhận: ghi "hoãn" để lần resume sau
+                // thử lại, và dùng chính lần 429 này để tính thời gian chờ.
+                const strike = pacing.onRateLimit(botId, outcome.error);
+                checkpoint.deferred[recipient.key] = {
+                    reason: "rate_limited",
+                    strike: strike.strikeCount,
+                    at
+                };
+                delete checkpoint.failed[recipient.key];
+                checkpoint.pacing = pacing.snapshot();
+                if (strike.paused) {
+                    // Vượt ngưỡng ⇒ TẠM DỪNG nhà cung cấp. Mọi đích còn lại của nó
+                    // được ghi "hoãn" ngay, KHÔNG bắn nốt — đây là chốt chặn để một
+                    // lần 429 không biến thành vòng lặp 429 nhanh.
+                    const index = group.indexOf(recipient);
+                    const remaining = group.slice(index + 1);
+                    for (const rest of remaining) {
+                        deferred += 1;
+                        checkpoint.deferred[rest.key] = {
+                            reason: "provider_paused_rate_limited",
+                            resumeInMs: strike.pauseMs,
+                            at
+                        };
+                    }
+                    checkpoint.paused[botId] = {
+                        reason: "rate_limited",
+                        strikeCount: strike.strikeCount,
+                        resumeInMs: strike.pauseMs,
+                        at
+                    };
+                    pausing = true;
+                    console.log(
+                        `[Announce] ${botId}: 429 lặp lại (${strike.strikeCount} lần) ⇒ tạm dừng; ` +
+                        `${remaining.length} đích còn lại được ghi "hoãn" (sẽ thử lại ở lần chạy tiếp).`
+                    );
+                } else if (strike.retryDelayMs > 0) {
+                    // Chưa vượt ngưỡng: chờ đúng khoảng đề xuất rồi mới gửi tin kế tiếp.
+                    await (options.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms))))(strike.retryDelayMs);
+                }
             } else {
                 failed += 1;
-                checkpoint.failed[recipient.key] = { reason: outcome.reason, permanent: Boolean(outcome.permanent), at: new Date().toISOString() };
+                checkpoint.failed[recipient.key] = {
+                    reason: outcome.reason,
+                    permanent: Boolean(outcome.permanent),
+                    at
+                };
             }
+
+            // Ghi checkpoint sau MỖI kết quả: dừng đột ngột không được làm mất tiến độ.
+            writeCheckpoint(args.campaign, checkpoint);
         }
-        // Ghi checkpoint sau MỖI tin: dừng đột ngột không được làm mất tiến độ.
+        checkpoint.pacing = pacing.snapshot();
         writeCheckpoint(args.campaign, checkpoint);
     }
 
     const file = writeCheckpoint(args.campaign, checkpoint);
+    const pausedBots = Object.keys(checkpoint.paused || {});
     console.log("");
-    console.log(`[Announce] XONG. đã gửi: ${sent} · thất bại: ${failed} · hoãn: ${deferred} · bỏ qua vĩnh viễn: ${skippedPermanent ?? 0}`);
+    console.log(
+        `[Announce] XONG. đã gửi: ${sent} · thất bại: ${failed} · hoãn: ${deferred} ` +
+        `(trong đó 429: ${rateLimited}) · bỏ qua vĩnh viễn: ${skippedPermanent ?? 0}`
+    );
+    if (pausedBots.length > 0) {
+        console.log(
+            `[Announce] Nhà cung cấp đang tạm dừng vì 429: ${pausedBots.join(", ")}. ` +
+            "Chờ hết thời gian tạm dừng rồi chạy lại bước resume — xem ANNOUNCEMENT.md."
+        );
+    }
     console.log(`[Announce] Checkpoint: ${file}`);
     console.log("[Announce] Chạy lại với --report để xem báo cáo đầy đủ.");
-    return { sent, failed, deferred, skippedPermanent, alreadySent, contentHash };
+    return {
+        sent,
+        failed,
+        deferred,
+        rateLimited,
+        skippedPermanent,
+        alreadySent,
+        contentHash,
+        paused: checkpoint.paused,
+        pacing: pacing.stats()
+    };
 }
 
 if (require.main === module) {
@@ -587,6 +820,7 @@ if (require.main === module) {
 module.exports = {
     CHECKPOINT_DIR,
     DEFAULT_SOURCE,
+    PACING_DEFAULTS,
     UNVERIFIED_LABEL,
     campaignContentHash,
     checkProviderAvailability,
@@ -604,6 +838,8 @@ module.exports = {
     readSourceFile,
     recipientKey,
     resolveRuntimeRegistry,
+    sanitizePacingState,
+    sendOne,
     verifyCheckpointContent,
     writeCheckpoint
 };

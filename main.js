@@ -1043,11 +1043,26 @@ async function sendRecoveredAnnouncement(input = {}) {
     }
     const argv = ["--campaign", campaign, "--source", ANNOUNCEMENT_SOURCE, "--send"];
     if (input.resume === true) argv.push("--resume");
+    // Nhịp gửi do người vận hành chỉ định (chuỗi từ HTTP). Script tự kẹp về khoảng an
+    // toàn, nên ở đây chỉ cần truyền tiếp — KHÔNG tin tưởng giá trị từ client.
+    const intervalMs = normalizeAnnouncementInterval(input.intervalMs);
+    if (intervalMs != null) argv.push("--interval-ms", String(intervalMs));
     const result = await runRecoveredAnnouncement(argv, {
         messageOverride: resolved.text,
         messageSource: resolved.source
     });
     return { campaignId: campaign, messageSource: resolved.source, ...result };
+}
+
+// Nhịp gửi hợp lệ hay không. Trả về null khi admin không chỉ định (dùng mặc định).
+//
+// Chỉ nhận số nguyên dương. Giá trị lạ ⇒ null thay vì ném lỗi: dùng mặc định thận
+// trọng luôn an toàn hơn là từ chối cả một đợt gửi vì một tham số phụ.
+function normalizeAnnouncementInterval(value) {
+    if (value === undefined || value === null || value === "") return null;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed <= 0) return null;
+    return Math.round(parsed);
 }
 
 // Tiến độ một chiến dịch, đọc từ checkpoint cục bộ. Không gửi gì.
@@ -2916,6 +2931,7 @@ module.exports = {
     sendRecoveredAnnouncement,
     announcementProgress,
     resolveAnnouncementMessage,
+    normalizeAnnouncementInterval,
     getAdmissionStats,
     sendClassStartNotifications,
     sendDailySchedulesAtSix,

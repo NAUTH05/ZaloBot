@@ -13,6 +13,11 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const crypto = require("node:crypto");
+
+// Hậu tố ngẫu nhiên theo lần chạy: PID bị tái sử dụng nên tên chiến dịch chỉ dựa vào
+// PID có thể trùng với checkpoint sót lại của lần chạy trước ⇒ bài kiểm tra đỏ ngẫu nhiên.
+const RUN_TAG = crypto.randomBytes(6).toString("hex");
 
 process.env.BOT_TOKEN = "bridge-token-1";
 process.env.BOT_2_TOKEN = "bridge-token-2";
@@ -97,7 +102,7 @@ test("preview KHÔNG gửi, KHÔNG ghi checkpoint dù có registry sống", asyn
     const dir = tempDir(t);
     const src = writeSource(dir, { a: { chatId: "1", botId: "bot1" } });
     const { registry, log } = fakeRegistry();
-    const campaign = `bridge-preview-${process.pid}`;
+    const campaign = `bridge-preview-${process.pid}-${RUN_TAG}`;
     t.after(() => fs.rmSync(path.join(CHECKPOINT_DIR, `${campaign}.json`), { force: true }));
 
     // Nguồn thật của preview là ANNOUNCEMENT_SOURCE (recovered-interactions.json);
@@ -144,7 +149,7 @@ test("send TỪ CHỐI khi thiếu nội dung (dù đã xác nhận)", async () 
 /* ------------------------------- tiến độ -------------------------------- */
 
 test("announcementProgress đọc checkpoint và trả số đếm, không gửi", () => {
-    const campaign = `bridge-progress-${process.pid}`;
+    const campaign = `bridge-progress-${process.pid}-${RUN_TAG}`;
     fs.mkdirSync(CHECKPOINT_DIR, { recursive: true });
     const file = path.join(CHECKPOINT_DIR, `${campaign}.json`);
     fs.writeFileSync(file, JSON.stringify({
