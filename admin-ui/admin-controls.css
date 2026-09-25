@@ -1,18 +1,25 @@
-.command-form .error {
-  max-height: 320px;
-  overflow: auto;
-  padding: 12px;
-  border-radius: 6px;
-  background: #f6f8fa;
-  color: #344252;
-  white-space: pre-wrap;
+/* ==========================================================================
+   Reserved for deployment-specific dashboard overrides.
+   --------------------------------------------------------------------------
+   styles.css giữ toàn bộ hệ thống giao diện (token, component, responsive).
+   File này chỉ chứa ghi đè có chủ đích cho từng môi trường triển khai — không
+   lặp lại các quy tắc đã có trong styles.css.
+   ========================================================================== */
+
+/* Bảng dày hơn cho màn hình nhỏ hoặc khi cần xem nhiều bản ghi cùng lúc:
+   <html data-density="compact"> */
+html[data-density="compact"] {
+    --control-h: 32px;
+    --control-h-sm: 28px;
+    --s-5: 16px;
+    --s-6: 18px;
+    --s-8: 24px;
 }
 
-.action-wrap {
-  flex-wrap: wrap;
-}
+html[data-density="compact"] th,
+html[data-density="compact"] td { padding: var(--s-2) var(--s-3); }
 
-.danger {
-  color: #b33f31;
-  border-color: #e5b9b3;
-}
+html[data-density="compact"] .panel,
+html[data-density="compact"] .group-card { padding: var(--s-4); }
+
+html[data-density="compact"] .metric { padding: var(--s-4); }

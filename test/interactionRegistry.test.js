@@ -3,7 +3,14 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { getInteractionTargets, recordInteraction } = require("../interactionRegistry");
+const { detectChatType, getInteractionTargets, recordInteraction } = require("../interactionRegistry");
+
+test("chỉ phân loại chat khi payload có đủ tín hiệu", () => {
+    assert.equal(detectChatType({ chat: { type: "group" } }), "group");
+    assert.equal(detectChatType({ group_id: "g-1" }), "group");
+    assert.equal(detectChatType({ chat: { type: "private" } }), "private");
+    assert.equal(detectChatType({ chat: { id: "ambiguous" } }), "unknown");
+});
 
 test("mỗi chat được lưu một lần và cập nhật người tương tác gần nhất", (t) => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "zalobot-interactions-"));
@@ -30,5 +37,7 @@ test("mỗi chat được lưu một lần và cập nhật người tương tá
     assert.equal(targets.length, 1);
     assert.equal(targets[0].chatType, "group");
     assert.equal(targets[0].lastUserId, "user-2");
+    assert.deepEqual(Object.keys(targets[0].members).sort(), ["user-1", "user-2"]);
+    assert.equal(targets[0].members["user-1"].displayName, "An");
     assert.equal(targets[0].firstInteractionAt, "2026-08-01T00:00:00.000Z");
 });

@@ -2,7 +2,14 @@ const path = require("path");
 const { readJsonStore, writeJsonStore } = require("./firestorePersistence");
 
 const FILE_PATH = path.join(__dirname, "adminSettings.json");
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
+const DEFAULT_PAGE_SIZE = 25;
+// Command console nhiều người nhận: số người tối đa mỗi lượt và khoảng nghỉ
+// giữa hai lần gửi để không dồn dập Zalo.
+const DEFAULT_MAX_BATCH_SIZE = 25;
+const DEFAULT_BATCH_DELAY_MS = 350;
+const MAX_BATCH_SIZE_LIMIT = 100;
+const MAX_BATCH_DELAY_MS = 5000;
 
 function nowIso() { return new Date().toISOString(); }
 
@@ -32,14 +39,30 @@ function normalizeAdmin(input = {}, existing = {}) {
 }
 
 function readSettings(filePath = FILE_PATH) {
-    const fallback = { schemaVersion: SCHEMA_VERSION, admins: [] };
+    const fallback = { schemaVersion: SCHEMA_VERSION, admins: [], defaultPageSize: DEFAULT_PAGE_SIZE, maxBatchSize: DEFAULT_MAX_BATCH_SIZE, batchDelayMs: DEFAULT_BATCH_DELAY_MS };
     const data = readJsonStore(filePath, FILE_PATH, fallback);
     const admins = Array.isArray(data?.admins) ? data.admins.map((item) => normalizeAdmin(item)).filter(Boolean) : [];
-    return { schemaVersion: SCHEMA_VERSION, admins };
+    const parsedPageSize = Number(data?.defaultPageSize);
+    const defaultPageSize = [10, 20, 25, 50, 100].includes(parsedPageSize) ? parsedPageSize : DEFAULT_PAGE_SIZE;
+    const parsedBatchSize = Number(data?.maxBatchSize);
+    const maxBatchSize = Number.isInteger(parsedBatchSize) && parsedBatchSize >= 1 && parsedBatchSize <= MAX_BATCH_SIZE_LIMIT
+        ? parsedBatchSize
+        : DEFAULT_MAX_BATCH_SIZE;
+    const parsedDelay = Number(data?.batchDelayMs);
+    const batchDelayMs = Number.isInteger(parsedDelay) && parsedDelay >= 0 && parsedDelay <= MAX_BATCH_DELAY_MS
+        ? parsedDelay
+        : DEFAULT_BATCH_DELAY_MS;
+    return { schemaVersion: SCHEMA_VERSION, admins, defaultPageSize, maxBatchSize, batchDelayMs };
 }
 
 function writeSettings(settings, filePath = FILE_PATH) {
-    writeJsonStore(filePath, FILE_PATH, { schemaVersion: SCHEMA_VERSION, admins: settings.admins || [] });
+    writeJsonStore(filePath, FILE_PATH, {
+        schemaVersion: SCHEMA_VERSION,
+        admins: settings.admins || [],
+        defaultPageSize: settings.defaultPageSize || DEFAULT_PAGE_SIZE,
+        maxBatchSize: settings.maxBatchSize || DEFAULT_MAX_BATCH_SIZE,
+        batchDelayMs: Number.isInteger(settings.batchDelayMs) ? settings.batchDelayMs : DEFAULT_BATCH_DELAY_MS
+    });
 }
 
 function getAdminSettings(filePath = FILE_PATH) {
@@ -94,4 +117,52 @@ function removeAdmin(identifier, filePath = FILE_PATH) {
     return removed;
 }
 
-module.exports = { FILE_PATH, getAdminSettings, getConfiguredAdminIds, isConfiguredAdmin, removeAdmin, upsertAdmin };
+function setDefaultPageSize(value, filePath = FILE_PATH) {
+    const pageSize = Number(value);
+    if (![10, 20, 25, 50, 100].includes(pageSize)) throw new Error("defaultPageSize must be one of 10, 20, 25, 50, 100");
+    const settings = readSettings(filePath);
+    settings.defaultPageSize = pageSize;
+    writeSettings(settings, filePath);
+    return settings;
+}
+
+// Giới hạn số người nhận mỗi lượt của Command console.
+function setMaxBatchSize(value, filePath = FILE_PATH) {
+    const size = Number(value);
+    if (!Number.isInteger(size) || size < 1 || size > MAX_BATCH_SIZE_LIMIT) {
+        throw new Error(`maxBatchSize must be an integer between 1 and ${MAX_BATCH_SIZE_LIMIT}`);
+    }
+    const settings = readSettings(filePath);
+    settings.maxBatchSize = size;
+    writeSettings(settings, filePath);
+    return settings;
+}
+
+// Khoảng nghỉ giữa hai lần gửi trong một lượt nhiều người nhận.
+function setBatchDelayMs(value, filePath = FILE_PATH) {
+    const delay = Number(value);
+    if (!Number.isInteger(delay) || delay < 0 || delay > MAX_BATCH_DELAY_MS) {
+        throw new Error(`batchDelayMs must be an integer between 0 and ${MAX_BATCH_DELAY_MS}`);
+    }
+    const settings = readSettings(filePath);
+    settings.batchDelayMs = delay;
+    writeSettings(settings, filePath);
+    return settings;
+}
+
+module.exports = {
+    DEFAULT_BATCH_DELAY_MS,
+    DEFAULT_MAX_BATCH_SIZE,
+    DEFAULT_PAGE_SIZE,
+    FILE_PATH,
+    MAX_BATCH_DELAY_MS,
+    MAX_BATCH_SIZE_LIMIT,
+    getAdminSettings,
+    getConfiguredAdminIds,
+    isConfiguredAdmin,
+    removeAdmin,
+    setBatchDelayMs,
+    setDefaultPageSize,
+    setMaxBatchSize,
+    upsertAdmin
+};

@@ -1,5 +1,14 @@
 const path = require("path");
 const { readJsonStore, writeJsonStore } = require("./firestorePersistence");
+const { normalizeBotId, scopeKey } = require("./bots");
+const { getCurrentBotId } = require("./botContext");
+
+// Khóa sổ tương tác có phạm vi theo bot: cùng một Chat ID ở bot 2 là một cuộc
+// trò chuyện khác với ở bot 1. Ưu tiên botId có sẵn trong ngữ cảnh, nếu không
+// thì lấy bot đang xử lý (mặc định bot 1 — đường tương thích cho dữ liệu cũ).
+function scopedChatKey(chatId, botId) {
+    return scopeKey(normalizeBotId(botId) || getCurrentBotId(), chatId);
+}
 
 const FILE_PATH = path.join(__dirname, "interactions.json");
 
@@ -20,25 +29,48 @@ function writeRegistry(registry, filePath = FILE_PATH) {
 function detectChatType(msg = {}) {
     const rawType = String(msg.chat?.type || msg.chat_type || msg.type || "").toLowerCase();
     if (msg.group_id != null || /group|nh[oó]m/.test(rawType)) return "group";
-    return "private";
+    if (/private|user|direct|personal|individual|c[aá] nh[aâ]n/.test(rawType)) return "private";
+    return "unknown";
 }
 
 function recordInteraction(context, msg = {}, date = new Date(), filePath = FILE_PATH) {
     const chatId = String(context.chatId);
+    const userId = String(context.userId || "");
     const registry = readRegistry(filePath);
-    const existing = registry[chatId] || {};
+    const existing = registry[scopedChatKey(chatId)] || {};
     const isFirstInteraction = !existing.firstInteractionAt;
-    registry[chatId] = {
+    const members = existing.members && typeof existing.members === "object" ? { ...existing.members } : {};
+    if (existing.lastUserId && !members[String(existing.lastUserId)]) {
+        members[String(existing.lastUserId)] = {
+            userId: String(existing.lastUserId),
+            displayName: String(existing.lastUserDisplayName || ""),
+            firstInteractionAt: existing.firstInteractionAt || date.toISOString(),
+            lastInteractionAt: existing.lastInteractionAt || date.toISOString()
+        };
+    }
+    if (userId) {
+        const member = members[userId] || {};
+        members[userId] = {
+            userId,
+            displayName: String(context.userDisplayName || member.displayName || ""),
+            status: member.status || "active",
+            firstInteractionAt: member.firstInteractionAt || date.toISOString(),
+            lastInteractionAt: date.toISOString()
+        };
+    }
+    registry[scopedChatKey(chatId)] = {
         chatId,
+        botId: getCurrentBotId(),
         chatType: detectChatType(msg),
         chatTitle: String(msg.chat?.title || msg.chat?.name || existing.chatTitle || ""),
-        lastUserId: String(context.userId || ""),
+        lastUserId: userId,
         lastUserDisplayName: String(context.userDisplayName || ""),
+        members,
         firstInteractionAt: existing.firstInteractionAt || date.toISOString(),
         lastInteractionAt: date.toISOString()
     };
     writeRegistry(registry, filePath);
-    return { ...registry[chatId], isFirstInteraction };
+    return { ...registry[scopedChatKey(chatId)], isFirstInteraction };
 }
 
 function getInteractionTargets(filePath = FILE_PATH) {
@@ -47,10 +79,62 @@ function getInteractionTargets(filePath = FILE_PATH) {
         .map((target) => ({ ...target, chatId: String(target.chatId) }));
 }
 
+function upsertInteractionMember(input = {}, filePath = FILE_PATH) {
+    const chatId = String(input.chatId || "").trim();
+    const userId = String(input.userId || "").trim();
+    if (!chatId || !userId) throw new Error("Cần chatId và userId");
+    const registry = readRegistry(filePath);
+    const existing = registry[scopedChatKey(chatId)] || {};
+    const members = existing.members && typeof existing.members === "object" ? { ...existing.members } : {};
+    const member = members[userId] || {};
+    const now = new Date().toISOString();
+    members[userId] = {
+        ...member,
+        userId,
+        displayName: String(input.displayName ?? member.displayName ?? "").trim(),
+        status: ["active", "disabled", "removed"].includes(input.status) ? input.status : (member.status || "active"),
+        firstInteractionAt: member.firstInteractionAt || input.firstInteractionAt || now,
+        lastInteractionAt: input.lastInteractionAt || member.lastInteractionAt || now,
+        updatedAt: now
+    };
+    if (members[userId].status === "active") delete members[userId].removedAt;
+    registry[scopedChatKey(chatId)] = {
+        ...existing,
+        chatId,
+        botId: getCurrentBotId(),
+        chatType: ["private", "group", "unknown"].includes(input.chatType) ? input.chatType : (existing.chatType || "unknown"),
+        chatTitle: String(input.chatTitle ?? existing.chatTitle ?? "").trim(),
+        lastUserId: existing.lastUserId || userId,
+        lastUserDisplayName: existing.lastUserDisplayName || members[userId].displayName,
+        members,
+        firstInteractionAt: existing.firstInteractionAt || now,
+        lastInteractionAt: existing.lastInteractionAt || now
+    };
+    writeRegistry(registry, filePath);
+    return members[userId];
+}
+
+function removeInteractionMember(chatIdInput, userIdInput, hard = false, filePath = FILE_PATH) {
+    const chatId = String(chatIdInput || "").trim();
+    const userId = String(userIdInput || "").trim();
+    const registry = readRegistry(filePath);
+    const existing = registry[scopedChatKey(chatId)];
+    if (!existing?.members?.[userId]) return null;
+    const members = { ...existing.members };
+    const removed = members[userId];
+    if (hard) delete members[userId];
+    else members[userId] = { ...removed, status: "removed", removedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    registry[scopedChatKey(chatId)] = { ...existing, members };
+    writeRegistry(registry, filePath);
+    return hard ? removed : members[userId];
+}
+
 module.exports = {
     FILE_PATH,
     detectChatType,
     getInteractionTargets,
     readRegistry,
-    recordInteraction
+    recordInteraction,
+    removeInteractionMember,
+    upsertInteractionMember
 };

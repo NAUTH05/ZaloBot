@@ -1,5 +1,7 @@
 node_modules/
 .env
+.env.*
+!.env.example
 credentials.json
 subscriptions.json
 subscriptions.json.tmp
@@ -7,18 +9,47 @@ scheduleSnapshots.json
 scheduleSnapshots.json.tmp
 interactions.json
 interactions.json.tmp
+sourceVerifications.json
+sourceVerifications.json.tmp
 accessControl.json
 accessControl.json.tmp
 birthdayData.json
 birthdayData.json.tmp
 dutyScheduleData.json
 dutyScheduleData.json.tmp
+chatDirectory.json
+chatDirectory.json.tmp
+classStartNotifications.json
+classStartNotifications.json.tmp
 thongtinfirebase.txt
 firebase-service-account.json
 *firebase-adminsdk*.json
+*-firebase-adminsdk-*.json
 recent_json/
 .npm-cache/
 *.log
 adminAudit.json
 adminLogs.json
 adminSettings.json
+
+# Sao lưu cục bộ do scripts/migrateNotificationTargetDays.js và
+# scripts/cleanupBirthdayData.js ghi ra trước khi thay đổi dữ liệu.
+migration-backups/
+
+# File khôi phục sổ tương tác (scripts/recoverInteractions.js).
+# Chứa Chat ID / User ID thật của người nhận: TUYỆT ĐỐI không commit.
+recovered-interactions.json
+recovered-interactions*.json
+
+# Phiên đăng nhập ZCA (tài khoản Zalo cá nhân).
+# Đây là thông tin xác thực: có nó là đăng nhập được vào tài khoản Zalo.
+# TUYỆT ĐỐI không commit.
+data/
+zca-session/
+session.json
+session.lock
+*.session.json
+
+# Bộ nhớ cục bộ của trợ lý AI (nhật ký công việc, ghi chú dự án).
+# Không phải mã nguồn: không commit.
+.workbuddy-ai/

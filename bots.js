@@ -1,0 +1,316 @@
+// ============================================================================
+// Cấu hình nhiều bot Zalo trên CÙNG một codebase và CÙNG một Firestore database.
+//
+// Nguyên tắc quan trọng nhất: **bot 1 giữ nguyên không gian khóa cũ** (không
+// tiền tố). Nhờ vậy bản triển khai hiện tại chỉ có một token chạy tiếp mà không
+// cần di trú dữ liệu, và bot Room 411 vẫn đọc được chatDirectory như trước.
+// Bot 2 và bot 3 dùng tiền tố `botN::` để không bao giờ đụng dữ liệu của bot 1.
+//
+// Mỗi bot Zalo là một danh tính riêng: token riêng, người dùng riêng, chat
+// riêng, hạn mức riêng. Chat ID và User ID chỉ có nghĩa trong phạm vi một bot.
+// ============================================================================
+const crypto = require("crypto");
+
+const LEGACY_BOT_ID = "bot1";
+const MAX_BOTS = 3;
+const BOT_IDS = Object.freeze(["bot1", "bot2", "bot3"]);
+const BOT_ID_PATTERN = /^bot[1-9]\d*$/;
+
+// Biến môi trường cho từng bot. `BOT_TOKEN` là đường tương thích của bot 1.
+const TOKEN_ENV_VARS = Object.freeze({
+    bot1: ["BOT_1_TOKEN", "BOT_TOKEN"],
+    bot2: ["BOT_2_TOKEN"],
+    bot3: ["BOT_3_TOKEN"]
+});
+
+// Nhãn hiển thị do người vận hành đặt, dùng khi không lấy được tên thật từ Zalo.
+const NAME_ENV_VARS = Object.freeze({
+    bot1: ["BOT_1_NAME"],
+    bot2: ["BOT_2_NAME"],
+    bot3: ["BOT_3_NAME"]
+});
+
+// Tên thật của bot do Zalo trả về (qua getMe) được ưu tiên hơn nhãn cấu hình.
+// Không có cả hai thì dùng chính botId — dashboard luôn có gì đó để hiển thị.
+function resolveBotDisplayName({ botId, verifiedName, configuredName }) {
+    const verified = String(verifiedName == null ? "" : verifiedName).trim();
+    if (verified) return verified;
+    const configured = String(configuredName == null ? "" : configuredName).trim();
+    if (configured) return configured;
+    return normalizeBotId(botId) || LEGACY_BOT_ID;
+}
+
+// Nhãn hiển thị đầy đủ: "Bot Micano · bot2", hoặc "Tài khoản A · zca:123" cho tài
+// khoản cá nhân.
+//
+// Nếu chưa biết danh tính thì CHỈ trả về tên — tuyệt đối không ghép thêm bot1,
+// vì như vậy là trình bày nhầm một tài khoản ZCA thành bot chính thức.
+function formatBotLabel(bot) {
+    const rawId = String(bot?.botId == null ? "" : bot.botId).trim();
+    const botId = normalizeBotId(rawId);
+    const name = String(bot?.displayName == null ? "" : bot.displayName).trim();
+
+    if (!botId) return name || "không rõ danh tính";
+    if (!name || name === botId) return botId;
+    return `${name} · ${botId}`;
+}
+
+// Trích tên bot từ phản hồi getMe của Zalo. Hình dạng phản hồi không được tài
+// liệu hoá đầy đủ nên phải chấp nhận nhiều tên trường; không nhận ra thì trả null
+// và nơi gọi sẽ rơi về nhãn cấu hình hoặc botId.
+function extractBotName(response) {
+    const candidates = [
+        response?.name,
+        response?.display_name,
+        response?.displayName,
+        response?.bot_name,
+        response?.botName,
+        response?.title,
+        response?.result?.name,
+        response?.result?.display_name,
+        response?.data?.name,
+        response?.data?.display_name
+    ];
+    for (const candidate of candidates) {
+        const value = String(candidate == null ? "" : candidate).trim();
+        if (value) return value;
+    }
+    return null;
+}
+
+// Cảnh báo hạn mức gửi tin hằng tháng. KHÔNG hard-code rằng hạn mức là theo bot
+// hay theo tài khoản — điều đó chưa xác minh được, nên để cấu hình được và ghi
+// rõ trong tài liệu.
+const DEFAULT_MONTHLY_MESSAGE_WARNING = 3000;
+
+// Loại nhà cung cấp. Mỗi danh tính trong hệ thống thuộc về đúng một loại:
+//   official — bot trên Zalo Bot Platform, xác thực bằng token
+//   zca      — tài khoản Zalo cá nhân qua zca-js, xác thực bằng phiên đăng nhập
+const PROVIDER_TYPES = Object.freeze({ OFFICIAL: "official", ZCA: "zca" });
+
+// Danh tính ZCA: "zca:<uid Zalo>". UID đến từ api.getOwnId() nên ổn định qua các
+// lần khởi động — KHÔNG dùng id ngẫu nhiên vì khóa lưu trữ phụ thuộc vào nó.
+const ZCA_ID_PREFIX = "zca:";
+const ZCA_ID_PATTERN = /^zca:[A-Za-z0-9_-]{1,64}$/;
+
+function zcaId(uid) {
+    const value = String(uid == null ? "" : uid).trim();
+    if (!value) return null;
+    const candidate = `${ZCA_ID_PREFIX}${value}`.toLowerCase();
+    return ZCA_ID_PATTERN.test(candidate) ? candidate : null;
+}
+
+function zcaUidOf(botId) {
+    const normalized = normalizeBotId(botId);
+    if (!normalized || !normalized.startsWith(ZCA_ID_PREFIX)) return null;
+    return normalized.slice(ZCA_ID_PREFIX.length);
+}
+
+function isZcaId(botId) {
+    const normalized = normalizeBotId(botId);
+    return Boolean(normalized && normalized.startsWith(ZCA_ID_PREFIX));
+}
+
+// Loại nhà cung cấp của một danh tính. Danh tính không nhận ra ⇒ official, vì
+// mọi dữ liệu cũ đều thuộc bot trên Zalo Bot Platform.
+function providerTypeOf(botId) {
+    return isZcaId(botId) ? PROVIDER_TYPES.ZCA : PROVIDER_TYPES.OFFICIAL;
+}
+
+// Chuẩn hoá danh tính nhà cung cấp. Chấp nhận cả botN lẫn zca:<uid>.
+//
+// ĐÂY LÀ CHỐT QUAN TRỌNG NHẤT của lớp danh tính: có hơn hai chục nơi gọi hàm này
+// để quyết định khóa lưu trữ. Nếu nó không nhận ra danh tính ZCA thì mọi bản ghi
+// ZCA sẽ bị coi là của bot 1 và ghi đè lên dữ liệu bot 1.
+function normalizeBotId(value) {
+    const raw = String(value == null ? "" : value).trim().toLowerCase();
+    if (!raw) return null;
+    if (BOT_ID_PATTERN.test(raw)) return raw;
+    if (ZCA_ID_PATTERN.test(raw)) return raw;
+    return null;
+}
+
+// Chỉ số của bot chính thức (bot1 → 1). Danh tính ZCA không có chỉ số.
+function botIndex(botId) {
+    const normalized = normalizeBotId(botId);
+    if (!normalized || !BOT_ID_PATTERN.test(normalized)) return null;
+    const index = Number(normalized.slice(3));
+    return Number.isInteger(index) && index >= 1 ? index : null;
+}
+
+function isLegacyBotId(botId) {
+    return normalizeBotId(botId) === LEGACY_BOT_ID;
+}
+
+// Vân tay token: dùng để phân biệt các bot trong log mà KHÔNG in token.
+function tokenFingerprint(token) {
+    const value = String(token || "");
+    if (!value) return null;
+    return crypto.createHash("sha256").update(value).digest("hex").slice(0, 8);
+}
+
+function isMaskedToken(value) {
+    return /^[0-9a-f]{8}$/.test(String(value || ""));
+}
+
+function normalizeMonthlyWarning(value) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_MONTHLY_MESSAGE_WARNING;
+    return Math.floor(parsed);
+}
+
+// ---------------------------------------------------------------------------
+// Đọc cấu hình bot từ biến môi trường.
+//
+// Trả về { bots, errors, warnings }:
+//   bots     — chỉ gồm bot BẬT, theo thứ tự bot1..botN, mỗi mục có botId/token/source
+//   errors   — lỗi cấu hình khiến không thể khởi động an toàn
+//   warnings — thông tin không chặn khởi động (ví dụ thiếu token bot 2/3)
+// ---------------------------------------------------------------------------
+function resolveBotConfigs(env = process.env) {
+    const bots = [];
+    const errors = [];
+    const warnings = [];
+    const seenTokens = new Map();
+
+    const monthlyWarning = normalizeMonthlyWarning(env?.BOT_MONTHLY_MESSAGE_WARNING);
+
+    for (const botId of BOT_IDS) {
+        const candidates = TOKEN_ENV_VARS[botId] || [];
+        const provided = candidates
+            .map((name) => ({ name, token: String(env?.[name] || "").trim() }))
+            .filter((item) => item.token.length > 0);
+
+        if (provided.length === 0) {
+            if (botId === LEGACY_BOT_ID) {
+                errors.push(
+                    "Thiếu token cho bot 1. Đặt BOT_TOKEN (đường tương thích cũ) hoặc BOT_1_TOKEN trong .env."
+                );
+            } else {
+                // Thiếu token bot 2/3 chỉ đơn giản là bot đó tắt.
+                warnings.push(`${botId} đang tắt (không có ${candidates.join(" hoặc ")}).`);
+            }
+            continue;
+        }
+
+        // Nhiều biến cùng cấp token cho một bot mà giá trị khác nhau là cấu hình
+        // mơ hồ — từ chối thay vì âm thầm chọn một cái.
+        const distinct = [...new Set(provided.map((item) => item.token))];
+        if (distinct.length > 1) {
+            errors.push(
+                `${botId} nhận token khác nhau từ ${provided.map((item) => item.name).join(" và ")}. ` +
+                "Chỉ đặt một trong hai, hoặc đặt cùng một giá trị."
+            );
+            continue;
+        }
+
+        const token = distinct[0];
+        const source = provided[0].name;
+
+        // Cùng một token cho hai bot là lỗi: sẽ tạo hai consumer polling trên cùng
+        // một danh tính, gây nhận tin trùng và tranh chấp con trỏ cập nhật.
+        const duplicate = seenTokens.get(token);
+        if (duplicate) {
+            errors.push(
+                `${botId} và ${duplicate} đang dùng CÙNG một token (${source}). ` +
+                "Mỗi bot Zalo phải có token riêng."
+            );
+            continue;
+        }
+        seenTokens.set(token, botId);
+
+        const configuredName = (NAME_ENV_VARS[botId] || [])
+            .map((name) => String(env?.[name] || "").trim())
+            .find((value) => value.length > 0) || null;
+
+        bots.push({
+            botId,
+            token,
+            source,
+            fingerprint: tokenFingerprint(token),
+            configuredName,
+            verifiedName: null,
+            displayName: resolveBotDisplayName({ botId, configuredName }),
+            enabled: true,
+            monthlyMessageWarning: monthlyWarning
+        });
+    }
+
+    return { bots, errors, warnings, monthlyMessageWarning: monthlyWarning };
+}
+
+// ---------------------------------------------------------------------------
+// Không gian khóa theo bot.
+//
+// bot1  → giữ nguyên khóa cũ (chat::user, chatId) để dữ liệu hiện có được dùng
+//         nguyên trạng, không cần di trú, và Room 411 vẫn đọc được.
+// botN  → thêm tiền tố `botN::` để cùng một Chat ID / User ID ở hai bot khác
+//         nhau không bao giờ ghi đè lên nhau.
+// ---------------------------------------------------------------------------
+function storageKeyPrefix(botId) {
+    const normalized = normalizeBotId(botId) || LEGACY_BOT_ID;
+    return isLegacyBotId(normalized) ? "" : `${normalized}::`;
+}
+
+function scopeKey(botId, key) {
+    return `${storageKeyPrefix(botId)}${key}`;
+}
+
+// Tách botId khỏi một khóa đã có tiền tố. Khóa không tiền tố thuộc về bot 1 —
+// đây chính là quy tắc giữ tương thích cho dữ liệu cũ.
+//
+// Danh tính ZCA có dấu ":" bên trong ("zca:123::chat"), nên phải tách ở dấu "::"
+// ĐẦU TIÊN chứ không thể tách theo ":".
+function parseScopedKey(key) {
+    const raw = String(key == null ? "" : key);
+    const separator = raw.indexOf("::");
+    if (separator <= 0) return { botId: LEGACY_BOT_ID, key: raw, scoped: false };
+    const botId = normalizeBotId(raw.slice(0, separator));
+    if (!botId) return { botId: LEGACY_BOT_ID, key: raw, scoped: false };
+    return { botId, key: raw.slice(separator + 2), scoped: true };
+}
+
+// Mô tả bot an toàn để đưa vào log, API và dashboard: TUYỆT ĐỐI không có token.
+function describeBot(bot) {
+    return {
+        botId: bot.botId,
+        enabled: bot.enabled !== false,
+        tokenSource: bot.source || null,
+        tokenFingerprint: bot.fingerprint || tokenFingerprint(bot.token),
+        displayName: bot.displayName || resolveBotDisplayName({ botId: bot.botId, configuredName: bot.configuredName }),
+        label: formatBotLabel(bot),
+        monthlyMessageWarning: normalizeMonthlyWarning(bot.monthlyMessageWarning)
+    };
+}
+
+function describeBots(bots) {
+    return bots.map(describeBot);
+}
+
+module.exports = {
+    BOT_IDS,
+    DEFAULT_MONTHLY_MESSAGE_WARNING,
+    LEGACY_BOT_ID,
+    MAX_BOTS,
+    NAME_ENV_VARS,
+    TOKEN_ENV_VARS,
+    botIndex,
+    describeBot,
+    describeBots,
+    PROVIDER_TYPES,
+    extractBotName,
+    formatBotLabel,
+    isZcaId,
+    providerTypeOf,
+    zcaId,
+    zcaUidOf,
+    isLegacyBotId,
+    isMaskedToken,
+    normalizeBotId,
+    parseScopedKey,
+    resolveBotConfigs,
+    resolveBotDisplayName,
+    scopeKey,
+    storageKeyPrefix,
+    tokenFingerprint
+};
