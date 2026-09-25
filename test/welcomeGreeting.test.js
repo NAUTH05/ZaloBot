@@ -9,7 +9,13 @@ test("sendWelcomeMessage định dạng tin nhắn chào mừng chuẩn", async 
     const code = fs.readFileSync(mainPath, "utf8");
 
     assert.ok(code.includes("sendWelcomeMessage"), "Hàm sendWelcomeMessage đã được định nghĩa trong main.js");
-    assert.ok(code.includes("interaction.isFirstInteraction"), "Logic tự động chào mừng lần đầu đã được thêm vào bot.on('message')");
+    // Lời chào tự động nay nằm sau CỔNG TIẾP NHẬN: chat chưa từng được tiếp nhận
+    // (chưa có câu trả lời nào gửi thành công) thì lời chào chính là bằng chứng
+    // tiếp nhận đầu tiên. Điều kiện "chưa tiếp nhận" thay cho "isFirstInteraction".
+    assert.ok(
+        code.includes("!parsed && !looksLikeCommand && !alreadyAdmitted"),
+        "Chỉ gửi lời chào tự động khi tin nhắn lần đầu là tin nhắn thường (không phải lệnh) và chat chưa được tiếp nhận"
+    );
 
     const sentMsg = formatWelcomeMessage("Minh Anh");
 
@@ -18,9 +24,4 @@ test("sendWelcomeMessage định dạng tin nhắn chào mừng chuẩn", async 
     assert.match(sentMsg, /LỊCH HỌC LHU/);
     assert.match(sentMsg, /\/luumssv/);
     assert.doesNotMatch(sentMsg, /Bot sẽ|bạn ơi/i);
-
-    assert.ok(
-        code.includes("if (interaction.isFirstInteraction && !parsed)"),
-        "Chỉ gửi lời chào tự động khi tin nhắn lần đầu là tin nhắn thường (không phải lệnh)"
-    );
 });

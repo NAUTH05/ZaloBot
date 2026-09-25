@@ -78,9 +78,17 @@ const {
 const { resolveCommandName } = require("./helpContent");
 const { detectChatType, getInteractionTargets, recordInteraction } = require("./interactionRegistry");
 const {
+    ADMISSION_STATE,
+    admissionKey,
+    classifyAdmissionFailure,
+    registry: admissionRegistry
+} = require("./contactAdmission");
+const {
     getAllChats,
     getChat,
     isChatEligible,
+    markChatAdmitted,
+    markChatUnreachable,
     recordDeliveryFailure,
     recordDeliverySuccess,
     setChatStatus,
@@ -105,7 +113,7 @@ const { createAdminServer } = require("./adminServer");
 const { DEFAULT_SHUTDOWN_TIMEOUT_MS, createShutdownController } = require("./shutdown");
 const { recordSystemLog } = require("./operationalLog");
 const { getAdminSettings, getConfiguredAdminIds, isConfiguredAdmin } = require("./adminSettings");
-const { LEGACY_BOT_ID, extractBotName, normalizeBotId, parseScopedKey, resolveBotConfigs, resolveBotDisplayName, scopeKey } = require("./bots");
+const { LEGACY_BOT_ID, extractBotName, isZcaId, normalizeBotId, parseScopedKey, resolveBotConfigs, resolveBotDisplayName, scopeKey } = require("./bots");
 const { createOfficialProvider } = require("./providers/officialProvider");
 const { createZcaProvider } = require("./providers/zca/zcaProvider");
 const { createRuntimeMetrics } = require("./runtimeMetrics");
@@ -201,6 +209,20 @@ const zcaProvider = createZcaProvider({
 
 registerBots([...officialProviders, zcaProvider]);
 
+// Đặt registry nhà cung cấp lên globalThis để công cụ một-lần
+// (scripts/sendRecoveredAnnouncement.js) gửi được TRONG CÙNG tiến trình này.
+//
+// Bắt buộc phải cùng tiến trình: tài khoản ZCA giữ khoá phiên độc quyền, mở tiến
+// trình thứ hai sẽ đá nhau và làm hỏng phiên. Chỉ đặt khi đang chạy như tiến trình
+// chính (không đặt trong bài kiểm tra) để không rò rỉ trạng thái giữa các bài.
+if (process.env.NODE_ENV !== "test") {
+    globalThis.__ZALOBOT_RUNTIMES__ = {
+        get: (botId) => getBot(botId),
+        list: () => listBots(),
+        isZcaId
+    };
+}
+
 // Đo lường runtime: mốc thời gian khởi động + log bộ nhớ định kỳ.
 const metrics = createRuntimeMetrics();
 
@@ -218,6 +240,16 @@ const providerQueues = createProviderQueues();
 // chuyển trạng thái theo ngưỡng sẵn có, và quản trị viên vẫn khôi phục được.
 function recordUndeliverableChat(chatId, classification) {
     try {
+        // KHÔNG tạo bản ghi sổ chat cho một chat CHƯA từng được tiếp nhận.
+        //
+        // Vì sao: một người lạ bị 410/422 ngay từ đầu không phải "người dùng không
+        // liên lạc được" — họ chưa bao giờ là người dùng. Ghi vào sổ chat ở đây sẽ
+        // để lại đúng dấu vết mà cổng tiếp nhận đang cố ngăn.
+        const existing = getChat(chatId);
+        if (!existing) {
+            console.warn(`[Delivery] ${chatId}: ${classification.reason} — chat chưa được tiếp nhận, không ghi sổ.`);
+            return;
+        }
         recordDeliveryFailure(chatId, new Error(classification.reason), {
             feature: "broadcast",
             operation: "permanent_delivery_error"
@@ -229,6 +261,85 @@ function recordUndeliverableChat(chatId, classification) {
     }
 }
 
+/* -------------------------------------------------------------------------- */
+/* Cổng tiếp nhận liên hệ                                                     */
+/* -------------------------------------------------------------------------- */
+
+// Hàng đợi ghi HOÃN cho những chat CHƯA được tiếp nhận.
+//
+// Vì sao cần: một lệnh đầu tiên của người lạ có thể kích hoạt ghi MSSV hoặc đăng
+// ký nhận lịch. Nếu ta ghi ngay rồi câu trả lời bị 422/410, dữ liệu người dùng bị
+// bỏ lại một phần cho một chat mà bot không thể liên lạc. Thay vào đó, khi chat
+// chưa được tiếp nhận, ta giữ các thao tác ghi trong bộ nhớ và chỉ THỰC THI khi
+// câu trả lời đã gửi thành công.
+//
+// Hàng đợi này KHÔNG phải nguồn sự thật: nó chỉ chứa các thao tác sẽ chạy lại.
+// Mất khi khởi động lại là đúng — chat chưa tiếp nhận thì không có gì phải khôi phục.
+const MAX_DEFERRED_WRITES = 100;
+const deferredWrites = new Map(); // admissionKey → Array<{ label, run }>
+
+function deferWrite(botId, chatId, label, run) {
+    const key = admissionKey(botId, chatId);
+    const queue = deferredWrites.get(key) || [];
+    // Nhiều lệnh lặp lại trong cửa sổ chờ thì cái sau ghi đè cái trước theo nhãn:
+    // ví dụ /luumssv chạy hai lần chỉ cần ghi bản mới nhất.
+    const filtered = queue.filter((entry) => entry.label !== label);
+    filtered.push({ label, run });
+    deferredWrites.set(key, filtered.slice(-MAX_DEFERRED_WRITES));
+}
+
+// Chạy toàn bộ thao tác đã hoãn cho một chat. Gọi SAU KHI đã xác nhận câu trả lời
+// gửi thành công qua đúng nhà cung cấp.
+async function flushDeferredWrites(botId, chatId) {
+    const key = admissionKey(botId, chatId);
+    const queue = deferredWrites.get(key);
+    if (!queue || queue.length === 0) return 0;
+    deferredWrites.delete(key);
+    let executed = 0;
+    for (const entry of queue) {
+        try {
+            await entry.run();
+            executed += 1;
+        } catch (error) {
+            // Một thao tác hoãn lỗi không được kéo theo các thao tác khác.
+            console.error(`Lỗi chạy thao tác hoãn (${entry.label}):`, error.message);
+            logDiscord("ERROR", `deferred_write_failed: ${entry.label}: ${error.message}`);
+        }
+    }
+    return executed;
+}
+
+function discardDeferredWrites(botId, chatId) {
+    deferredWrites.delete(admissionKey(botId, chatId));
+}
+
+// Chỉ để chẩn đoán. Không trả dữ liệu nhận dạng.
+function getAdmissionStats() {
+    return {
+        ...admissionRegistry.stats(),
+        deferredKeys: deferredWrites.size
+    };
+}
+
+// Thực thi một thao tác ghi có thể bị cổng tiếp nhận chặn.
+//
+// Nếu chat ĐÃ được tiếp nhận: chạy ngay, trả về giá trị thật.
+// Nếu CHƯA: trả về giá trị dự phòng và xếp thao tác vào hàng đợi hoãn. Thao tác
+// này sẽ chạy khi câu trả lời kế tiếp gửi thành công (hoặc bị bỏ nếu bị từ chối).
+//
+// `options.fallback` là giá trị trả về khi thao tác bị hoãn. `options.defer: false`
+// dùng cho những thao tác KHÔNG được hoãn (ví dụ ghi log quản trị phải chạy ngay).
+function gatedWrite(context, label, run, options = {}) {
+    const botId = context.botId || getCurrentBotId();
+    if (admissionRegistry.isAdmitted(botId, context.chatId)) {
+        return run();
+    }
+    // Chưa tiếp nhận: hoãn lại. Không ghi gì vào store.
+    deferWrite(botId, context.chatId, label, run);
+    console.log(`[Admission] hoãn "${label}" cho ${botId}/${context.chatId} tới khi có câu trả lời gửi được.`);
+    return options.fallback !== undefined ? options.fallback : null;
+}
+
 // Khi RSS vượt ngưỡng cảnh báo, in thêm ngữ cảnh để biết cái gì đang giữ bộ nhớ.
 // Đây là chẩn đoán, KHÔNG tự khởi động lại tiến trình — PM2 vẫn là cơ chế an toàn.
 metrics.setDiagnosticsProvider(() => ({
@@ -238,7 +349,8 @@ metrics.setDiagnosticsProvider(() => ({
     schedulerJobs: Array.isArray(runtimeSchedulerJobs) ? runtimeSchedulerJobs.length : 0,
     interactions: getInteractionTargets().length,
     subscriptions: Object.keys(getAllSubscriptions()).length,
-    chats: getAllChats().length
+    chats: getAllChats().length,
+    admission: getAdmissionStats()
 }));
 
 // Hỏi Zalo tên thật của từng bot bằng chính token của bot đó (getMe).
@@ -322,6 +434,19 @@ async function refreshBotName(botId) {
     }
 }
 const dashboardCommandContext = new AsyncLocalStorage();
+
+// Ngữ cảnh CỔNG TIẾP NHẬN cho một sự kiện tin nhắn vào.
+//
+// Vì sao cần một ngữ cảnh riêng thay vì chỉ bọc các lần gửi trong
+// handleIncomingMessage: các lệnh (/luumssv, /nhanlich, /help …) gọi sendMessage
+// từ BÊN TRONG handleCommand, mà handleCommand cũng được gọi từ dashboard và các
+// bài kiểm tra. Đặt ngữ cảnh ở đây cho phép sendMessage biết "lần gửi này thuộc
+// một sự kiện vào của chat X, bot Y" và tự cập nhật cổng tiếp nhận — không phải
+// sửa hàng trăm lối gọi sendMessage.
+//
+// Trường: { botId, chatId, onAdmitted, onDefiniteRejection, onUncertain }
+const inboundAdmissionContext = new AsyncLocalStorage();
+
 const registeredSchedulers = new WeakSet();
 
 // Trạng thái runtime phục vụ dừng an toàn.
@@ -436,6 +561,14 @@ async function sendMessage(chatId, text, options = {}) {
     const provider = currentProvider();
     const supportsMarkdown = provider.supportsMarkdown !== false;
     const sendOptions = supportsMarkdown ? messageOptions : { ...otherOptions };
+    // Kết quả gửi tường minh cho tầng cổng tiếp nhận: biết CHÍNH XÁC đã gửi được
+    // qua nhà cung cấp nào. Không suy đoán từ ngữ cảnh bên ngoài.
+    const deliveryResult = {
+        delivered: chunks.length === 0 ? true : false,
+        chunks: chunks.length,
+        sentChunks: 0,
+        providerBotId: normalizeBotId(provider.botId) || LEGACY_BOT_ID
+    };
     for (let index = 0; index < chunks.length; index += 1) {
         const prefix = index > 0 && continuationHeader ? `${continuationHeader}\n\n` : "";
         const rawPayload = `${prefix}${chunks[index]}`;
@@ -455,6 +588,7 @@ async function sendMessage(chatId, text, options = {}) {
                 () => Promise.resolve(provider.sendMessage(chatId, payload, sendOptions)),
                 priority
             );
+            deliveryResult.sentChunks += 1;
         } catch (error) {
             // Phân loại lỗi trước khi quyết định có thử lại dạng plain text hay không.
             //
@@ -474,6 +608,7 @@ async function sendMessage(chatId, text, options = {}) {
                     () => Promise.resolve(provider.sendMessage(chatId, toPlainText(payload), fallbackOptions)),
                     priority
                 );
+                deliveryResult.sentChunks += 1;
                 continue;
             }
 
@@ -483,8 +618,37 @@ async function sendMessage(chatId, text, options = {}) {
                 recordUndeliverableChat(chatId, classification);
                 error.deliveryRecorded = true;
             }
+            // Gắn phân loại lỗi lên đối tượng lỗi để tầng gọi không phải tự đoán lại
+            // (cổng tiếp nhận cần biết đây có phải từ chối dứt khoát hay không).
+            error.deliveryClassification = classification;
+            error.deliveryResult = deliveryResult;
+            // Cổng tiếp nhận: báo cho ngữ cảnh sự kiện vào biết lần gửi này thất bại.
+            notifyAdmissionFailure(chatId, error);
             throw error;
         }
+    }
+    deliveryResult.delivered = deliveryResult.sentChunks === chunks.length;
+    // Cổng tiếp nhận: báo cho ngữ cảnh sự kiện vào biết đã trả lời được chat này.
+    if (deliveryResult.delivered) notifyAdmissionSuccess(chatId);
+    return deliveryResult;
+}
+
+// Thông báo cho ngữ cảnh cổng tiếp nhận (nếu có) rằng một lần gửi tới chatId vừa
+// thành công. Chỉ áp dụng khi lần gửi thuộc ĐÚNG sự kiện vào của chat đó.
+function notifyAdmissionSuccess(chatId) {
+    const ctx = inboundAdmissionContext.getStore();
+    if (!ctx || String(ctx.chatId) !== String(chatId)) return;
+    if (typeof ctx.onAdmitted === "function") ctx.onAdmitted();
+}
+
+function notifyAdmissionFailure(chatId, error) {
+    const ctx = inboundAdmissionContext.getStore();
+    if (!ctx || String(ctx.chatId) !== String(chatId)) return;
+    const failure = classifyAdmissionFailure(error);
+    if (failure.definite) {
+        if (typeof ctx.onDefiniteRejection === "function") ctx.onDefiniteRejection(failure);
+    } else if (typeof ctx.onUncertain === "function") {
+        ctx.onUncertain(error);
     }
 }
 
@@ -671,6 +835,7 @@ function getBroadcastTargets(feature = "broadcast") {
     }
 
     const resolved = [];
+    const skippedAdmission = { pending: 0, unreachable: 0 };
     for (const target of targets.values()) {
         // Quyền truy cập chat được kiểm tra trong ngữ cảnh của bot SỞ HỮU đích, nếu
         // không bot 2 sẽ bị đánh giá bằng sổ chat của bot 1.
@@ -680,9 +845,22 @@ function getBroadcastTargets(feature = "broadcast") {
             else skipped.unverifiedSource += 1;
             continue;
         }
+        // Chốt bổ sung: chỉ chat ĐÃ TIẾP NHẬN mới được tính là người nhận. Bản ghi
+        // trong store vốn đã chỉ được tạo sau khi tiếp nhận, nhưng dữ liệu cũ hoặc
+        // bản ghi sót lại vẫn có thể mang admissionStatus khác — kiểm tra tường minh.
+        const admission = runWithBot(owner.runtime, () => getChat(target.chatId)?.admissionStatus || "admitted");
+        if (admission !== "admitted") {
+            if (admission === "unreachable") skippedAdmission.unreachable += 1;
+            else skippedAdmission.pending += 1;
+            continue;
+        }
         const eligible = runWithBot(owner.runtime, () => isChatEligible(target.chatId, feature));
         if (eligible) resolved.push({ ...target, botId: owner.ownerId });
     }
+
+    skipped.notAdmitted = skippedAdmission.pending + skippedAdmission.unreachable;
+    skipped.pendingAdmission = skippedAdmission.pending;
+    skipped.unreachable = skippedAdmission.unreachable;
 
     // `skipped` chỉ để chẩn đoán và ghi log — không phải danh sách người nhận.
     return Object.assign(resolved, { skipped });
@@ -759,6 +937,21 @@ function formatBroadcastSummary(title, result) {
         (skipTotal > 0
             ? `\n> **Bỏ qua:** ${skipTotal} (${skipped.unverifiedSource} chưa rõ tài khoản, ${skipped.ownerBotOffline} bot sở hữu đang tắt)`
             : "");
+}
+
+// Chạy đợt thông báo MỘT LẦN từ danh sách liên hệ khôi phục, TRONG CÙNG tiến trình
+// này. Đây là đường được hỗ trợ để gửi kèm tài khoản ZCA: registry nhà cung cấp —
+// và do đó là phiên ZCA đang đăng nhập — chỉ tồn tại trong tiến trình đang chạy.
+//
+// Trả về cùng cấu trúc mà scripts/sendRecoveredAnnouncement.js xuất ra. Không bao
+// giờ ghi vào Firestore: chỉ đọc file nguồn và gửi tin.
+async function runRecoveredAnnouncement(argv = [], options = {}) {
+    const { main } = require("./scripts/sendRecoveredAnnouncement");
+    return main(argv, {
+        ...options,
+        // Truyền registry sống của tiến trình này để script lấy được nhà cung cấp.
+        runtimeRegistry: options.runtimeRegistry || globalThis.__ZALOBOT_RUNTIMES__ || null
+    });
 }
 
 
@@ -1084,10 +1277,14 @@ async function handleCommand(msg, parsedCommand) {
 
         try {
             const data = await fetchStudentSchedule(studentId);
-            const subscription = saveStudent(context, {
-                studentId,
-                studentName: data.studentName
-            });
+            // Ghi MSSV qua cổng tiếp nhận: chat chưa được xác nhận thì chỉ hoãn lại,
+            // KHÔNG ghi một bản ghi người dùng cho chat mà bot có thể không trả lời được.
+            const subscription = gatedWrite(
+                context,
+                "save_student",
+                () => saveStudent(context, { studentId, studentName: data.studentName }),
+                { fallback: { studentId, studentName: data.studentName, notificationTimes: [] } }
+            );
 
             await sendMessage(
                 chatId,
@@ -1125,15 +1322,31 @@ async function handleCommand(msg, parsedCommand) {
             const data = await fetchStudentSchedule(studentId);
             const wasAlreadyWatched = Object.values(getEnabledSubscriptions())
                 .some((subscription) => subscription.studentId === studentId);
-            enableNotifications(context, {
-                studentId,
-                studentName: data.studentName,
-                notificationTime,
-                targetDayOffset
-            });
-            const updatedSubscription = getSubscription(context);
+            // Ghi đăng ký qua cổng tiếp nhận: hoãn nếu chat chưa được xác nhận.
+            const updatedSubscription = gatedWrite(
+                context,
+                "enable_notifications",
+                () => {
+                    enableNotifications(context, {
+                        studentId,
+                        studentName: data.studentName,
+                        notificationTime,
+                        targetDayOffset
+                    });
+                    // Ảnh chụp lịch chỉ có nghĩa khi đăng ký thật sự được ghi.
+                    initializeScheduleSnapshot(data, new Date(), !wasAlreadyWatched);
+                    return getSubscription(context);
+                },
+                {
+                    // Dự phòng: đủ để dựng thông điệp xác nhận khi thao tác bị hoãn.
+                    fallback: {
+                        studentId,
+                        studentName: data.studentName,
+                        notificationTimes: [{ time: notificationTime, targetDayOffset }]
+                    }
+                }
+            );
             const notificationTimes = normalizeNotificationTimes(updatedSubscription);
-            initializeScheduleSnapshot(data, new Date(), !wasAlreadyWatched);
             await sendMessage(
                 chatId,
                 formatDailyNotificationEnabled(data, notificationTimes)
@@ -2141,60 +2354,160 @@ async function handleIncomingMessage(runtime, msg) {
     // Chat ID / User ID chỉ có nghĩa trong phạm vi một bot, nên botId đi kèm ngữ cảnh.
     const context = getMessageContext(msg, { botId: runtime.botId });
     const from = msg.from?.display_name || context.userId || "unknown";
+    const botId = context.botId || getCurrentBotId();
     console.log("Tin nhắn mới:", from, "→", text);
-    const interaction = recordInteraction(context, msg);
-    upsertChat({
-        restoreDeleted: true,
-        chatId: context.chatId,
-        chatType: interaction.chatType,
-        displayName: interaction.chatTitle || context.userDisplayName,
-        userId: interaction.lastUserId,
-        chatTitle: interaction.chatTitle,
-        firstInteractionAt: interaction.firstInteractionAt,
-        lastInboundInteractionAt: interaction.lastInteractionAt
-    });
+
+    // CỔNG TIẾP NHẬN.
+    //
+    // Sự kiện vào chỉ là ỨNG VIÊN. Trước đây recordInteraction() + upsertChat()
+    // chạy ngay tại đây — trước khi kiểm tra quyền và trước khi bất kỳ câu trả lời
+    // nào gửi được — nên một chat mà bot không thể trả lời vẫn để lại dấu vết và
+    // vẫn được coi là người nhận hợp lệ cho các đợt /thongbao sau.
+    //
+    // Nay: ta chỉ ghi nhận ứng viên trong bộ nhớ (TTL ngắn, khóa theo bot+chat).
+    // Không ghi gì bền vững ở đây.
+    const admission = admissionRegistry.markIncoming(botId, context.chatId);
+    const alreadyAdmitted = admission.alreadyAdmitted;
+
+    // Ghi sổ tương tác + sổ chat. CHỈ chạy khi chat đã được tiếp nhận (trực tiếp
+    // hoặc qua lần gửi thành công vừa xảy ra trong sự kiện này).
+    const persistChatFacts = () => {
+        const interaction = recordInteraction(context, msg);
+        upsertChat({
+            restoreDeleted: true,
+            chatId: context.chatId,
+            chatType: interaction.chatType,
+            displayName: interaction.chatTitle || context.userDisplayName,
+            userId: interaction.lastUserId,
+            chatTitle: interaction.chatTitle,
+            firstInteractionAt: interaction.firstInteractionAt,
+            lastInboundInteractionAt: interaction.lastInteractionAt
+        });
+        return interaction;
+    };
+
+    // Thông tin hiển thị chỉ để ghi log — không cần ghi store cho việc này.
+    const logInteraction = {
+        chatType: detectChatType(msg),
+        chatTitle: String(msg.chat?.title || msg.chat?.name || ""),
+        lastUserId: context.userId
+    };
+    let interaction = alreadyAdmitted ? persistChatFacts() : logInteraction;
 
     logDiscord("INFO", `Tin nhắn từ: ${from}\n> User ID: ${context.userId}\n> Chat ID: ${context.chatId}\n> Chat Title: ${interaction.chatTitle || "Private"}\n> Chat Type: ${interaction.chatType}\n> Nội dung: ${text}`);
 
-    // Kiểm tra quyền sử dụng BOT (Owner luôn được phép)
-    if (!isOwner(context)) {
-        const botCheck = canUseBot(context);
-        if (!botCheck.allowed) {
-            await sendMessage(
-                context.chatId,
-                formatWarningMessage(
-                    "KHÔNG CÓ QUYỀN TRUY CẬP",
-                    "> Tài khoản hoặc nhóm này hiện không có quyền sử dụng trợ lý."
-                )
-            );
-            return;
+    // Xử lý MỘT lần tiếp nhận thành công. Chạy đúng một lần cho dù có nhiều lần
+    // gửi thành công trong cùng sự kiện (ví dụ lời chào + phản hồi lệnh).
+    let admittedThisEvent = alreadyAdmitted;
+    const onAdmitted = () => {
+        if (admittedThisEvent) return;
+        admittedThisEvent = true;
+        // Xác nhận gửi thành công ⇒ bằng chứng thật sự bot liên lạc được.
+        admissionRegistry.admit(botId, context.chatId);
+        try {
+            persistChatFacts();
+            markChatAdmitted(context.chatId);
+        } catch (error) {
+            console.error(`[Admission] ghi sổ chat thất bại: ${error.message}`);
         }
-    }
+        // Chạy nốt các thao tác ghi đã hoãn (MSSV, đăng ký…).
+        flushDeferredWrites(botId, context.chatId).catch((error) => {
+            console.error(`[Admission] chạy thao tác hoãn thất bại: ${error.message}`);
+        });
+    };
 
-    const parsed = parseCommand(msg.text);
-
-    const looksLikeCommand = String(msg.text || "").trim().startsWith("/");
-    if (interaction.isFirstInteraction && !parsed) {
-        if (!looksLikeCommand) {
+    const onDefiniteRejection = (failure) => {
+        // Từ chối dứt khoát: KHÔNG ghi dữ liệu người dùng, bỏ thao tác hoãn.
+        admissionRegistry.reject(botId, context.chatId, failure.reason);
+        discardDeferredWrites(botId, context.chatId);
+        // Nếu chat đã từng được tiếp nhận (người dùng cũ bị chặn bot), đánh dấu
+        // unreachable để loại khỏi phát tin — nhưng GIỮ NGUYÊN MSSV/đăng ký.
+        if (alreadyAdmitted) {
             try {
-                await sendWelcomeMessage(context.chatId, msg.from?.display_name);
+                markChatUnreachable(context.chatId, failure.reason);
             } catch (error) {
-                logDiscord("ERROR", `Không thể gửi lời chào mừng tới chat ${context.chatId}: ${error.message}`);
+                console.error(`[Admission] không đánh dấu được unreachable: ${error.message}`);
             }
         }
-    }
+        console.warn(`[Admission] ${botId}/${context.chatId}: từ chối (${failure.reason}) — không ghi dữ liệu.`);
+    };
 
-    if (parsed) {
-        await handleCommand(msg, parsed);
-    } else if (looksLikeCommand) {
-        await sendMessage(
-            context.chatId,
-            formatWarningMessage(
-                "LỆNH KHÔNG HỢP LỆ",
-                "> Không thể phân tích lệnh này.\n> Dùng **/help** để xem cú pháp và danh sách lệnh."
-            )
-        );
-    }
+    const onUncertain = (error) => {
+        // Kết quả KHÔNG CHẮC CHẮN (timeout/429/5xx/422 mơ hồ): không tiếp nhận lần
+        // này, nhưng KHÔNG đánh dấu hỏng vĩnh viễn — giữ thao tác hoãn cho lần sau.
+        const kind = error?.deliveryClassification?.kind || "unknown";
+        console.warn(`[Admission] ${botId}/${context.chatId}: chưa xác nhận được (${kind}) — sẽ thử lại sau.`);
+    };
+
+    // Chạy toàn bộ phần xử lý trong ngữ cảnh cổng tiếp nhận. Mọi sendMessage() cho
+    // ĐÚNG chat này — dù gọi từ handleCommand hay từ nhánh chào mừng — đều tự cập
+    // nhật cổng tiếp nhận. Đây là thứ khiến lệnh đầu tiên của người lạ cũng được
+    // kiểm soát mà không phải sửa từng lối gọi.
+    await inboundAdmissionContext.run(
+        { botId, chatId: context.chatId, onAdmitted, onDefiniteRejection, onUncertain },
+        async () => {
+            // Kiểm tra quyền sử dụng BOT (Owner luôn được phép)
+            if (!isOwner(context)) {
+                const botCheck = canUseBot(context);
+                if (!botCheck.allowed) {
+                    // Gửi lời từ chối. Nếu gửi được (hiếm) thì chat vẫn được tiếp
+                    // nhận; nếu bị chặn thì không ghi gì. Không ném lỗi ra ngoài —
+                    // handler tin nhắn không được làm chết vòng lặp polling.
+                    try {
+                        await sendMessage(
+                            context.chatId,
+                            formatWarningMessage(
+                                "KHÔNG CÓ QUYỀN TRUY CẬP",
+                                "> Tài khoản hoặc nhóm này hiện không có quyền sử dụng trợ lý."
+                            )
+                        );
+                    } catch (error) {
+                        logDiscord("ERROR", `access_denied_reply_failed: ${error.message}`);
+                    }
+                    await flushPersistenceWrites();
+                    return;
+                }
+            }
+
+            const parsed = parseCommand(msg.text);
+            const looksLikeCommand = String(msg.text || "").trim().startsWith("/");
+
+            // Chào mừng khi chat chưa được tiếp nhận VÀ tin không phải lệnh.
+            //
+            // Đây là "bằng chứng" rẻ nhất: lời chào cũng là một câu trả lời thật,
+            // nên khi nó gửi được thì chat được tiếp nhận luôn — không cần tin "probe".
+            if (!parsed && !looksLikeCommand && !alreadyAdmitted) {
+                try {
+                    await sendWelcomeMessage(context.chatId, msg.from?.display_name);
+                } catch (error) {
+                    logDiscord("ERROR", `welcome_message_failed: ${error.message}`);
+                }
+            }
+
+            if (parsed) {
+                // Lệnh có thể ném lỗi gửi (410/422/tạm thời). handler tin nhắn không
+                // được để lỗi làm chết vòng lặp polling — nuốt tại đây, cổng tiếp
+                // nhận đã ghi nhận kết quả qua notifyAdmissionFailure().
+                try {
+                    await handleCommand(msg, parsed);
+                } catch (error) {
+                    logDiscord("ERROR", `command_failed: ${error.message}`);
+                }
+            } else if (looksLikeCommand) {
+                try {
+                    await sendMessage(
+                        context.chatId,
+                        formatWarningMessage(
+                            "LỆNH KHÔNG HỢP LỆ",
+                            "> Không thể phân tích lệnh này.\n> Dùng **/help** để xem cú pháp và danh sách lệnh."
+                        )
+                    );
+                } catch (error) {
+                    logDiscord("ERROR", `invalid_command_reply_failed: ${error.message}`);
+                }
+            }
+        }
+    );
     await flushPersistenceWrites();
 }
 
@@ -2480,6 +2793,8 @@ module.exports = {
     parseQuestionIdAndText,
     registerRuntimeJobs,
     sendBotAnnouncement,
+    runRecoveredAnnouncement,
+    getAdmissionStats,
     sendClassStartNotifications,
     sendDailySchedulesAtSix,
     sendDailySchedulesAtTime,

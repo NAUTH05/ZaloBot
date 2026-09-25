@@ -376,6 +376,11 @@ function buildAdminData() {
         }
 
         const displayName = String(chat.displayName || interaction?.chatTitle || chatSubscriptions.find((item) => item.chatTitle)?.chatTitle || interaction?.lastUserDisplayName || `Chat ${chatId}`);
+        // Trạng thái tiếp nhận: bản ghi CŨ không có trường này coi như đã tiếp nhận.
+        // `pending` = mới chỉ có sự kiện vào; `unreachable` = gửi tới thất bại dứt khoát.
+        const admissionStatus = chat.admissionStatus === "pending" || chat.admissionStatus === "unreachable"
+            ? chat.admissionStatus
+            : "admitted";
         const record = {
             ...chat,
             chatId,
@@ -390,6 +395,12 @@ function buildAdminData() {
             studentIds: [...new Set(chatSubscriptions.map((item) => item.studentId).filter(Boolean))],
             lastInboundInteractionAt: chat.lastInboundInteractionAt || interaction?.lastInteractionAt || null,
             firstInteractionAt: chat.firstInteractionAt || interaction?.firstInteractionAt || null,
+            // Trạng thái tiếp nhận để dashboard phân biệt ba nhóm.
+            admissionStatus,
+            unreachableReason: admissionStatus === "unreachable" ? (chat.unreachableReason || null) : null,
+            // CHỈ chat đã tiếp nhận mới được tính là người nhận phát tin. `canSend` phản
+            // ánh cả nguồn đã xác minh LẪN việc chat đã trả lời được hay chưa.
+            canReceiveBroadcast: rowCanSend && admissionStatus === "admitted",
             ...sourceFields(resolvedSource, primaryTarget ? primaryTarget.storeId : null, primaryTarget ? primaryTarget.recordKey : null),
             // Quyền thao tác do MỌI bản ghi đóng góp quyết định, không chỉ một bản ghi.
             canSend: rowCanSend,
@@ -435,12 +446,15 @@ function buildAdminData() {
     const chatByKey = new Map(chats.map((chat) => [scopedChatId(chat.botId, chat.chatId), chat]));
     const normalizedSubscriptions = subscriptions.map((item) => {
         const chat = chatByKey.get(scopedChatId(item.botId, item.chatId));
+        const admitted = !chat || chat.admissionStatus === "admitted";
         return {
             ...item,
             chatName: chat?.displayName || item.chatId,
             chatType: chat?.chatType || "unknown",
             chatStatus: chat?.status || "active",
-            eligible: chat?.status === "active"
+            admissionStatus: chat?.admissionStatus || "admitted",
+            // Đăng ký chỉ thật sự "đủ điều kiện" khi chat đã được tiếp nhận VÀ đang hoạt động.
+            eligible: chat?.status === "active" && admitted
         };
     });
 
@@ -472,15 +486,23 @@ function buildAdminData() {
         ...chats.map((chat) => chat.botId),
         ...normalizedSubscriptions.map((item) => item.botId)
     ])].filter(Boolean).sort();
-    const botStats = botIds.map((botId) => ({
-        botId,
-        chatCount: chats.filter((chat) => chat.botId === botId).length,
-        userCount: [...users.values()].filter((user) => user.botId === botId).length,
-        groupCount: groups.filter((group) => group.botId === botId).length,
-        subscriptionCount: normalizedSubscriptions.filter((item) => item.botId === botId).length,
-        enabledSubscriptionCount: normalizedSubscriptions.filter((item) => item.botId === botId && item.notificationsEnabled && item.eligible).length,
-        deliveryErrorCount: chats.filter((chat) => chat.botId === botId && chat.lastError).length
-    }));
+    const botStats = botIds.map((botId) => {
+        const botChats = chats.filter((chat) => chat.botId === botId);
+        return {
+            botId,
+            chatCount: botChats.length,
+            userCount: [...users.values()].filter((user) => user.botId === botId).length,
+            groupCount: groups.filter((group) => group.botId === botId).length,
+            subscriptionCount: normalizedSubscriptions.filter((item) => item.botId === botId).length,
+            enabledSubscriptionCount: normalizedSubscriptions.filter((item) => item.botId === botId && item.notificationsEnabled && item.eligible).length,
+            deliveryErrorCount: botChats.filter((chat) => chat.lastError).length,
+            // Đếm theo trạng thái tiếp nhận: chỉ "admitted" mới là người nhận hợp lệ.
+            admittedChatCount: botChats.filter((chat) => chat.admissionStatus === "admitted").length,
+            pendingAdmissionCount: botChats.filter((chat) => chat.admissionStatus === "pending").length,
+            unreachableChatCount: botChats.filter((chat) => chat.admissionStatus === "unreachable").length,
+            broadcastRecipientCount: botChats.filter((chat) => chat.canReceiveBroadcast).length
+        };
+    });
 
     return {
         generatedAt: new Date().toISOString(),

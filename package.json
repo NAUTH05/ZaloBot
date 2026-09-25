@@ -19,7 +19,9 @@
         "migrate:attribution": "node scripts/reconcileAttribution.js",
         "migrate:attribution-apply": "node scripts/reconcileAttribution.js --apply",
         "recover:interactions": "node scripts/recoverInteractions.js",
-        "recover:interactions-apply": "node scripts/recoverInteractions.js --apply"
+        "recover:interactions-apply": "node scripts/recoverInteractions.js --apply",
+        "announce:dry-run": "node scripts/sendRecoveredAnnouncement.js",
+        "announce:report": "node scripts/sendRecoveredAnnouncement.js --report"
     },
     "dependencies": {
         "dotenv": "^17.2.1",
