@@ -2,7 +2,9 @@ const { getAllChats, getDeletedChatIds } = require("./chatDirectory");
 const { getInteractionTargets } = require("./interactionRegistry");
 const { getAllSubscriptions, isCurrentSubscription, normalizeNotificationTimes } = require("./subscriptions");
 const { getAccessSummary } = require("./accessControl");
+const path = require("path");
 const { parseScopedKey, normalizeBotId, storageKeyPrefix, LEGACY_BOT_ID } = require("./bots");
+const { readJsonStore } = require("./firestorePersistence");
 const { SOURCE_CONFIDENCE, isVerifiedConfidence, resolveRecordSource, scopedIdentityKey } = require("./sourceAttribution");
 const { getActiveVerifications } = require("./sourceVerifications");
 
@@ -91,8 +93,54 @@ function parseScopedChatId(chatKey) {
     };
 }
 
+// Chỉ mục KHÓA THẬT theo chatId, cho từng store.
+//
+// getAllChats() trả về giá trị bản ghi mà BỎ MẤT khóa lưu trữ. Nhưng khóa thật là
+// thứ duy nhất API xác minh nguồn chấp nhận — gửi khóa tổng hợp của dashboard
+// ("__unverified__::<chatId>") lên API sẽ luôn 404 vì không có bản ghi nào như vậy.
+//
+// Hàm này đọc thẳng store để lấy khóa thật.
+function realKeysByChatId(storeId) {
+    const filePath = path.join(__dirname, `${storeId}.json`);
+    const index = new Map();
+    let data = null;
+    try {
+        data = readJsonStore(filePath, filePath, null);
+    } catch (error) {
+        console.warn(`Không đọc được ${storeId} để lấy khóa thật: ${error.message}`);
+        return index;
+    }
+    if (!data || typeof data !== "object") return index;
+
+    const containers = [];
+    if (data.chats && typeof data.chats === "object") containers.push(data.chats);
+    const flat = {};
+    for (const [key, value] of Object.entries(data)) {
+        if (["schemaVersion", "chats", "tickets", "deletedChatIds", "sourceIndex"].includes(key)) continue;
+        if (value && typeof value === "object") flat[key] = value;
+    }
+    if (Object.keys(flat).length) containers.push(flat);
+
+    for (const container of containers) {
+        for (const [recordKey, record] of Object.entries(container)) {
+            if (!record || typeof record !== "object") continue;
+            const chatId = record.chatId != null ? String(record.chatId) : null;
+            if (!chatId) continue;
+            if (!index.has(chatId)) index.set(chatId, []);
+            index.get(chatId).push({ storeId, recordKey, record });
+        }
+    }
+    return index;
+}
+
 function buildAdminData() {
     activeVerifications = getActiveVerifications();
+    // Khóa THẬT của từng store, để giao diện gọi đúng API xác minh.
+    const realKeys = {
+        chatDirectory: realKeysByChatId("chatDirectory"),
+        interactions: realKeysByChatId("interactions"),
+        subscriptions: realKeysByChatId("subscriptions")
+    };
     const rawChats = getAllChats();
     const interactions = getInteractionTargets();
     const rawSubscriptions = Object.entries(getAllSubscriptions());
@@ -119,8 +167,20 @@ function buildAdminData() {
         return owners && owners.size === 1 ? [...owners][0] : null;
     };
 
-    const interactionSource = (item) => {
-        const declared = sourceOf(item, "", "interactions");
+    // Nguồn suy ra từ CHAT mà bản ghi tham chiếu, dùng chung cho mọi store có trường
+    // chatId (tương tác, đăng ký nhận lịch).
+    //
+    // Vì sao cần: một đăng ký nhận lịch không có trường botId, nhưng nó trỏ tới một
+    // chatId cụ thể. Nếu chat đó đã xác minh được nguồn thì đăng ký thuộc chính nguồn
+    // ấy. Thiếu bước này, mỗi đăng ký như vậy sinh ra một DÒNG RIÊNG mang khóa tổng
+    // hợp "__unverified__::<chatId>" cho cùng một cuộc trò chuyện đã biết nguồn —
+    // vừa trùng lặp vừa không xác minh được.
+    //
+    // Nếu chatId thuộc nhiều bot thì KHÔNG suy ra — để nguyên chưa xác minh.
+    const sourceWithChatInheritance = (item, storeId, recordKey = "") => {
+        // recordKey PHẢI là khóa thật: xác minh của quản trị viên được lưu theo
+        // (storeId, khóa). Truyền khóa rỗng thì không bao giờ tra được xác minh.
+        const declared = sourceOf(item, recordKey, storeId);
         if (declared.botId) return declared;
         const inherited = ownerFromChatId(item.chatId);
         if (!inherited) return declared;
@@ -135,8 +195,31 @@ function buildAdminData() {
         };
     };
 
+    const interactionSource = (item, recordKey = "") => sourceWithChatInheritance(item, "interactions", recordKey);
+
+    // Khóa thật của từng bản ghi tương tác, tra theo chatId.
+    //
+    // getInteractionTargets() trả về giá trị mà BỎ MẤT khóa, nhưng xác minh của quản
+    // trị viên được lưu theo (storeId, khóa). Thiếu khóa thật thì không bao giờ tra
+    // được xác minh, và dòng sẽ mãi ở trạng thái chưa rõ tài khoản.
+    const interactionRealKey = (item) => {
+        const entries = realKeys.interactions.get(String(item.chatId)) || [];
+        if (!entries.length) return "";
+        // Cùng một chatId có thể có NHIỀU bản ghi tương tác (một ở bot1, một ở bot2).
+        // Phải chọn đúng khóa của bản ghi này, nếu không sẽ tra xác minh của bản ghi
+        // khác và kết luận sai tài khoản.
+        const declared = normalizeBotId(item.botId);
+        if (declared) {
+            const match = entries.find((entry) => normalizeBotId(entry.record?.botId) === declared);
+            if (match) return match.recordKey;
+        }
+        // Không khai báo botId: dùng khóa KHÔNG có phạm vi (bản ghi của bot1).
+        const unscoped = entries.find((entry) => !parseScopedKey(entry.recordKey).scoped);
+        return unscoped ? unscoped.recordKey : entries[0].recordKey;
+    };
+
     const interactionByChat = new Map(interactions.map((item) => [
-        scopedChatId(interactionSource(item).botId, String(item.chatId)),
+        scopedChatId(interactionSource(item, interactionRealKey(item)).botId, String(item.chatId)),
         item
     ]));
     const subscriptionsByChat = new Map();
@@ -144,7 +227,7 @@ function buildAdminData() {
 
     const subscriptions = rawSubscriptions.map(([key, raw]) => {
         const current = isCurrentSubscription(raw);
-        const source = sourceOf(raw, key, "subscriptions");
+        const source = sourceWithChatInheritance(raw, "subscriptions");
         const botId = source.botId;
         const item = {
             key,
@@ -175,7 +258,7 @@ function buildAdminData() {
     // Mỗi cặp (botId, chatId) là một dòng riêng trong dashboard.
     const allChatKeys = new Set([
         ...rawChats.map((chat) => scopedChatId(sourceOf(chat, "", "chatDirectory").botId, String(chat.chatId))),
-        ...interactions.map((item) => scopedChatId(interactionSource(item).botId, String(item.chatId))),
+        ...interactions.map((item) => scopedChatId(interactionSource(item, interactionRealKey(item)).botId, String(item.chatId))),
         ...subscriptions.filter((item) => item.chatId).map((item) => scopedChatId(item.botId, item.chatId))
     ]);
 
@@ -196,8 +279,81 @@ function buildAdminData() {
         const chatSource = chatRecord
             ? sourceOf(chatRecord, "", "chatDirectory")
             : { botId, confidence: botId ? SOURCE_CONFIDENCE.FROM_SCOPED_KEY : SOURCE_CONFIDENCE.UNVERIFIED_LEGACY, canSend: Boolean(botId), label: null };
+        // Nếu bản ghi chatDirectory không xác định được tài khoản (hoặc không tồn tại),
+        // dòng vẫn có thể học từ các bản ghi đóng góp khác — nhưng chỉ khi bằng chứng
+        // nhất quán. Xem resolvedSource bên dưới.
         const interaction = interactionByChat.get(chatKey);
         const chatSubscriptions = subscriptionsByChat.get(chatKey) || [];
+
+        // Mọi bản ghi THẬT đóng góp vào dòng này, kèm trạng thái xác minh riêng.
+        //
+        // Một dòng dashboard có thể được dựng từ nhiều bản ghi ở nhiều store. Giao
+        // diện phải xác minh được TỪNG bản ghi, và không được coi cả dòng là đã xác
+        // minh chỉ vì một trong số đó đã xác minh.
+        const sourceRecords = [];
+        const collect = (storeId, entries, resolve) => {
+            for (const entry of entries || []) {
+                const source = resolve(entry.record, entry.recordKey);
+                sourceRecords.push({
+                    storeId,
+                    recordKey: entry.recordKey,
+                    botId: source.botId,
+                    confidence: source.confidence,
+                    canSend: Boolean(source.canSend),
+                    verified: isVerifiedConfidence(source.confidence),
+                    reason: source.reason || null
+                });
+            }
+        };
+        collect("chatDirectory", (realKeys.chatDirectory.get(String(chatId)) || []).filter((entry) => entry.recordKey === chatKey || !parseScopedKey(entry.recordKey).scoped), (record, recordKey) => sourceOf(record, recordKey, "chatDirectory"));
+        collect("interactions", (realKeys.interactions.get(String(chatId)) || []).filter((entry) => scopedChatId(interactionSource(entry.record, entry.recordKey).botId, String(chatId)) === chatKey), (record, recordKey) => interactionSource(record, recordKey));
+        collect("subscriptions", (realKeys.subscriptions.get(String(chatId)) || []).filter((entry) => chatSubscriptions.some((sub) => sub.key === entry.recordKey)), (record, recordKey) => sourceWithChatInheritance(record, "subscriptions", recordKey));
+
+        // Bản ghi nào còn cần xác minh. Dòng chỉ được coi là "đã xác minh đầy đủ"
+        // khi MỌI bản ghi đóng góp đều đã xác minh.
+        const pendingRecords = sourceRecords.filter((item) => !item.verified);
+
+        // Tài khoản của DÒNG.
+        //
+        // Ưu tiên nguồn của bản ghi chatDirectory. Nếu bản ghi đó không xác định được
+        // tài khoản, dòng có thể học từ các bản ghi đóng góp ĐÃ XÁC MINH — nhưng chỉ
+        // khi chúng cùng chỉ về MỘT tài khoản. Nhiều tài khoản khác nhau thì không kết
+        // luận, vì đó là dấu hiệu dữ liệu không nhất quán.
+        const verifiedOwners = [...new Set(
+            sourceRecords.filter((item) => item.verified && item.botId).map((item) => item.botId)
+        )];
+        const resolvedSource = chatSource.botId
+            ? chatSource
+            : (verifiedOwners.length === 1
+                ? {
+                    botId: verifiedOwners[0],
+                    confidence: SOURCE_CONFIDENCE.MANUAL,
+                    label: "Đã xác minh (theo bản ghi đã xác minh cùng dòng)",
+                    canSend: true,
+                    declaredBotId: null,
+                    keyBotId: verifiedOwners[0],
+                    reason: null
+                }
+                : chatSource);
+
+        // Mở khoá Quản lý chỉ khi MỌI bản ghi đóng góp đều đã xác minh.
+        //
+        // Không đủ nếu chỉ một bản ghi được xác minh: phần còn lại vẫn có thể trỏ tới
+        // tài khoản khác, và thao tác gửi sẽ đi sai người.
+        const allRecordsVerified = sourceRecords.length > 0 && pendingRecords.length === 0;
+        const rowCanSend = Boolean(resolvedSource.botId) && allRecordsVerified;
+
+        // Khóa để giao diện gọi API xác minh.
+        //
+        // PHẢI là khóa THẬT trong store. Với dòng không có bản ghi chatDirectory thật
+        // (dòng tổng hợp), khóa tổng hợp "__unverified__::<chatId>" không tồn tại trong
+        // Firestore nên API sẽ trả 404 — đúng lỗi đang sửa. Khi đó trỏ tới bản ghi thật
+        // đầu tiên còn cần xác minh.
+        const realChatEntry = (realKeys.chatDirectory.get(String(chatId)) || [])
+            .find((entry) => !parseScopedKey(entry.recordKey).scoped);
+        const primaryTarget = realChatEntry
+            ? { storeId: "chatDirectory", recordKey: realChatEntry.recordKey }
+            : (pendingRecords[0] || sourceRecords[0] || null);
         const memberIds = new Set([
             ...Object.keys(interaction?.members || {}),
             ...chatSubscriptions.map((item) => item.userId).filter(Boolean),
@@ -234,7 +390,15 @@ function buildAdminData() {
             studentIds: [...new Set(chatSubscriptions.map((item) => item.studentId).filter(Boolean))],
             lastInboundInteractionAt: chat.lastInboundInteractionAt || interaction?.lastInteractionAt || null,
             firstInteractionAt: chat.firstInteractionAt || interaction?.firstInteractionAt || null,
-            ...sourceFields(chatSource, "chatDirectory", chatKey)
+            ...sourceFields(resolvedSource, primaryTarget ? primaryTarget.storeId : null, primaryTarget ? primaryTarget.recordKey : null),
+            // Quyền thao tác do MỌI bản ghi đóng góp quyết định, không chỉ một bản ghi.
+            canSend: rowCanSend,
+            fullyVerified: allRecordsVerified,
+            // Danh sách bản ghi thật cần xác minh, kèm trạng thái từng bản ghi.
+            sourceRecords,
+            pendingRecordCount: pendingRecords.length,
+            // Dòng chỉ "sạch" khi mọi bản ghi đóng góp đều đã xác minh.
+            fullyVerified: sourceRecords.length > 0 && pendingRecords.length === 0
         };
 
         for (const userId of memberIds) {

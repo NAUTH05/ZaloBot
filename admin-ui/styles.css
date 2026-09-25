@@ -1119,3 +1119,11 @@ button[disabled] {
     opacity: 0.55;
     cursor: not-allowed;
 }
+
+/* Ghi chú "cần xác minh tài khoản" — nói về BẢN GHI, không phải người dùng/bot. */
+.source-pending {
+    color: var(--warning, #b8860b);
+    font-size: var(--fs-xs, 0.75rem);
+    display: block;
+    margin-top: var(--s-1);
+}

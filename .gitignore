@@ -44,3 +44,7 @@ zca-session/
 session.json
 session.lock
 *.session.json
+
+# Bộ nhớ cục bộ của trợ lý AI (nhật ký công việc, ghi chú dự án).
+# Không phải mã nguồn: không commit.
+.workbuddy-ai/

@@ -80,6 +80,14 @@ function statusTone(status) { return status === "active" ? "success" : status ==
 // ---------------------------------------------------------------------------
 const UNVERIFIED_BOT_ID = "__unverified__";
 
+// Nhãn dùng chung cho bản ghi thiếu thông tin tài khoản.
+//
+// Cố ý KHÔNG dùng "chưa xác minh" trơ: dễ bị đọc thành "người dùng chưa xác minh"
+// hoặc "bot chưa hoạt động". Vấn đề chỉ nằm ở bản ghi lịch sử thiếu tài khoản.
+const UNVERIFIED_SOURCE_LABEL = "Chưa rõ tài khoản";
+const UNVERIFIED_SOURCE_HINT = "Tài khoản gửi/nhận của bản ghi lịch sử này chưa được xác nhận. " +
+  "Người dùng và các bot vẫn hoạt động bình thường.";
+
 function isBotIdLike(value) {
   // Chấp nhận cả botN lẫn zca:<uid>. Không tự bịa danh tính.
   return /^bot\d+$/.test(value) || /^zca:[a-z0-9_-]+$/.test(value);
@@ -108,7 +116,7 @@ function recordCanSend(record) {
 // Nhãn nguồn gốc: tên bot thật nếu biết, ngược lại nói rõ là chưa xác minh.
 function recordSourceLabel(record) {
   const botId = recordBotId(record);
-  if (!botId) return record?.sourceLabel || "Chưa xác minh";
+  if (!botId) return UNVERIFIED_SOURCE_LABEL;
   return botLabel(botId);
 }
 
@@ -127,7 +135,7 @@ function filterByBot(list) {
 // Nhãn bot: ưu tiên tên thật lấy từ Zalo, rồi tới nhãn BOT_N_NAME, cuối cùng là
 // botId. Server trả sẵn `label` nên giao diện không phải tự ghép.
 function botLabel(botId) {
-  if (!botId) return "Chưa xác minh";
+  if (!botId) return UNVERIFIED_SOURCE_LABEL;
   const known = bots.find((bot) => bot.botId === botId);
   // Danh tính lạ (ví dụ ZCA chưa kịp nạp vào danh sách bot): hiện thẳng botId,
   // KHÔNG thay bằng bot1.
@@ -139,13 +147,21 @@ function botLabel(botId) {
 // Ô "Nguồn" cho bảng Users và Chat directory. Luôn hiển thị, kể cả khi đang lọc
 // một nguồn — cột phải ổn định để bảng không nhảy cột khi đổi bộ lọc.
 //
-// Bản ghi chưa xác minh hiển thị rõ là "Chưa xác minh" kèm lý do, KHÔNG hiển thị
-// như một bot cụ thể — đó chính là lỗi trước đây.
+// Bản ghi thiếu tài khoản hiển thị rõ là "Chưa rõ tài khoản" kèm giải thích, KHÔNG
+// hiển thị như một bot cụ thể — đó chính là lỗi trước đây.
 function botCell(record) {
   const botId = recordBotId(record);
   if (!botId) {
-    const reason = record?.sourceReason || "Không đủ căn cứ xác định nguồn.";
-    return `<td><span class="bot-chip bot-chip-unverified" title="${escapeHtml(reason)}">Chưa xác minh</span></td>`;
+    // Nói rõ đây là vấn đề TÀI KHOẢN của bản ghi lịch sử, không phải người dùng hay
+    // bot đang tắt. Tránh chữ "chưa xác minh" trơ khiến người đọc hiểu nhầm là tài
+    // khoản hoặc người dùng không hoạt động.
+    const tip = "Tài khoản gửi/nhận của bản ghi lịch sử này chưa được xác nhận. " +
+      "Người dùng và các bot vẫn hoạt động bình thường — chỉ thiếu thông tin tài khoản trên bản ghi cũ. " +
+      "Dùng nút \"Xác minh nguồn\" để xem bằng chứng và chọn tài khoản.";
+    const pending = pendingRecordCount(record);
+    const count = pending > 1 ? ` (${pending})` : "";
+    return `<td><span class="bot-chip bot-chip-unverified" title="${escapeHtml(tip)}">Chưa rõ tài khoản${escapeHtml(count)}</span>` +
+      `<small class="block source-pending">Cần xác minh tài khoản</small></td>`;
   }
   const kind = botId.startsWith("zca:") ? "Tài khoản Zalo cá nhân" : "Bot chính thức";
   return `<td><span class="bot-chip" title="${escapeHtml(`${botId} · ${kind}`)}">${escapeHtml(botLabel(botId))}</span><small class="block">${escapeHtml(kind)}</small></td>`;
@@ -155,7 +171,7 @@ function botCell(record) {
 function botBadge(record) {
   if (activeBotFilter() !== "all") return "";
   const botId = recordBotId(record);
-  if (!botId) return badge("Chưa xác minh", "warning");
+  if (!botId) return badge(UNVERIFIED_SOURCE_LABEL, "warning");
   return badge(botLabel(botId), botId.startsWith("zca:") ? "info" : "neutral");
 }
 
@@ -166,7 +182,7 @@ function botBadge(record) {
 // theo một nguồn đoán mò có thể liên hệ nhầm người hoặc nhầm tài khoản.
 function actionButton(attribute, value, botId, record, label, className = "table-action") {
   if (!botId) {
-    const reason = record?.sourceReason || "Chưa xác định được nguồn của bản ghi này.";
+    const reason = record?.sourceReason || "Chưa xác định được tài khoản cho bản ghi lịch sử này.";
     return `<button class="${escapeHtml(className)}" disabled title="${escapeHtml(`Không thể thao tác: ${reason}`)}">${escapeHtml(label)}</button>` +
       verifySourceButton(record);
   }
@@ -174,16 +190,36 @@ function actionButton(attribute, value, botId, record, label, className = "table
     revokeSourceButton(record);
 }
 
-// Nút mở hộp thoại xác minh nguồn cho bản ghi chưa xác minh.
+// Số bản ghi thật còn cần xác minh cho một dòng.
+function pendingRecordCount(record) {
+  if (Array.isArray(record?.sourceRecords)) return record.sourceRecords.filter((item) => !item.verified).length;
+  return record?.sourceRecordKey ? 1 : 0;
+}
+
+// Nút mở hộp thoại xác minh nguồn.
+//
+// Dòng có thể được dựng từ NHIỀU bản ghi (chat, tương tác, đăng ký). Nếu còn bản ghi
+// chưa xác minh thì vẫn phải cho xác minh, và nói rõ còn bao nhiêu.
 function verifySourceButton(record) {
-  return `<button class="table-action" data-verify-source="1" data-source-store="${escapeHtml(record?.sourceStoreId || "")}" data-source-key="${escapeHtml(record?.sourceRecordKey || "")}">Xác minh nguồn</button>` +
-    `<small class="block error-cell">Cần xác minh nguồn</small>`;
+  const pending = pendingRecordCount(record);
+  const store = record?.sourceStoreId || "";
+  const key = record?.sourceRecordKey || "";
+  if (!store || !key) {
+    // Không có bản ghi thật nào để xác minh — không được gửi khóa tổng hợp lên API.
+    return `<button class="table-action" disabled title="Không xác định được bản ghi lưu trữ nào cho dòng này.">Xác minh nguồn</button>`;
+  }
+  const suffix = pending > 1 ? ` (${pending} bản ghi)` : "";
+  return `<button class="table-action" data-verify-source="1" data-source-store="${escapeHtml(store)}" data-source-key="${escapeHtml(key)}">Xác minh nguồn${escapeHtml(suffix)}</button>` +
+    `<small class="block source-pending">Cần xác minh tài khoản</small>`;
 }
 
 // Nút hoàn tác cho bản ghi đã được quản trị viên xác minh (có thể sai).
 function revokeSourceButton(record) {
   if (record?.sourceConfidence !== "manual") return "";
-  return `<button class="table-action" data-revoke-source="1" data-source-store="${escapeHtml(record?.sourceStoreId || "")}" data-source-key="${escapeHtml(record?.sourceRecordKey || "")}">Hoàn tác xác minh</button>`;
+  const store = record?.sourceStoreId || "";
+  const key = record?.sourceRecordKey || "";
+  if (!store || !key) return "";
+  return `<button class="table-action" data-revoke-source="1" data-source-store="${escapeHtml(store)}" data-source-key="${escapeHtml(key)}">Hoàn tác xác minh</button>`;
 }
 
 function botOptionsHtml(includeAll) {
@@ -196,10 +232,10 @@ function populateBotControls() {
   const filter = $("#botFilter");
   if (filter) {
     const previous = filter.value || "all";
-    // "Chưa xác minh" là một mục lọc RIÊNG, không gộp vào bot1: những bản ghi này
+    // "Chưa rõ tài khoản" là một mục lọc RIÊNG, không gộp vào bot1: những bản ghi này
     // không chứng minh được là của bot nào.
     filter.innerHTML = botOptionsHtml(true) +
-      `<option value="${UNVERIFIED_BOT_ID}">Chưa xác minh</option>`;
+      `<option value="${UNVERIFIED_BOT_ID}">Chưa rõ tài khoản</option>`;
     filter.value = bots.some((bot) => bot.botId === previous) || previous === "all" || previous === UNVERIFIED_BOT_ID ? previous : "all";
   }
   const selector = $("#commandBot");
@@ -1387,6 +1423,24 @@ function evidenceRow(item) {
     `<p class="muted">${escapeHtml(item.detail)}</p></article>`;
 }
 
+// Các bản ghi khác cùng đóng góp vào dòng này, kèm trạng thái xác minh riêng.
+//
+// Mục đích: nói rõ xác minh MỘT bản ghi không làm cả dòng trở nên đã xác minh.
+function siblingSection(siblings) {
+  if (!Array.isArray(siblings) || siblings.length === 0) return "";
+  const rows = siblings.map((item) => {
+    const state = item.verified
+      ? badge(`Đã xác định: ${item.botId || "?"}`, "success")
+      : badge("Còn cần xác minh", "warning");
+    return `<li><code>${escapeHtml(item.storeId)}</code> · <code>${escapeHtml(item.recordKey)}</code> — ${state}</li>`;
+  }).join("");
+  const pending = siblings.filter((item) => !item.verified).length;
+  return `<h3>Bản ghi khác cùng dòng (${siblings.length})</h3>` +
+    `<p class="muted">Xác minh bản ghi này KHÔNG tự động xác minh các bản ghi dưới đây.` +
+    (pending ? ` Còn ${pending} bản ghi cần xác minh.` : " Tất cả đã xác minh.") + `</p>` +
+    `<ul>${rows}</ul>`;
+}
+
 async function openVerifySource(storeId, recordKey) {
   if (!storeId || !recordKey) {
     setDataState("error", "Thiếu thông tin bản ghi để xác minh.");
@@ -1425,6 +1479,7 @@ async function openVerifySource(storeId, recordKey) {
     <div class="stack">${(data.evidence || []).map(evidenceRow).join("")}</div>
     <h3>Nguồn mà bằng chứng chỉ ra</h3>
     <ul>${candidates}</ul>
+    ${siblingSection(data.siblings)}
     <form id="verifySourceForm">
       <label>Gán nguồn cho bản ghi này
         <select name="botId" required>

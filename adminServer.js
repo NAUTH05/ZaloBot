@@ -21,6 +21,7 @@ const {
     verifySource
 } = require("./sourceVerifications");
 const { buildEvidence } = require("./sourceEvidence");
+const { isVerifiedConfidence, resolveRecordSource } = require("./sourceAttribution");
 const {
     getCounts: getFeedbackCounts,
     listTickets: listFeedbackTickets,
@@ -547,7 +548,31 @@ function buildSourceEvidence(storeId, recordKey) {
 
     const target = allRecords.find((item) => item.storeId === storeId && item.key === recordKey);
     if (!target) return null;
-    return buildEvidence(target, { allRecords });
+
+    // Các bản ghi KHÁC cùng chatId/userId đóng góp vào cùng dòng dashboard.
+    //
+    // Một dòng có thể được dựng từ nhiều bản ghi (chat, tương tác, đăng ký). Quản trị
+    // viên cần thấy TỪNG bản ghi và trạng thái xác minh riêng của nó — xác minh một
+    // bản ghi không có nghĩa cả dòng đã xong.
+    const siblings = allRecords
+        .filter((item) => item !== target
+            && ((target.chatId && item.chatId === target.chatId)
+                || (target.userId && item.userId === target.userId)))
+        .map((item) => {
+            const verification = getVerification(item.storeId, item.key);
+            const source = resolveRecordSource(item.record, item.key, { verification });
+            return {
+                storeId: item.storeId,
+                recordKey: item.key,
+                botId: source.botId,
+                confidence: source.confidence,
+                verified: isVerifiedConfidence(source.confidence),
+                isTarget: false
+            };
+        });
+
+    const evidence = buildEvidence(target, { allRecords });
+    return { ...evidence, siblings };
 }
 
 function requireAdmin(request, response) {
