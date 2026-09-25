@@ -21,7 +21,8 @@
         "recover:interactions": "node scripts/recoverInteractions.js",
         "recover:interactions-apply": "node scripts/recoverInteractions.js --apply",
         "announce:dry-run": "node scripts/sendRecoveredAnnouncement.js",
-        "announce:report": "node scripts/sendRecoveredAnnouncement.js --report"
+        "announce:report": "node scripts/sendRecoveredAnnouncement.js --report",
+        "announce:help": "node scripts/announcementHelp.js"
     },
     "dependencies": {
         "dotenv": "^17.2.1",

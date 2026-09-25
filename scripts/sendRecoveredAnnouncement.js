@@ -13,20 +13,24 @@
 // Vì vậy script này đọc file nguồn như DỮ LIỆU ĐẦU VÀO thuần tuý. Nó KHÔNG BAO
 // GIỜ ghi vào interactions, chatDirectory, subscriptions hay bất kỳ store nào.
 //
+// CÁCH CHẠY
+//
+// Lệnh shell chỉ dùng để XEM TRƯỚC và XEM BÁO CÁO — chúng không cần nhà cung cấp:
+//
 //   # 1. Xem trước (không gửi, không ghi gì)
 //   node scripts/sendRecoveredAnnouncement.js \
 //       --campaign reset-2026-09 --message-file announce.txt
 //
-//   # 2. Gửi thật
-//   node scripts/sendRecoveredAnnouncement.js \
-//       --campaign reset-2026-09 --message-file announce.txt --send
-//
-//   # 3. Chạy tiếp sau khi bị dừng giữa chừng (tự bỏ qua người đã gửi thành công)
-//   node scripts/sendRecoveredAnnouncement.js \
-//       --campaign reset-2026-09 --message-file announce.txt --send --resume
-//
-//   # 4. Xem báo cáo tiến độ của một chiến dịch
+//   # 2. Xem báo cáo tiến độ của một chiến dịch
 //   node scripts/sendRecoveredAnnouncement.js --campaign reset-2026-09 --report
+//
+// GỬI THẬT phải chạy BÊN TRONG tiến trình chính (PM2), vì chỉ tiến trình đó mới giữ
+// nhà cung cấp — và phiên ZCA. Một tiến trình shell riêng không bao giờ chạm tới
+// registry đang chạy, nên --send từ shell sẽ bị TỪ CHỐI (đúng như mong đợi: mở phiên
+// Zalo thứ hai sẽ tranh khoá phiên và làm hỏng phiên đang đăng nhập).
+//
+// Cách kích hoạt đúng: gọi API quản trị đã xác thực admin (được main.js nối vào
+// runRecoveredAnnouncement) — xem ANNOUNCEMENT.md để có lệnh curl đầy đủ.
 //
 // ---------------------------------------------------------------------------
 // QUY TẮC AN TOÀN (đọc trước khi sửa)
@@ -41,19 +45,25 @@
 //    — cùng Chat ID ở hai bot là hai người khác nhau. Một khi đã gửi thành công
 //    thì checkpoint ghi lại và không bao giờ gửi lại, kể cả khi chạy lại.
 //
-// 4. LỖI VĨNH VIỄN KHÔNG ĐƯỢC THỬ LẠI Ở BOT KHÁC. 410/422 = bỏ qua vĩnh viễn.
+// 4. LỖI VĨNH VIỄN KHÔNG ĐƯỢC THỬ LẠI Ở BOT KHÁC. 410/422 = bỏ qua vĩnh viễn, kể
+//    cả ở lần --resume sau (ghi `permanent: true` vào checkpoint).
 //
 // 5. TIMEOUT ĐƯỢC XỬ LÝ THẬN TRỌNG. Một lần gửi bị timeout KHÔNG được coi là đã
 //    gửi (sẽ gửi lại ở lần --resume), nhưng cũng KHÔNG tự động thử lại ngay trong
 //    cùng một lượt — tránh gửi trùng cho người đã nhận.
 //
-// 6. ZCA TRONG CÙNG TIẾN TRÌNH. Tài khoản Zalo cá nhân giữ khoá phiên độc quyền.
-//    Không được mở tiến trình thứ hai tranh khoá đó. Script này chỉ gửi phần ZCA
-//    khi tiến trình chính đang chạy và phiên đã đăng nhập — nếu không, báo cáo
-//    phần đó là "hoãn" (deferred), KHÔNG phải "đã gửi".
+// 6. MÃ CHIẾN DỊCH GẮN VỚI NỘI DUNG. Checkpoint lưu vân tay (nguồn + nội dung tin).
+//    Đổi nội dung mà giữ nguyên mã chiến dịch ⇒ TỪ CHỐI chạy, vì người đã nhận bản
+//    cũ sẽ bị bỏ qua âm thầm và không bao giờ nhận bản mới. Phải dùng mã mới.
 //
-// 7. KHÔNG RÒ RỈ DANH TÍNH. Log chỉ in số đếm, tên bot và vân tay rút gọn.
+// 7. ZCA TRONG CÙNG TIẾN TRÌNH. Tài khoản Zalo cá nhân giữ khoá phiên độc quyền.
+//    Không được mở tiến trình thứ hai tranh khoá đó. Phần ZCA chỉ gửi được khi hàm
+//    này chạy bên trong tiến trình chính đang giữ phiên — nếu không, báo cáo phần đó
+//    là "hoãn" (deferred), KHÔNG phải "đã gửi".
+//
+// 8. KHÔNG RÒ RỈ DANH TÍNH. Log chỉ in số đếm, tên bot và vân tay rút gọn.
 // ============================================================================
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 
@@ -92,6 +102,64 @@ function fingerprint(value) {
         hash = (hash * 31 + raw.charCodeAt(index)) | 0;
     }
     return `#${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
+
+// Vân tay NỘI DUNG của một chiến dịch: hàm băm (nguồn + nội dung tin).
+//
+// Vì sao cần: mã chiến dịch do người vận hành đặt tay. Nếu đổi nội dung thông báo
+// mà vẫn dùng lại cùng mã, checkpoint cũ sẽ khiến script bỏ qua những người đã nhận
+// bản CŨ — họ không bao giờ nhận bản MỚI, và cũng không có cảnh báo nào. Gắn vân tay
+// vào checkpoint để phát hiện và TỪ CHỐI thay vì âm thầm tái sử dụng.
+//
+// Hàm băm đầy đủ (SHA-256) chứ không rút gọn: đây là khoá an toàn, không phải nhãn
+// hiển thị. Danh sách người nhận được sắp xếp trước khi băm nên thứ tự trong file
+// nguồn không làm đổi vân tay.
+function campaignContentHash(recipients, message) {
+    const keys = recipients.map((item) => item.key).sort();
+    const hasher = crypto.createHash("sha256");
+    hasher.update("v1\n");
+    hasher.update(String(message == null ? "" : message));
+    hasher.update("\n");
+    for (const key of keys) hasher.update(`${key}\n`);
+    return hasher.digest("hex");
+}
+
+// Chuẩn hoá nội dung tin để băm: bỏ khoảng trắng ở hai đầu, giữ nguyên phần thân.
+function normalizeCampaignMessage(message) {
+    return String(message == null ? "" : message).trim();
+}
+
+// Soạn kế hoạch gửi: bỏ những người đã gửi thành công VÀ những người đã thất bại
+// VĨNH VIỄN ở lần chạy trước.
+//
+// Lỗi vĩnh viễn (410 chat không tồn tại, 422 không có quyền) không bao giờ tự khỏi.
+// Thử lại chỉ tốn thời gian và có thể khiến nhà cung cấp đánh dấu spam. Chúng bị bỏ
+// qua vĩnh viễn, KHÔNG bao giờ được chuyển sang bot khác để thử lại.
+//
+// Lỗi TẠM THỜI (timeout, 429, 5xx) thì ngược lại: giữ nguyên trong danh sách để lần
+// --resume sau thử lại — nhưng không thử lại trong cùng một lượt.
+function planSend(recipients, checkpoint) {
+    const done = new Set(Object.keys(checkpoint?.sent || {}));
+    const permanentlyFailed = new Set(
+        Object.entries(checkpoint?.failed || {})
+            .filter(([, detail]) => detail && detail.permanent === true)
+            .map(([key]) => key)
+    );
+    const toSend = [];
+    let alreadySent = 0;
+    let skippedPermanent = 0;
+    for (const recipient of recipients) {
+        if (done.has(recipient.key)) {
+            alreadySent += 1;
+            continue;
+        }
+        if (permanentlyFailed.has(recipient.key)) {
+            skippedPermanent += 1;
+            continue;
+        }
+        toSend.push(recipient);
+    }
+    return { toSend, alreadySent, skippedPermanent };
 }
 
 // Chuẩn hoá nguồn (object khóa→bản ghi, hoặc mảng bản ghi) thành mảng phẳng.
@@ -159,19 +227,14 @@ function classifyRecipients(raw) {
     return { recipients, excluded, perBot, duplicates };
 }
 
-// Soạn kế hoạch gửi: bỏ những người đã gửi thành công trong checkpoint cũ.
-function planSend(recipients, checkpoint) {
-    const done = new Set(Object.keys(checkpoint?.sent || {}));
-    const toSend = [];
-    let alreadySent = 0;
-    for (const recipient of recipients) {
-        if (done.has(recipient.key)) {
-            alreadySent += 1;
-            continue;
-        }
-        toSend.push(recipient);
-    }
-    return { toSend, alreadySent };
+// `resolveBotConfigs()` trả về { bots, errors, warnings } chứ KHÔNG phải một mảng
+// trần. Nhận nhầm kiểu sẽ khiến `.find` ném TypeError ngay khi gửi tin thật đầu
+// tiên — nên chuẩn hoá ở đây, và chấp nhận cả mảng trần để hàm thuần vẫn kiểm thử
+// được mà không cần dựng cấu hình môi trường.
+function normalizeOfficialConfigs(officialConfigs) {
+    if (Array.isArray(officialConfigs)) return officialConfigs;
+    if (officialConfigs && Array.isArray(officialConfigs.bots)) return officialConfigs.bots;
+    return [];
 }
 
 // Cổng kiểm tra trạng thái nhà cung cấp. Trả về { available, reason }.
@@ -179,18 +242,22 @@ function planSend(recipients, checkpoint) {
 // Nhà cung cấp chính thức cần token; ZCA cần phiên đã đăng nhập trong CÙNG tiến
 // trình. Không có thì đích thuộc nhà cung cấp đó bị HOÃN, không phải thất bại.
 function checkProviderAvailability(botId, runtimeRegistry, officialConfigs) {
-    if (isZcaId(botId)) {
-        const runtime = runtimeRegistry?.get?.(botId);
-        if (!runtime) {
-            return { available: false, reason: "zca_not_running_in_process" };
-        }
-        if (typeof runtime.health === "function") {
+    // Nhà cung cấp đang chạy trong tiến trình là bằng chứng MẠNH NHẤT: có runtime
+    // nghĩa là bot đã khởi động và giữ token/phiên. Kiểm tra trước để không phụ
+    // thuộc vào việc cấu hình môi trường có đọc được hay không.
+    const runtime = runtimeRegistry?.get?.(botId);
+    if (runtime) {
+        if (isZcaId(botId) && typeof runtime.health === "function") {
             const health = runtime.health();
             if (health && health.ready === false) return { available: false, reason: "zca_not_ready" };
         }
         return { available: true };
     }
-    const config = (officialConfigs || []).find((item) => item.botId === botId);
+    if (isZcaId(botId)) {
+        // Tài khoản cá nhân không có "cấu hình token" để dựa vào — chỉ có phiên.
+        return { available: false, reason: "zca_not_running_in_process" };
+    }
+    const config = normalizeOfficialConfigs(officialConfigs).find((item) => item.botId === botId);
     if (!config) return { available: false, reason: "bot_not_configured" };
     return { available: true };
 }
@@ -206,11 +273,14 @@ function checkpointPath(campaignId) {
 
 function readCheckpoint(campaignId) {
     const file = checkpointPath(campaignId);
-    if (!fs.existsSync(file)) return { campaignId, sent: {}, failed: {}, deferred: {}, updatedAt: null };
+    if (!fs.existsSync(file)) {
+        return { campaignId, contentHash: null, sent: {}, failed: {}, deferred: {}, updatedAt: null };
+    }
     try {
         const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
         return {
             campaignId,
+            contentHash: typeof parsed.contentHash === "string" ? parsed.contentHash : null,
             sent: parsed.sent && typeof parsed.sent === "object" ? parsed.sent : {},
             failed: parsed.failed && typeof parsed.failed === "object" ? parsed.failed : {},
             deferred: parsed.deferred && typeof parsed.deferred === "object" ? parsed.deferred : {},
@@ -219,6 +289,25 @@ function readCheckpoint(campaignId) {
     } catch (error) {
         throw new Error(`Checkpoint hỏng, không dám ghi đè: ${file} (${error.message})`);
     }
+}
+
+// Đối chiếu checkpoint đang có với nội dung của lượt chạy này.
+//
+// Trả về { ok, reason } — `ok: false` nghĩa là KHÔNG được gửi: mã chiến dịch đã gắn
+// với một nội dung/nguồn khác, nên tái sử dụng sẽ khiến người đã nhận bản cũ bị bỏ
+// qua một cách âm thầm. Người vận hành phải đổi mã chiến dịch (hoặc xoá checkpoint
+// nếu thực sự muốn gửi lại).
+function verifyCheckpointContent(checkpoint, contentHash) {
+    if (!checkpoint || !checkpoint.contentHash) return { ok: true, reason: null };
+    if (checkpoint.contentHash === contentHash) return { ok: true, reason: null };
+    return {
+        ok: false,
+        reason:
+            `Mã chiến dịch "${checkpoint.campaignId}" đã được dùng cho một nội dung/nguồn KHÁC ` +
+            `(vân tay ${checkpoint.contentHash.slice(0, 12)}…, nay là ${contentHash.slice(0, 12)}…). ` +
+            "Dùng mã chiến dịch mới để không bỏ sót người đã nhận bản cũ, " +
+            "hoặc xoá checkpoint nếu thực sự muốn gửi lại."
+    };
 }
 
 // Ghi checkpoint NGUYÊN TỬ: ghi ra file tạm rồi đổi tên. Một lần ghi đứt giữa
@@ -322,9 +411,11 @@ function printReport(campaignId) {
     const checkpoint = readCheckpoint(campaignId);
     const sent = Object.keys(checkpoint.sent).length;
     const failed = Object.keys(checkpoint.failed).length;
+    const permanent = Object.values(checkpoint.failed).filter((item) => item?.permanent === true).length;
     const deferred = Object.keys(checkpoint.deferred).length;
     console.log(`[Announce] Chiến dịch: ${campaignId}`);
-    console.log(`[Announce]   đã gửi: ${sent} · thất bại: ${failed} · hoãn: ${deferred}`);
+    console.log(`[Announce]   đã gửi: ${sent} · thất bại: ${failed} (vĩnh viễn: ${permanent}) · hoãn: ${deferred}`);
+    console.log(`[Announce]   vân tay nội dung: ${checkpoint.contentHash ? checkpoint.contentHash.slice(0, 12) + "…" : "(chưa có)"}`);
     console.log(`[Announce]   cập nhật lần cuối: ${checkpoint.updatedAt || "(chưa chạy)"}`);
     const byBot = {};
     for (const key of Object.keys(checkpoint.sent)) {
@@ -332,6 +423,18 @@ function printReport(campaignId) {
         byBot[bot] = (byBot[bot] || 0) + 1;
     }
     console.log(`[Announce]   đã gửi theo bot: ${formatCounts(byBot)}`);
+    return {
+        campaignId,
+        sent,
+        failed,
+        permanent,
+        deferred,
+        contentHash: checkpoint.contentHash,
+        updatedAt: checkpoint.updatedAt,
+        perBot: byBot,
+        failedDetail: checkpoint.failed,
+        deferredDetail: checkpoint.deferred
+    };
 }
 
 async function main(argv = process.argv.slice(2), options = {}) {
@@ -345,21 +448,33 @@ async function main(argv = process.argv.slice(2), options = {}) {
         return { reported: true };
     }
 
-    if (!args.messageFile) {
+    if (!args.messageFile && !options.messageOverride) {
         throw new Error("Bắt buộc có --message-file <đường dẫn> (file chứa nội dung thông báo).");
     }
-    const messagePath = path.resolve(args.messageFile);
-    if (!fs.existsSync(messagePath)) throw new Error(`Không tìm thấy file nội dung: ${messagePath}`);
-    const message = fs.readFileSync(messagePath, "utf8").trim();
-    if (!message) throw new Error(`File nội dung rỗng: ${messagePath}`);
+    // Nội dung có thể đến từ file (đường CLI) hoặc từ tham số (đường API quản trị).
+    // Cả hai đều cho ra cùng một chuỗi đã trim, nên vân tay nội dung luôn so sánh được.
+    let message;
+    let messageOrigin;
+    if (options.messageOverride) {
+        message = String(options.messageOverride).trim();
+        messageOrigin = options.messageSource || "(tham số)";
+    } else {
+        const messagePath = path.resolve(args.messageFile);
+        if (!fs.existsSync(messagePath)) throw new Error(`Không tìm thấy file nội dung: ${messagePath}`);
+        message = fs.readFileSync(messagePath, "utf8").trim();
+        messageOrigin = messagePath;
+    }
+    if (!message) throw new Error(`Nội dung thông báo rỗng (nguồn: ${messageOrigin}).`);
 
     const raw = readSourceFile(args.source);
     const { recipients, excluded, perBot, duplicates } = classifyRecipients(raw);
+    const contentHash = campaignContentHash(recipients, normalizeCampaignMessage(message));
 
     console.log(`[Announce] Chiến dịch: ${args.campaign}`);
     console.log(`[Announce] Nguồn: ${path.resolve(args.source)}`);
     console.log(`[Announce] Người nhận hợp lệ: ${recipients.length}. Theo bot: ${formatCounts(perBot)}`);
     console.log(`[Announce] Trùng lặp trong nguồn (đã gộp): ${duplicates}`);
+    console.log(`[Announce] Vân tay nội dung: ${contentHash.slice(0, 12)}…`);
     reportExcluded(excluded);
 
     if (recipients.length === 0) {
@@ -367,43 +482,65 @@ async function main(argv = process.argv.slice(2), options = {}) {
         return { sent: 0, reason: "no_recipients" };
     }
 
-    // Nguồn có ZCA: nếu không chạy trong tiến trình chính, báo là HOÃN chứ không lỗi.
+    // Nguồn có ZCA: chỉ gửi được khi hàm này chạy BÊN TRONG tiến trình chính đang
+    // giữ phiên. Chạy từ shell riêng thì không có registry, nên phần ZCA sẽ bị hoãn
+    // — xem ANNOUNCEMENT.md để biết cách kích hoạt qua API quản trị.
     const zcaRecipients = recipients.filter((item) => isZcaId(item.botId));
     if (zcaRecipients.length > 0) {
         console.log(
             `[Announce] Lưu ý: ${zcaRecipients.length} đích thuộc tài khoản ZCA. ` +
-            "Script độc lập KHÔNG giữ phiên ZCA — hãy dùng --in-process khi bot chính đang chạy, " +
+            "Phiên ZCA chỉ tồn tại trong tiến trình chính, nên muốn gửi được phần này " +
+            "phải chạy TRONG tiến trình đó (xem ANNOUNCEMENT.md); " +
             "nếu không chúng sẽ được báo là 'hoãn'."
         );
     }
 
     const checkpoint = readCheckpoint(args.campaign);
-    const { toSend, alreadySent } = planSend(recipients, checkpoint);
+    const contentCheck = verifyCheckpointContent(checkpoint, contentHash);
+    if (!contentCheck.ok) throw new Error(contentCheck.reason);
+
+    const { toSend, alreadySent, skippedPermanent } = planSend(recipients, checkpoint);
     console.log(`[Announce] Checkpoint đã có: ${alreadySent} người đã gửi (sẽ bỏ qua).`);
+    if (skippedPermanent > 0) {
+        console.log(`[Announce] Bỏ qua vĩnh viễn (410/422 lần trước): ${skippedPermanent}.`);
+    }
     console.log(`[Announce] Còn phải gửi: ${toSend.length}.`);
 
     if (!args.send) {
         console.log("");
         console.log("[Announce] DRY-RUN: chưa gửi gì, chưa ghi gì.");
-        console.log("[Announce] Thêm --send để gửi thật.");
-        return { dryRun: true, planned: toSend.length, alreadySent, perBot };
+        console.log("[Announce] Thêm --send để gửi thật (phải chạy trong tiến trình chính).");
+        return {
+            dryRun: true,
+            planned: toSend.length,
+            alreadySent,
+            skippedPermanent,
+            perBot,
+            contentHash,
+            recipients: recipients.length,
+            excluded: excluded.length
+        };
     }
 
     // Gửi thật cần nhà cung cấp đang chạy. Nhà cung cấp được lấy qua registry.
     //
-    // `main.js` đăng ký registry của nó vào globalThis khi khởi động để đường CLI
-    // này có thể gửi TRONG CÙNG tiến trình — điều kiện bắt buộc để dùng chung phiên
-    // ZCA. Không có registry ⇒ từ chối chạy, thay vì mở tiến trình thứ hai tranh khoá.
+    // Chỉ tiến trình chính mới có registry — và do đó mới có phiên ZCA. Một tiến
+    // trình shell riêng KHÔNG BAO GIỜ tự mở phiên Zalo (sẽ tranh khoá phiên ZCA và
+    // làm hỏng phiên đang đăng nhập), nên ở đây TỪ CHỐI thay vì thử mở phiên mới.
     const runtimeRegistry = resolveRuntimeRegistry(options);
     if (!runtimeRegistry) {
         throw new Error(
             "Không tìm thấy registry nhà cung cấp đang chạy. " +
-            "Hãy gọi hàm này từ tiến trình chính (main.js) khi bot đang chạy — " +
-            "xem ANNOUNCEMENT.md. Script độc lập không tự mở phiên Zalo để tránh tranh khoá phiên ZCA."
+            "Đợt gửi phải được kích hoạt TỪ BÊN TRONG tiến trình chính (main.js) — " +
+            "xem ANNOUNCEMENT.md để biết cách gọi qua API quản trị. " +
+            "Tiến trình shell riêng không tự mở phiên Zalo để tránh tranh khoá phiên ZCA."
         );
     }
     const officialConfigs = resolveBotConfigs(process.env);
     const getProvider = (botId) => runtimeRegistry.get(botId) || null;
+
+    // Gắn vân tay NGAY khi bắt đầu ghi, để lần chạy sau đối chiếu được nội dung.
+    checkpoint.contentHash = contentHash;
 
     let sent = 0;
     let failed = 0;
@@ -413,20 +550,20 @@ async function main(argv = process.argv.slice(2), options = {}) {
         if (!availability.available) {
             deferred += 1;
             checkpoint.deferred[recipient.key] = { reason: availability.reason, at: new Date().toISOString() };
-            continue;
-        }
-        const outcome = await sendOne(getProvider, recipient, message);
-        if (outcome.status === "sent") {
-            sent += 1;
-            checkpoint.sent[recipient.key] = { at: new Date().toISOString() };
-            delete checkpoint.deferred[recipient.key];
-            delete checkpoint.failed[recipient.key];
-        } else if (outcome.status === "deferred") {
-            deferred += 1;
-            checkpoint.deferred[recipient.key] = { reason: outcome.reason, at: new Date().toISOString() };
         } else {
-            failed += 1;
-            checkpoint.failed[recipient.key] = { reason: outcome.reason, permanent: Boolean(outcome.permanent), at: new Date().toISOString() };
+            const outcome = await sendOne(getProvider, recipient, message);
+            if (outcome.status === "sent") {
+                sent += 1;
+                checkpoint.sent[recipient.key] = { at: new Date().toISOString() };
+                delete checkpoint.deferred[recipient.key];
+                delete checkpoint.failed[recipient.key];
+            } else if (outcome.status === "deferred") {
+                deferred += 1;
+                checkpoint.deferred[recipient.key] = { reason: outcome.reason, at: new Date().toISOString() };
+            } else {
+                failed += 1;
+                checkpoint.failed[recipient.key] = { reason: outcome.reason, permanent: Boolean(outcome.permanent), at: new Date().toISOString() };
+            }
         }
         // Ghi checkpoint sau MỖI tin: dừng đột ngột không được làm mất tiến độ.
         writeCheckpoint(args.campaign, checkpoint);
@@ -434,10 +571,10 @@ async function main(argv = process.argv.slice(2), options = {}) {
 
     const file = writeCheckpoint(args.campaign, checkpoint);
     console.log("");
-    console.log(`[Announce] XONG. đã gửi: ${sent} · thất bại: ${failed} · hoãn: ${deferred}`);
+    console.log(`[Announce] XONG. đã gửi: ${sent} · thất bại: ${failed} · hoãn: ${deferred} · bỏ qua vĩnh viễn: ${skippedPermanent ?? 0}`);
     console.log(`[Announce] Checkpoint: ${file}`);
     console.log("[Announce] Chạy lại với --report để xem báo cáo đầy đủ.");
-    return { sent, failed, deferred };
+    return { sent, failed, deferred, skippedPermanent, alreadySent, contentHash };
 }
 
 if (require.main === module) {
@@ -451,17 +588,22 @@ module.exports = {
     CHECKPOINT_DIR,
     DEFAULT_SOURCE,
     UNVERIFIED_LABEL,
+    campaignContentHash,
     checkProviderAvailability,
     checkpointPath,
     classifyRecipients,
     fingerprint,
     main,
+    normalizeCampaignMessage,
+    normalizeOfficialConfigs,
     normalizeSourceRecords,
     parseArgs,
     planSend,
+    printReport,
     readCheckpoint,
     readSourceFile,
     recipientKey,
     resolveRuntimeRegistry,
+    verifyCheckpointContent,
     writeCheckpoint
 };

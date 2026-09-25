@@ -1,5 +1,6 @@
 process.env.TZ = "Asia/Ho_Chi_Minh";
 
+const fs = require("fs");
 const path = require("path");
 
 // Nạp .env theo thư mục dự án để cấu hình hoạt động giống nhau dù tiến trình
@@ -952,6 +953,115 @@ async function runRecoveredAnnouncement(argv = [], options = {}) {
         // Truyền registry sống của tiến trình này để script lấy được nhà cung cấp.
         runtimeRegistry: options.runtimeRegistry || globalThis.__ZALOBOT_RUNTIMES__ || null
     });
+}
+
+// ---------------------------------------------------------------------------
+// Cầu nối cho dashboard: chạy đợt thông báo một-lần BÊN TRONG tiến trình này.
+//
+// Vì sao cần lớp này thay vì gọi thẳng runRecoveredAnnouncement: API nhận tham số
+// từ HTTP (chuỗi, không phải mảng argv), và cần đọc nội dung từ một trong hai
+// nguồn — admin gửi thẳng, hoặc file có sẵn trên máy chủ. Mọi giá trị đều bắt buộc
+// xuất phát từ tham số truyền vào, KHÔNG hard-code dữ liệu cá nhân trong mã nguồn.
+// ---------------------------------------------------------------------------
+
+const ANNOUNCEMENT_CAMPAIGN = "reset-2026-09";
+const ANNOUNCEMENT_SOURCE = path.join(__dirname, "recovered-interactions.json");
+// File nội dung mặc định trên máy chủ. Chỉ đọc khi admin không gửi nội dung trực tiếp.
+const ANNOUNCEMENT_MESSAGE_FILE = process.env.ANNOUNCEMENT_MESSAGE_FILE || "/tmp/announce.txt";
+
+function resolveAnnouncementCampaign(value) {
+    const campaign = String(value == null ? "" : value).trim();
+    return campaign || ANNOUNCEMENT_CAMPAIGN;
+}
+
+// Đọc nội dung thông báo từ tham số admin gửi, hoặc từ file trên máy chủ.
+//
+// Thứ tự ưu tiên: nội dung gửi trực tiếp > file admin chỉ định > file mặc định.
+// Trả về null nếu không lấy được nội dung nào (nơi gọi phải báo lỗi rõ ràng).
+function resolveAnnouncementMessage({ message, messageFile } = {}) {
+    const inline = String(message == null ? "" : message).trim();
+    if (inline) return { text: inline, source: "inline" };
+
+    const candidates = [];
+    if (messageFile) candidates.push(String(messageFile));
+    candidates.push(ANNOUNCEMENT_MESSAGE_FILE);
+
+    for (const candidate of candidates) {
+        try {
+            const resolved = path.resolve(candidate);
+            if (!fs.existsSync(resolved)) continue;
+            const text = fs.readFileSync(resolved, "utf8").trim();
+            if (text) return { text, source: resolved };
+        } catch (_) {
+            // Thử nguồn kế tiếp; nếu hết nguồn thì báo lỗi tổng hợp bên dưới.
+        }
+    }
+    return { text: null, source: null, tried: candidates.map((item) => path.resolve(item)) };
+}
+
+// Xem trước: chạy dry-run (không gửi, không ghi) và trả về số liệu cho dashboard.
+async function previewRecoveredAnnouncement(input = {}) {
+    const campaign = resolveAnnouncementCampaign(input.campaign);
+    const resolved = resolveAnnouncementMessage(input);
+    if (!resolved.text) {
+        throw new Error(
+            "Chưa có nội dung thông báo. Gửi kèm nội dung, hoặc tạo file " +
+            `${ANNOUNCEMENT_MESSAGE_FILE} trên máy chủ. Đã thử: ${(resolved.tried || []).join(", ")}`
+        );
+    }
+    // Không truyền --send: đây là đường xem trước, tuyệt đối không gửi.
+    const result = await runRecoveredAnnouncement([
+        "--campaign", campaign,
+        "--source", ANNOUNCEMENT_SOURCE
+    ], { messageOverride: resolved.text, messageSource: resolved.source });
+
+    return {
+        campaignId: campaign,
+        messageSource: resolved.source,
+        contentHash: result.contentHash,
+        recipients: result.recipients,
+        excluded: result.excluded,
+        perBot: result.perBot,
+        planned: result.planned,
+        alreadySent: result.alreadySent,
+        skippedPermanent: result.skippedPermanent,
+        dryRun: true
+    };
+}
+
+// Gửi thật, bên trong tiến trình đang chạy. `confirm` phải là true — không có đường
+// nào gửi mà không xác nhận tường minh.
+async function sendRecoveredAnnouncement(input = {}) {
+    if (input.confirm !== true) throw new Error("Cần xác nhận tường minh để gửi thật.");
+    const campaign = resolveAnnouncementCampaign(input.campaign);
+    const resolved = resolveAnnouncementMessage(input);
+    if (!resolved.text) {
+        throw new Error(
+            "Chưa có nội dung thông báo. Gửi kèm nội dung, hoặc tạo file " +
+            `${ANNOUNCEMENT_MESSAGE_FILE} trên máy chủ.`
+        );
+    }
+    const argv = ["--campaign", campaign, "--source", ANNOUNCEMENT_SOURCE, "--send"];
+    if (input.resume === true) argv.push("--resume");
+    const result = await runRecoveredAnnouncement(argv, {
+        messageOverride: resolved.text,
+        messageSource: resolved.source
+    });
+    return { campaignId: campaign, messageSource: resolved.source, ...result };
+}
+
+// Tiến độ một chiến dịch, đọc từ checkpoint cục bộ. Không gửi gì.
+function announcementProgress(input = {}) {
+    const campaign = resolveAnnouncementCampaign(input.campaign);
+    const { printReport } = require("./scripts/sendRecoveredAnnouncement");
+    // printReport in ra stdout; nơi đây chỉ cần giá trị trả về cho dashboard.
+    const original = console.log;
+    console.log = () => {};
+    try {
+        return printReport(campaign);
+    } finally {
+        console.log = original;
+    }
 }
 
 
@@ -2272,7 +2382,13 @@ async function startRuntime() {
         },
 
         // Đã tách thành hàm riêng để kiểm thử trực tiếp đường gửi.
-        replyToFeedback: (input) => deliverFeedbackReply(input)
+        replyToFeedback: (input) => deliverFeedbackReply(input),
+
+        // Thông báo MỘT LẦN: chạy bên trong tiến trình này để dùng được phiên ZCA.
+        // Không endpoint nào chạm Firestore — chỉ đọc file nguồn rồi gửi.
+        previewAnnouncement: (input) => previewRecoveredAnnouncement(input),
+        sendAnnouncement: (input) => sendRecoveredAnnouncement(input),
+        announcementStatus: (input) => announcementProgress(input)
     });
     await new Promise((resolve, reject) => {
         adminRuntime.server.once("error", reject);
@@ -2794,6 +2910,12 @@ module.exports = {
     registerRuntimeJobs,
     sendBotAnnouncement,
     runRecoveredAnnouncement,
+    // Cầu nối dashboard cho đợt thông báo một-lần. Tách riêng để kiểm thử được
+    // đường xem trước / gửi / tiến độ mà không cần dựng cả HTTP server.
+    previewRecoveredAnnouncement,
+    sendRecoveredAnnouncement,
+    announcementProgress,
+    resolveAnnouncementMessage,
     getAdmissionStats,
     sendClassStartNotifications,
     sendDailySchedulesAtSix,

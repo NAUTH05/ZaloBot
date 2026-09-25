@@ -190,3 +190,104 @@ test("Command console target mapping uses real User IDs and rejects a group Chat
     assert.equal(executed.target.chatId, "target-private-chat");
     assert.equal(executed.target.displayName, "Target User One");
 });
+
+// ---------------------------------------------------------------------------
+// Thông báo MỘT LẦN qua API quản trị.
+//
+// Đây là đường DUY NHẤT gửi được phần ZCA: hàm gửi phải chạy bên trong tiến trình
+// đang giữ phiên. Vì vậy các endpoint này rất nhạy cảm — phải nằm sau requireAdmin
+// và bắt buộc xác nhận tường minh mới gửi thật.
+// ---------------------------------------------------------------------------
+test("announcement endpoints yêu cầu đăng nhập admin", async (t) => {
+    preserveRuntimeFiles(t);
+    const oldUsername = process.env.ADMIN_USERNAME;
+    const oldPassword = process.env.ADMIN_PASSWORD;
+    process.env.ADMIN_USERNAME = "ann-admin";
+    process.env.ADMIN_PASSWORD = "test-password";
+    const runtime = createAdminServer({ port: 0, previewAnnouncement: async () => ({ ok: true }) });
+    await new Promise((resolve) => runtime.server.listen(0, "127.0.0.1", resolve));
+    const port = runtime.server.address().port;
+    t.after(() => { runtime.server.close(); process.env.ADMIN_USERNAME = oldUsername; process.env.ADMIN_PASSWORD = oldPassword; });
+
+    const preview = await request(port, "GET", "/zalobot/api/admin/announcement/preview");
+    assert.equal(preview.status, 401, "chưa đăng nhập không được xem trước");
+    const send = await request(port, "POST", "/zalobot/api/admin/announcement/send", { confirm: true });
+    assert.equal(send.status, 401, "chưa đăng nhập không được gửi");
+    const status = await request(port, "GET", "/zalobot/api/admin/announcement/status");
+    assert.equal(status.status, 401);
+});
+
+test("announcement preview trả số liệu và KHÔNG gọi gửi", async (t) => {
+    preserveRuntimeFiles(t);
+    const oldUsername = process.env.ADMIN_USERNAME;
+    const oldPassword = process.env.ADMIN_PASSWORD;
+    process.env.ADMIN_USERNAME = "ann-admin2";
+    process.env.ADMIN_PASSWORD = "test-password";
+    let sendCalled = false;
+    const runtime = createAdminServer({
+        port: 0,
+        previewAnnouncement: async () => ({ campaignId: "reset-2026-09", recipients: 196, excluded: 46, perBot: { bot1: 104 }, planned: 196, dryRun: true }),
+        sendAnnouncement: async () => { sendCalled = true; return { sent: 0 }; }
+    });
+    await new Promise((resolve) => runtime.server.listen(0, "127.0.0.1", resolve));
+    const port = runtime.server.address().port;
+    t.after(() => { runtime.server.close(); process.env.ADMIN_USERNAME = oldUsername; process.env.ADMIN_PASSWORD = oldPassword; });
+
+    const login = await request(port, "POST", "/zalobot/api/admin/auth/login", { username: "ann-admin2", password: "test-password" });
+    const cookie = String(login.headers["set-cookie"][0]).split(";")[0];
+
+    const preview = await request(port, "GET", "/zalobot/api/admin/announcement/preview", null, cookie);
+    assert.equal(preview.status, 200);
+    assert.equal(preview.body.recipients, 196);
+    assert.equal(preview.body.excluded, 46);
+    assert.equal(sendCalled, false, "xem trước tuyệt đối không được gửi");
+});
+
+test("announcement send TỪ CHỐI khi thiếu confirm: true", async (t) => {
+    preserveRuntimeFiles(t);
+    const oldUsername = process.env.ADMIN_USERNAME;
+    const oldPassword = process.env.ADMIN_PASSWORD;
+    process.env.ADMIN_USERNAME = "ann-admin3";
+    process.env.ADMIN_PASSWORD = "test-password";
+    let sendCalled = false;
+    const runtime = createAdminServer({
+        port: 0,
+        sendAnnouncement: async () => { sendCalled = true; return { sent: 1 }; }
+    });
+    await new Promise((resolve) => runtime.server.listen(0, "127.0.0.1", resolve));
+    const port = runtime.server.address().port;
+    t.after(() => { runtime.server.close(); process.env.ADMIN_USERNAME = oldUsername; process.env.ADMIN_PASSWORD = oldPassword; });
+
+    const login = await request(port, "POST", "/zalobot/api/admin/auth/login", { username: "ann-admin3", password: "test-password" });
+    const cookie = String(login.headers["set-cookie"][0]).split(";")[0];
+
+    const noConfirm = await request(port, "POST", "/zalobot/api/admin/announcement/send", { campaign: "reset-2026-09" }, cookie);
+    assert.equal(noConfirm.status, 400);
+    assert.match(noConfirm.body.error, /xác nhận/);
+    assert.equal(sendCalled, false, "thiếu xác nhận thì không được gọi hàm gửi");
+
+    const withConfirm = await request(port, "POST", "/zalobot/api/admin/announcement/send", { campaign: "reset-2026-09", confirm: true }, cookie);
+    assert.equal(withConfirm.status, 200);
+    assert.equal(sendCalled, true);
+});
+
+test("announcement endpoints trả 503 khi tiến trình chưa nối hàm", async (t) => {
+    preserveRuntimeFiles(t);
+    const oldUsername = process.env.ADMIN_USERNAME;
+    const oldPassword = process.env.ADMIN_PASSWORD;
+    process.env.ADMIN_USERNAME = "ann-admin4";
+    process.env.ADMIN_PASSWORD = "test-password";
+    const runtime = createAdminServer({ port: 0 });
+    await new Promise((resolve) => runtime.server.listen(0, "127.0.0.1", resolve));
+    const port = runtime.server.address().port;
+    t.after(() => { runtime.server.close(); process.env.ADMIN_USERNAME = oldUsername; process.env.ADMIN_PASSWORD = oldPassword; });
+
+    const login = await request(port, "POST", "/zalobot/api/admin/auth/login", { username: "ann-admin4", password: "test-password" });
+    const cookie = String(login.headers["set-cookie"][0]).split(";")[0];
+
+    // Fail closed: thiếu hàm thì báo chưa sẵn sàng, KHÔNG im lặng thành công.
+    const preview = await request(port, "GET", "/zalobot/api/admin/announcement/preview", null, cookie);
+    assert.equal(preview.status, 503);
+    const send = await request(port, "POST", "/zalobot/api/admin/announcement/send", { confirm: true }, cookie);
+    assert.equal(send.status, 503);
+});

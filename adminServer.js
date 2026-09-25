@@ -839,6 +839,83 @@ async function handleApi(request, response, url, options = {}) {
     }
 
     // ---------------------------------------------------------------------
+    // Thông báo MỘT LẦN từ danh sách liên hệ khôi phục.
+    //
+    // Vì sao phải đi qua API này: đợt gửi cần nhà cung cấp đang chạy — và tài khoản
+    // ZCA giữ khoá phiên ĐỘC QUYỀN. Một tiến trình shell riêng không chạm tới registry
+    // của PM2, nên mở phiên Zalo thứ hai sẽ tranh khoá và làm hỏng phiên đang đăng
+    // nhập. Ba endpoint dưới đây chạy TRONG chính tiến trình đó.
+    //
+    //   GET  .../announcement/preview  — xem trước, KHÔNG gửi, KHÔNG ghi
+    //   POST .../announcement/send     — gửi thật (bắt buộc confirm: true)
+    //   GET  .../announcement/status   — tiến độ từ checkpoint
+    //
+    // Chiến dịch này KHÔNG BAO GIỜ chạm Firestore: chỉ đọc file nguồn và gửi tin.
+    // Mọi route nằm sau requireAdmin ở trên, nên chỉ quản trị viên đã đăng nhập.
+    // ---------------------------------------------------------------------
+    if (url.pathname === `${API_PREFIX}/announcement/preview` && request.method === "GET") {
+        if (typeof options.previewAnnouncement !== "function") {
+            return json(response, 503, { error: "Chức năng thông báo chưa sẵn sàng" });
+        }
+        try {
+            const result = await options.previewAnnouncement({
+                campaign: url.searchParams.get("campaign") || undefined,
+                message: url.searchParams.get("message") || undefined,
+                messageFile: url.searchParams.get("messageFile") || undefined
+            });
+            audit("announcement.preview", request, { campaign: result?.campaignId || null });
+            return json(response, 200, result);
+        } catch (error) {
+            audit("announcement.preview", request, { result: "error", error: error.message });
+            return json(response, 400, { error: error.message });
+        }
+    }
+    if (url.pathname === `${API_PREFIX}/announcement/status` && request.method === "GET") {
+        if (typeof options.announcementStatus !== "function") {
+            return json(response, 503, { error: "Chức năng thông báo chưa sẵn sàng" });
+        }
+        try {
+            const result = await options.announcementStatus({
+                campaign: url.searchParams.get("campaign") || undefined
+            });
+            return json(response, 200, result);
+        } catch (error) {
+            return json(response, 400, { error: error.message });
+        }
+    }
+    if (url.pathname === `${API_PREFIX}/announcement/send` && request.method === "POST") {
+        if (typeof options.sendAnnouncement !== "function") {
+            return json(response, 503, { error: "Chức năng thông báo chưa sẵn sàng" });
+        }
+        let body;
+        try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
+        // Gửi thật cho hàng trăm người là hành động KHÔNG hoàn tác được. Bắt buộc
+        // xác nhận tường minh, giống mọi thao tác phá huỷ khác trên dashboard.
+        if (body?.confirm !== true) {
+            return json(response, 400, { error: "Cần xác nhận tường minh: gửi kèm confirm: true" });
+        }
+        try {
+            const result = await options.sendAnnouncement({
+                campaign: body?.campaign,
+                message: body?.message,
+                messageFile: body?.messageFile,
+                resume: body?.resume === true,
+                confirm: true
+            });
+            audit("announcement.send", request, {
+                campaign: result?.campaignId || null,
+                sent: result?.sent ?? null,
+                failed: result?.failed ?? null,
+                deferred: result?.deferred ?? null
+            });
+            return json(response, 200, result);
+        } catch (error) {
+            audit("announcement.send", request, { result: "error", error: error.message });
+            return json(response, 400, { error: error.message });
+        }
+    }
+
+    // ---------------------------------------------------------------------
     // Xác minh nguồn gốc bản ghi (chỉ quản trị viên đã đăng nhập).
     //
     // Ba bước tách biệt: xem bằng chứng → xác minh (kèm lý do) → có thể hoàn tác.
