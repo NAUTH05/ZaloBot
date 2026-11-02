@@ -108,6 +108,8 @@ const {
     unblockTarget
 } = require("./accessControl");
 const { askScheduleAi } = require("./aiAssistant");
+// Cổng nhóm: trong nhóm chỉ phản hồi khi được nhắc tới (hoặc khi có lệnh "/...").
+const { groupReplyOptionsFromEnv, resolveGroupReplyDecision } = require("./groupMentions");
 const { flushPersistenceWrites, initializeFirestorePersistence } = require("./firestorePersistence");
 const { getCommandRegistry } = require("./commandRegistry");
 const { createAdminServer } = require("./adminServer");
@@ -2477,6 +2479,9 @@ async function startRuntime() {
     metrics.logMemory("sẵn sàng");
 }
 
+// Cấu hình cổng nhóm, đọc một lần lúc khởi động.
+const GROUP_REPLY_OPTIONS = groupReplyOptionsFromEnv(process.env);
+
 async function handleIncomingMessage(runtime, msg) {
     // Sau khi bắt đầu tắt máy thì không xử lý tin mới: tránh bắt đầu một đợt gửi
     // hoặc một lệnh quản trị trong lúc tiến trình đang dừng.
@@ -2486,6 +2491,30 @@ async function handleIncomingMessage(runtime, msg) {
     const context = getMessageContext(msg, { botId: runtime.botId });
     const from = msg.from?.display_name || context.userId || "unknown";
     const botId = context.botId || getCurrentBotId();
+
+    // CỔNG NHÓM.
+    //
+    // Bot nhận được MỌI tin nhắn của nhóm mà nó tham gia, kể cả khi không ai gọi
+    // nó. Trước đây mỗi tin như vậy lại đi tiếp vào nhánh chào mừng, nên bot phản
+    // hồi cả nhóm. Nay tin nhắn không nhắc tới bot bị bỏ qua tại đây: không trả
+    // lời, không chào, không ghi sổ tương tác.
+    //
+    // Chạy TRƯỚC cổng tiếp nhận để tin bị bỏ qua không để lại dấu vết nào.
+    const groupDecision = resolveGroupReplyDecision({
+        msg,
+        runtime,
+        text: msg.text || "",
+        options: GROUP_REPLY_OPTIONS
+    });
+    if (!groupDecision.respond) {
+        // Một dòng ngắn thay cho hai dòng log của tin được xử lý: nhóm lớp có thể
+        // rất nhiều tin, và tin bị bỏ qua thì không có gì để chẩn đoán thêm.
+        console.log(`[Nhóm] bỏ qua tin không nhắc tới bot (${groupDecision.reason}) · ${botId}/${context.chatId}`);
+        return;
+    }
+    // Nội dung đã bỏ phần tag, để "@Tên /help" vẫn phân tích thành lệnh /help.
+    const effectiveText = groupDecision.text;
+
     console.log("Tin nhắn mới:", from, "→", text);
 
     // CỔNG TIẾP NHẬN.
@@ -2600,8 +2629,8 @@ async function handleIncomingMessage(runtime, msg) {
                 }
             }
 
-            const parsed = parseCommand(msg.text);
-            const looksLikeCommand = String(msg.text || "").trim().startsWith("/");
+            const parsed = parseCommand(effectiveText);
+            const looksLikeCommand = String(effectiveText || "").trim().startsWith("/");
 
             // Chào mừng khi chat chưa được tiếp nhận VÀ tin không phải lệnh.
             //

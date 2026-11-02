@@ -154,6 +154,7 @@ FIREBASE_SERVICE_ACCOUNT_FILE=C:\Secure\ZaloBot\zalobot-firebase-adminsdk-fbsvc.
 | Gemini | `GEMINI_API_KEY`, `GEMINI_MODEL` |
 | Firebase | `FIREBASE_SERVICE_ACCOUNT_FILE`, `FIREBASE_DATABASE_ID`, `FIREBASE_STATE_COLLECTION` |
 | Runtime | `TZ`, `NODE_ENV`, `PORT`, `CLASS_START_GRACE_MS`, `CLASS_START_CACHE_TTL_MS`, `SHUTDOWN_TIMEOUT_MS` |
+| Group replies | `GROUP_MENTION_ONLY`, `GROUP_ALLOW_COMMANDS_WITHOUT_MENTION` |
 
 `OWNER_USER_ID` and `OWNER_CHAT_ID` accept comma-separated identities. `ADMIN_PORT` falls back to `PORT`, then `6003`. `TZ` must remain `Asia/Ho_Chi_Minh`. `SHUTDOWN_TIMEOUT_MS` must stay below the PM2 `kill_timeout`.
 
@@ -167,6 +168,20 @@ FIREBASE_SERVICE_ACCOUNT_FILE=C:\Secure\ZaloBot\zalobot-firebase-adminsdk-fbsvc.
 Owner IDs can also be managed from the dashboard (**Settings -> Admins**) without editing `.env`.
 
 The same Settings panel configures the Command console batch limits: `maxBatchSize` (recipients per run, default 25) and `batchDelayMs` (pause between sends, default 350 ms).
+
+### Group replies (mention gate)
+
+A bot receives **every** message in a group it belongs to, not only the ones addressed to it. The bot therefore stays silent in groups unless it is actually called:
+
+| Message in a group | Behaviour |
+| --- | --- |
+| Mentions the bot (mention metadata, or `@<bot name>` in the text) | Replies. The tag is stripped before the command is parsed, so `@Alessandra /help` runs `/help`. |
+| Starts with `/` | Runs. A slash command is an explicit address to the bot. Set `GROUP_ALLOW_COMMANDS_WITHOUT_MENTION=0` to require a tag here too. |
+| Anything else | Ignored completely — no reply, no greeting, and no interaction or chat records written. |
+
+Private chats are unchanged. `GROUP_MENTION_ONLY=0` restores the previous behaviour, where any message in a group could trigger a reply.
+
+The decision lives in `groupMentions.js` and runs inside `handleIncomingMessage` before the contact-admission gate, so an ignored message leaves no trace in the stores.
 
 ## Development run
 

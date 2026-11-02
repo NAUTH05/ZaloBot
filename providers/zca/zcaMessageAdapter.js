@@ -7,6 +7,7 @@
 // Nhờ adapter này, toàn bộ logic lệnh/lịch/nhắc học KHÔNG phải biết ZCA tồn tại.
 // ============================================================================
 const { ThreadType } = require("zca-js");
+const { collectMentionIds } = require("../../mentionUtils");
 
 // zca-js: ThreadType.User = 0, ThreadType.Group = 1
 const THREAD_TYPE_USER = ThreadType?.User ?? 0;
@@ -92,14 +93,15 @@ function toInternalMessage(message) {
     };
 }
 
-// Bot có được nhắc tới trong nhóm không. Dùng để giữ hành vi "chỉ trả lời khi
-// được nhắc" nếu logic hiện tại yêu cầu.
+// Bot có được nhắc tới trong nhóm không.
+//
+// Dùng chung phép đọc mention với cổng nhóm (groupMentions.js) để hai nơi không
+// lệch nhau: một bên nhận ra tag còn bên kia thì không sẽ khiến bot im lặng đúng
+// lúc được gọi.
 function isBotMentioned(message, ownUid) {
-    const uid = String(ownUid || "");
+    const uid = String(ownUid || "").trim();
     if (!uid) return false;
-    const mentions = message?.data?.mentions;
-    if (!Array.isArray(mentions)) return false;
-    return mentions.some((mention) => String(mention?.uid || "") === uid);
+    return collectMentionIds(message).has(uid);
 }
 
 module.exports = {
