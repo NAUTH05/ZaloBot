@@ -467,6 +467,57 @@ function createZcaProvider(options = {}) {
         }
     }
 
+    // Gửi ảnh qua tài khoản Zalo cá nhân.
+    //
+    // zca-js hỗ gửi ảnh qua sendMessage với attachments. Có hai cách:
+    //   1. URL công khai: AttachmentSource = string (URL)
+    //   2. Buffer: AttachmentSource = { data: Buffer, filename, metadata }
+    //
+    // Dùng URL khi có URL công khai; dùng Buffer khi ảnh lưu local (chat images).
+    provider.sendPhoto = async function sendPhoto(chatId, photoUrlOrBuffer, options = {}) {
+        if (!provider.api) {
+            throw new Error("ZCA chua dang nhap nen khong gui duoc anh");
+        }
+        const threadId = String(chatId);
+        const threadType = provider.threadTypes?.get(threadId) === "group" ? ThreadType.Group : ThreadType.User;
+
+        let attachment;
+        if (Buffer.isBuffer(photoUrlOrBuffer)) {
+            // Gửi từ Buffer (ảnh lưu local).
+            attachment = {
+                data: photoUrlOrBuffer,
+                filename: options.filename || `image_${Date.now()}.jpg`,
+                metadata: {
+                    totalSize: photoUrlOrBuffer.length,
+                    width: options.width,
+                    height: options.height
+                }
+            };
+        } else {
+            // Gửi từ URL công khai.
+            attachment = String(photoUrlOrBuffer);
+        }
+
+        const payload = {
+            msg: options.caption || "",
+            attachments: [attachment]
+        };
+
+        try {
+            const result = await provider.api.sendMessage(payload, threadId, threadType);
+            provider.lastActivityAt = new Date().toISOString();
+            return result;
+        } catch (error) {
+            // Thử lại không kèm caption (một số phiên bản Zalo từ chối caption+attachment).
+            if (!options.caption) throw error;
+            log("warn", `gui anh kem caption that bai (${error.message}), thu lai khong caption`);
+            const fallback = { attachments: [attachment] };
+            const result = await provider.api.sendMessage(fallback, threadId, threadType);
+            provider.lastActivityAt = new Date().toISOString();
+            return result;
+        }
+    };
+
     // Cho phép nơi khác (kiểm thử, chẩn đoán) xem trước payload mà không gửi.
     provider.renderMessage = (text) => renderZcaRichText(String(text));
 

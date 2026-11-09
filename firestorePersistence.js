@@ -286,10 +286,18 @@ function getPersistenceStatus() {
     };
 }
 
+// Trả về đối tượng Firestore db đang dùng. Dùng cho các module khác cần truy cập
+// Firestore trực tiếp (ví dụ: ghi vào collection riêng, không qua coalesced writer).
+// Trả về null nếu chưa connectFirestore().
+function getFirestoreDb() {
+    return db;
+}
+
 module.exports = {
     RESERVED_STORE_IDS,
     connectFirestore,
     flushPersistenceWrites,
+    getFirestoreDb,
     getPersistenceQueueStats,
     getPersistenceStatus,
     importJsonDirectory,

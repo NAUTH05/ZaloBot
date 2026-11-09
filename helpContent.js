@@ -515,5 +515,6 @@ module.exports = {
     findHelpCommand,
     formatAdminHelp,
     formatPublicHelp,
+    renderCommand,
     resolveCommandName
 };

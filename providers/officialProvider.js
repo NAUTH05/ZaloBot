@@ -16,6 +16,13 @@ function isPermanentChatError(error) {
     return /410\s+The chat_id is invalid/i.test(String(error?.message || ""));
 }
 
+// Zalo Bot Platform API endpoint cho gửi ảnh.
+// node-zalo-bot không có sendPhoto công khai, nhưng _request() cho phép gọi
+// bất kỳ endpoint nào của API. Zalo Bot Platform hỗ trợ sendPhoto với:
+//   - chat_id: ID của cuộc trò chuyện
+//   - photo: URL công khai của ảnh (HTTP/HTTPS)
+const SEND_PHOTO_ENDPOINT = "sendPhoto";
+
 function createOfficialProvider(config = {}) {
     const botId = normalizeBotId(config.botId) || LEGACY_BOT_ID;
     const client = config.client || new ZaloBot(config.token, { polling: false });
@@ -48,6 +55,18 @@ function createOfficialProvider(config = {}) {
         // nguồn sự thật duy nhất và cho phép thay client (kiểm thử, khôi phục).
         async sendMessage(chatId, text, options = {}) {
             return provider.client.sendMessage(chatId, text, options);
+        },
+
+        // Gửi ảnh qua Zalo Bot Platform sendPhoto endpoint.
+        // photoUrl phải là URL công khai (HTTP/HTTPS) mà Zalo server có thể tải.
+        // Trả về result từ API (gồm message_id).
+        async sendPhoto(chatId, photoUrl, options = {}) {
+            const form = {
+                chat_id: String(chatId),
+                photo: String(photoUrl),
+                ...options
+            };
+            return provider.client._request(SEND_PHOTO_ENDPOINT, { form });
         },
 
         async start() {

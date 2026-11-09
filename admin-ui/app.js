@@ -375,6 +375,8 @@ function switchTab(name) {
   $$(".tab-button").forEach((button) => button.classList.toggle("active", button.dataset.tab === name));
   $$(".tab-panel").forEach((panel) => panel.classList.toggle("active", panel.dataset.panel === name));
   localStorage.setItem("zalobot-admin-tab", name);
+  if (name === "helpimages") loadHelpImages();
+  if (name === "chatcenter") loadChatConversations();
 }
 
 function applyTheme(theme) {
@@ -1562,3 +1564,305 @@ function setupSourceVerification() {
     });
   });
 }
+
+/* ==========================================================================
+   HELP IMAGES — quản lý ảnh hướng dẫn /help <command>
+   ========================================================================== */
+let helpImageCommands = [];
+let helpImages = [];
+
+async function loadHelpImageCommands() {
+  try {
+    const data = await api("/api/admin/help-images/commands");
+    helpImageCommands = data.commands || [];
+    const select = $("#helpImageCommand");
+    const filter = $("#helpImageFilter");
+    if (select) {
+      select.innerHTML = '<option value="">-- Chọn lệnh --</option>' +
+        helpImageCommands.map((c) => `<option value="${escapeHtml(c.command)}">${escapeHtml(c.command)} — ${escapeHtml(c.description || c.usage || "")}</option>`).join("");
+    }
+    if (filter) {
+      filter.innerHTML = '<option value="">Tất cả lệnh</option>' +
+        helpImageCommands.map((c) => `<option value="${escapeHtml(c.command)}">${escapeHtml(c.command)}</option>`).join("");
+    }
+  } catch (error) {
+    console.error("loadHelpImageCommands:", error.message);
+  }
+}
+
+async function loadHelpImages() {
+  await loadHelpImageCommands();
+  const filterVal = $("#helpImageFilter")?.value || "";
+  try {
+    const url = filterVal ? `/api/admin/help-images?command=${encodeURIComponent(filterVal)}` : "/api/admin/help-images";
+    const data = await api(url);
+    helpImages = data.images || [];
+    renderHelpImages();
+  } catch (error) {
+    console.error("loadHelpImages:", error.message);
+    $("#helpImageGrid").innerHTML = `<div class="empty-state">Lỗi tải ảnh: ${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function renderHelpImages() {
+  const grid = $("#helpImageGrid");
+  if (!grid) return;
+  if (!helpImages.length) {
+    grid.innerHTML = '<div class="empty-state">Chưa có ảnh nào. Upload ảnh hướng dẫn ở bảng bên trái.</div>';
+    return;
+  }
+  grid.innerHTML = helpImages.map((img) => `
+    <div class="help-image-card">
+      <img src="${escapeHtml(img.url)}" alt="${escapeHtml(img.originalName || "")}" loading="lazy" />
+      <div class="help-image-meta">
+        <div class="help-image-command">/${escapeHtml(img.command || "(chưa gắn lệnh)")}</div>
+        <small>${escapeHtml(img.originalName || "")} · ${formatDate(img.storedAt)}</small>
+        <div class="help-image-actions">
+          <button class="ghost small" data-associate="${escapeHtml(img.mediaId)}">Gắn lệnh</button>
+          <button class="ghost small" data-delete-image="${escapeHtml(img.mediaId)}">Xoá</button>
+        </div>
+      </div>
+    </div>`).join("");
+
+  grid.querySelectorAll("[data-delete-image]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      if (!confirm("Xoá ảnh này?")) return;
+      try {
+        await api(`/api/admin/help-images/${btn.dataset.deleteImage}`, { method: "DELETE" });
+        await loadHelpImages();
+      } catch (error) {
+        alert(`Lỗi: ${error.message}`);
+      }
+    });
+  });
+
+  grid.querySelectorAll("[data-associate]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const command = prompt("Nhập tên lệnh để gắn ảnh (ví dụ: nhanlich):");
+      if (!command) return;
+      try {
+        await api("/api/admin/help-images/associate", {
+          method: "POST",
+          body: JSON.stringify({ mediaId: btn.dataset.associate, command: command.trim() })
+        });
+        await loadHelpImages();
+      } catch (error) {
+        alert(`Lỗi: ${error.message}`);
+      }
+    });
+  });
+}
+
+// Upload form handler.
+$("#helpImageUploadForm")?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const form = e.target;
+  const command = $("#helpImageCommand").value;
+  const fileInput = $("#helpImageFile");
+  const msg = $("#helpImageUploadMsg");
+
+  if (!fileInput.files[0]) {
+    msg.textContent = "Chưa chọn file.";
+    msg.className = "error";
+    return;
+  }
+
+  const formData = new FormData();
+  formData.append("file", fileInput.files[0]);
+  if (command) formData.append("command", command);
+
+  msg.textContent = "Đang tải lên...";
+  msg.className = "";
+
+  try {
+    const response = await fetch(`${base}/api/admin/help-images/upload`, {
+      method: "POST",
+      credentials: "same-origin",
+      body: formData
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "Upload thất bại");
+    msg.textContent = `Đã tải lên: ${data.media.mediaId}`;
+    msg.className = "success";
+    form.reset();
+    await loadHelpImages();
+  } catch (error) {
+    msg.textContent = `Lỗi: ${error.message}`;
+    msg.className = "error";
+  }
+});
+
+$("#helpImageFilter")?.addEventListener("change", loadHelpImages);
+$("#helpImageRefresh")?.addEventListener("click", loadHelpImages);
+
+/* ==========================================================================
+   CHAT CENTER — giao tiếp hai chiều admin ↔ user
+   ========================================================================== */
+let chatConversations = [];
+let chatActiveConv = null;
+let chatMessageCursor = null;
+let chatMessages = [];
+
+async function loadChatConversations() {
+  try {
+    const data = await api("/api/admin/chat/conversations");
+    chatConversations = data.conversations || [];
+    renderChatConversations();
+    // Load unread count.
+    const unread = await api("/api/admin/chat/unread");
+    const badge = $("#chatUnreadBadge");
+    if (badge) badge.textContent = unread.count > 0 ? `${unread.count} tin chưa đọc` : "Không có tin mới";
+  } catch (error) {
+    console.error("loadChatConversations:", error.message);
+    $("#chatConversationList").innerHTML = `<div class="empty-state">Lỗi tải hội thoại: ${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function renderChatConversations() {
+  const list = $("#chatConversationList");
+  if (!list) return;
+  const search = $("#chatSearch")?.value.toLowerCase() || "";
+  const filtered = chatConversations.filter((c) => {
+    if (!search) return true;
+    return String(c.chatId || "").toLowerCase().includes(search) ||
+           String(c.displayName || "").toLowerCase().includes(search) ||
+           String(c.botId || "").toLowerCase().includes(search);
+  });
+
+  if (!filtered.length) {
+    list.innerHTML = '<div class="empty-state">Chưa có hội thoại nào.</div>';
+    return;
+  }
+
+  list.innerHTML = filtered.map((c) => `
+    <div class="chat-conversation-item ${chatActiveConv?.conversationId === c.conversationId ? "active" : ""}" data-conv="${escapeHtml(c.conversationId)}" data-bot="${escapeHtml(c.botId)}" data-chat="${escapeHtml(c.chatId)}">
+      <div class="conv-name">${escapeHtml(c.displayName || c.chatId)} <small>· ${escapeHtml(c.botId)}</small></div>
+      <div class="conv-preview">${escapeHtml(c.lastMessagePreview || "(chưa có tin)")}</div>
+      <div class="conv-meta">
+        <span class="conv-time">${escapeHtml(formatDate(c.lastMessageAt))}</span>
+        ${c.unreadCount > 0 ? `<span class="conv-unread">${c.unreadCount}</span>` : ""}
+      </div>
+    </div>`).join("");
+
+  list.querySelectorAll("[data-conv]").forEach((item) => {
+    item.addEventListener("click", () => openChatConversation(item.dataset.bot, item.dataset.chat));
+  });
+}
+
+async function openChatConversation(botId, chatId) {
+  const conv = chatConversations.find((c) => c.botId === botId && c.chatId === chatId);
+  chatActiveConv = conv || { botId, chatId, displayName: chatId };
+  chatMessageCursor = null;
+  chatMessages = [];
+
+  $("#chatThreadTitle").textContent = conv?.displayName || chatId;
+  $("#chatThreadInfo").textContent = `${botId} · ${chatId}`;
+  $("#chatSendForm").classList.remove("hidden");
+  renderChatConversations();
+  await loadChatMessages();
+  // Mark as read.
+  try {
+    await api("/api/admin/chat/read", { method: "POST", body: JSON.stringify({ botId, chatId }) });
+    await loadChatConversations();
+  } catch (_) {}
+}
+
+async function loadChatMessages() {
+  if (!chatActiveConv) return;
+  const { botId, chatId } = chatActiveConv;
+  try {
+    let url = `/api/admin/chat/messages/${encodeURIComponent(botId)}/${encodeURIComponent(chatId)}?limit=50`;
+    if (chatMessageCursor) url += `&cursor=${encodeURIComponent(chatMessageCursor)}`;
+    const data = await api(url);
+    chatMessages = data.messages || [];
+    chatMessageCursor = data.nextCursor || null;
+    renderChatMessages();
+  } catch (error) {
+    console.error("loadChatMessages:", error.message);
+    $("#chatMessageList").innerHTML = `<div class="empty-state">Lỗi tải tin nhắn: ${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function renderChatMessages() {
+  const list = $("#chatMessageList");
+  if (!list) return;
+  if (!chatMessages.length) {
+    list.innerHTML = '<div class="empty-state">Chưa có tin nhắn. Gửi tin đầu tiên bên dưới.</div>';
+    return;
+  }
+  list.innerHTML = chatMessages.map((m) => `
+    <div class="chat-message ${m.direction === "outbound" ? "outbound" : "inbound"}">
+      ${escapeHtml(m.text || "(ảnh)")}
+      ${m.attachments?.length ? `<br><small>${m.attachments.length} ảnh đính kèm</small>` : ""}
+      <div class="msg-meta">${escapeHtml(formatDate(m.sentAt || m.receivedAt))} · ${escapeHtml(m.status)}</div>
+    </div>`).join("");
+  list.scrollTop = list.scrollHeight;
+}
+
+// Send message.
+$("#chatSendForm")?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (!chatActiveConv) return;
+  const input = $("#chatInput");
+  const text = input.value.trim();
+  if (!text) return;
+
+  const { botId, chatId } = chatActiveConv;
+  input.value = "";
+  input.disabled = true;
+
+  try {
+    const result = await api("/api/admin/chat/send", {
+      method: "POST",
+      body: JSON.stringify({ botId, chatId, text })
+    });
+    if (result.sent) {
+      await loadChatMessages();
+    } else {
+      alert(`Gửi thất bại: ${result.error || "lỗi không rõ"}`);
+    }
+  } catch (error) {
+    alert(`Lỗi: ${error.message}`);
+  } finally {
+    input.disabled = false;
+    input.focus();
+  }
+});
+
+// Send image.
+$("#chatSendImageButton")?.addEventListener("click", () => $("#chatImageInput").click());
+$("#chatImageInput")?.addEventListener("change", async (e) => {
+  if (!chatActiveConv || !e.target.files[0]) return;
+  const { botId, chatId } = chatActiveConv;
+  const formData = new FormData();
+  formData.append("file", e.target.files[0]);
+  formData.append("command", "");
+
+  try {
+    // Upload image first.
+    const uploadResp = await fetch(`${base}/api/admin/help-images/upload`, {
+      method: "POST",
+      credentials: "same-origin",
+      body: formData
+    });
+    const uploadData = await uploadResp.json().catch(() => ({}));
+    if (!uploadResp.ok) throw new Error(uploadData.error || "Upload thất bại");
+
+    // Send via chat with mediaId.
+    const result = await api("/api/admin/chat/send", {
+      method: "POST",
+      body: JSON.stringify({ botId, chatId, text: "", mediaId: uploadData.media.mediaId })
+    });
+    if (result.sent) {
+      await loadChatMessages();
+    } else {
+      alert(`Gửi ảnh thất bại: ${result.error || "lỗi không rõ"}`);
+    }
+  } catch (error) {
+    alert(`Lỗi: ${error.message}`);
+  }
+  e.target.value = "";
+});
+
+$("#chatSearch")?.addEventListener("input", renderChatConversations);
+$("#chatRefresh")?.addEventListener("click", loadChatConversations);

@@ -55,6 +55,32 @@ const { getPersistenceStatus, readJsonStore, writeJsonStore } = require("./fires
 const { getSystemLogs } = require("./operationalLog");
 const { describeRegisteredBots, getBot, listBots, listEnabledBots, runWithBot } = require("./botContext");
 const { LEGACY_BOT_ID, normalizeBotId } = require("./bots");
+const { HELP_COMMANDS } = require("./helpContent");
+const {
+    storeMedia,
+    getMediaInfo,
+    deleteMedia,
+    listMediaByType,
+    associateHelpImage,
+    getHelpImagesForCommand,
+    validateUploadedFile,
+    MEDIA_TYPES,
+    MAX_FILE_SIZE
+} = require("./mediaStorage");
+const {
+    listConversations: listMsgConversations,
+    getMessageHistory,
+    markConversationRead,
+    recordMessage,
+    ensureConversation,
+    getConversation,
+    getUnreadCount,
+    updateMessageStatus,
+    DIRECTION: MSG_DIRECTION,
+    STATUS: MSG_STATUS,
+    SOURCE: MSG_SOURCE,
+    conversationIdFor
+} = require("./messageRecorder");
 
 // Bản ghi không có botId thuộc về bot 1 — quy tắc giữ tương thích dữ liệu cũ.
 function recordBotId(record) {
@@ -151,6 +177,7 @@ const UI_PREFIX = BASE_PATH === "/" ? "/" : `${BASE_PATH}/`;
 const STATIC_DIR = path.join(__dirname, "admin-ui");
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 const MAX_BODY_BYTES = 64 * 1024;
+const MAX_UPLOAD_BYTES = MAX_FILE_SIZE;  // 5 MB, đồng bộ với mediaStorage
 const sessions = new Map();
 const failedLogins = new Map();
 const requestCounts = new Map();
@@ -600,6 +627,110 @@ function readBody(request) {
         });
         request.on("error", reject);
     });
+}
+
+// Đọc body của request upload ảnh (multipart/form-data).
+// Trả về { fields, file } — file là { buffer, originalName, declaredMime }.
+// Giới hạn kích thước MAX_UPLOAD_BYTES.
+function readUploadBody(request) {
+    return new Promise((resolve, reject) => {
+        const contentType = String(request.headers["content-type"] || "");
+        const chunks = [];
+        let totalSize = 0;
+
+        request.on("data", (chunk) => {
+            totalSize += chunk.length;
+            if (totalSize > MAX_UPLOAD_BYTES) {
+                reject(new Error(`File quá lớn (giới hạn ${MAX_UPLOAD_BYTES} bytes)`));
+                request.destroy();
+                return;
+            }
+            chunks.push(chunk);
+        });
+
+        request.on("error", reject);
+
+        request.on("end", () => {
+            const buffer = Buffer.concat(chunks);
+
+            if (contentType.startsWith("multipart/form-data")) {
+                // Parse multipart đơn giản: tách theo boundary.
+                const boundary = contentType.split("boundary=")[1];
+                if (!boundary) {
+                    reject(new Error("Thiếu boundary trong multipart/form-data"));
+                    return;
+                }
+                const result = parseMultipart(buffer, boundary);
+                resolve(result);
+            } else if (contentType.startsWith("image/")) {
+                // Raw image upload (PUT body = image bytes).
+                resolve({
+                    fields: {},
+                    file: {
+                        buffer,
+                        originalName: request.headers["x-filename"] || `upload_${Date.now()}`,
+                        declaredMime: contentType
+                    }
+                });
+            } else {
+                reject(new Error(`Content-Type không hỗ trợ: ${contentType}`));
+            }
+        });
+    });
+}
+
+// Parse multipart/form-data đơn giản.
+// Trả về { fields: {}, file: { buffer, originalName, declaredMime } | null }
+function parseMultipart(buffer, boundary) {
+    const delim = Buffer.from(`--${boundary}`);
+    const parts = [];
+    let start = 0;
+
+    while (true) {
+        const idx = buffer.indexOf(delim, start);
+        if (idx === -1) break;
+        const nextIdx = buffer.indexOf(delim, idx + delim.length);
+        if (nextIdx === -1) break;
+
+        const partData = buffer.slice(idx + delim.length + 2, nextIdx - 2);  // -2 for \r\n before delim
+        parts.push(partData);
+        start = nextIdx;
+    }
+
+    const fields = {};
+    let file = null;
+
+    for (const part of parts) {
+        if (part.length === 0) continue;
+
+        // Tách header và body của part.
+        const headerEnd = part.indexOf(Buffer.from("\r\n\r\n"));
+        if (headerEnd === -1) continue;
+
+        const headerStr = part.slice(0, headerEnd).toString("utf8");
+        const body = part.slice(headerEnd + 4, part.length - 2);  // -2 for trailing \r\n
+
+        // Parse Content-Disposition.
+        const nameMatch = headerStr.match(/name="([^"]*)"/);
+        const filenameMatch = headerStr.match(/filename="([^"]*)"/);
+        const mimeMatch = headerStr.match(/Content-Type:\s*([^\r\n]+)/i);
+
+        const fieldName = nameMatch ? nameMatch[1] : "";
+        const filename = filenameMatch ? filenameMatch[1] : "";
+        const mime = mimeMatch ? mimeMatch[1].trim() : null;
+
+        if (filename) {
+            file = {
+                buffer: body,
+                originalName: filename,
+                declaredMime: mime || "application/octet-stream"
+            };
+        } else {
+            fields[fieldName] = body.toString("utf8");
+        }
+    }
+
+    return { fields, file };
 }
 
 function publicChat(chat) {
@@ -1407,12 +1538,192 @@ async function handleApi(request, response, url, options = {}) {
     if (url.pathname === `${API_PREFIX}/logs` && request.method === "GET") {
         return json(response, 200, { system: getSystemLogs(100), deliveryErrors: dashboardSummary().recentErrors, audit: recentAudit(100) });
     }
+
+    // ---------------------------------------------------------------------
+    // HELP IMAGES — quản lý ảnh hướng dẫn cho /help <command>.
+    //
+    //   GET    .../help-images/commands          — danh sách lệnh có sẵn
+    //   GET    .../help-images                   — danh sách ảnh (lọc theo ?command=)
+    //   POST   .../help-images/upload            — upload ảnh mới (multipart/form-data)
+    //   POST   .../help-images/associate         — gắn ảnh với lệnh
+    //   DELETE .../help-images/:mediaId          — xoá ảnh
+    // ---------------------------------------------------------------------
+    if (url.pathname === `${API_PREFIX}/help-images/commands` && request.method === "GET") {
+        const commands = HELP_COMMANDS.map((c) => ({
+            command: c.command,
+            usage: c.usage,
+            description: c.description || "",
+            group: c.group || ""
+        }));
+        return json(response, 200, { commands });
+    }
+
+    if (url.pathname === `${API_PREFIX}/help-images` && request.method === "GET") {
+        const command = url.searchParams.get("command") || null;
+        const images = await listMediaByType(MEDIA_TYPES.HELP_IMAGE, { command });
+        return json(response, 200, { images });
+    }
+
+    if (url.pathname === `${API_PREFIX}/help-images/upload` && request.method === "POST") {
+        let upload;
+        try {
+            upload = await readUploadBody(request);
+        } catch (error) {
+            return json(response, 400, { error: error.message });
+        }
+        if (!upload.file) {
+            return json(response, 400, { error: "Không tìm thấy file ảnh trong upload." });
+        }
+        const validation = validateUploadedFile(upload.file);
+        if (!validation.valid) {
+            return json(response, 400, { error: validation.error });
+        }
+        const command = upload.fields.command || null;
+        try {
+            const media = await storeMedia({
+                buffer: validation.buffer,
+                originalName: upload.file.originalName,
+                declaredMime: validation.mimeType,
+                mediaType: MEDIA_TYPES.HELP_IMAGE,
+                metadata: { command }
+            });
+            // Nếu có command, gắn luôn.
+            if (command) {
+                await associateHelpImage(media.mediaId, command);
+            }
+            audit("help-image.upload", request, { mediaId: media.mediaId, command, result: "success" });
+            return json(response, 201, { media });
+        } catch (error) {
+            audit("help-image.upload", request, { result: "error", error: error.message });
+            return json(response, 400, { error: error.message });
+        }
+    }
+
+    if (url.pathname === `${API_PREFIX}/help-images/associate` && request.method === "POST") {
+        let body;
+        try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
+        const { mediaId, command } = body;
+        if (!mediaId || !command) {
+            return json(response, 400, { error: "mediaId và command là bắt buộc." });
+        }
+        const ok = await associateHelpImage(mediaId, command);
+        audit("help-image.associate", request, { mediaId, command, result: ok ? "success" : "error" });
+        return ok ? json(response, 200, { ok: true }) : json(response, 404, { error: "Không tìm thấy media." });
+    }
+
+    // Delete help image: /api/admin/help-images/:mediaId
+    const helpImageMatch = url.pathname.match(new RegExp(`^${API_PREFIX.replaceAll("/", "\\\\/")}\\/help-images\\/([a-f0-9]+)$`));
+    if (helpImageMatch && request.method === "DELETE") {
+        const mediaId = helpImageMatch[1];
+        const deleted = await deleteMedia(mediaId);
+        audit("help-image.delete", request, { mediaId, result: deleted ? "success" : "not_found" });
+        return deleted ? json(response, 200, { ok: true }) : json(response, 404, { error: "Không tìm thấy ảnh." });
+    }
+
+    // ---------------------------------------------------------------------
+    // CHAT CENTER — giao tiếp hai chiều admin ↔ user.
+    //
+    //   GET  .../chat/conversations          — danh sách hội thoại
+    //   GET  .../chat/conversations/:botId/:chatId — chi tiết hội thoại
+    //   GET  .../chat/messages/:botId/:chatId — lịch sử tin nhắn (cursor)
+    //   POST .../chat/send                   — gửi tin nhắn (text/image)
+    //   POST .../chat/read                   — đánh dấu đã đọc
+    //   GET  .../chat/unread                 — số chưa đọc
+    // ---------------------------------------------------------------------
+    if (url.pathname === `${API_PREFIX}/chat/conversations` && request.method === "GET") {
+        const botId = url.searchParams.get("botId") || null;
+        const cursor = url.searchParams.get("cursor") || null;
+        const limit = parseInt(url.searchParams.get("limit") || "30", 10);
+        const result = await listMsgConversations({ botId, cursor, limit });
+        return json(response, 200, result);
+    }
+
+    if (url.pathname === `${API_PREFIX}/chat/unread` && request.method === "GET") {
+        const botId = url.searchParams.get("botId") || null;
+        const count = await getUnreadCount(botId);
+        return json(response, 200, { count });
+    }
+
+    // Chat conversation detail: /api/admin/chat/conversations/:botId/:chatId
+    // chatId có thể chứa ký tự đặc biệt nên phải dùng URL encoding.
+    const chatConvMatch = url.pathname.match(new RegExp(`^${API_PREFIX.replaceAll("/", "\\\\/")}\\/chat\\/conversations\\/([^/]+)\\/(.+)$`));
+    if (chatConvMatch && request.method === "GET") {
+        const botId = decodeURIComponent(chatConvMatch[1]);
+        const chatId = decodeURIComponent(chatConvMatch[2]);
+        const conv = await getConversation(botId, chatId);
+        if (!conv) return json(response, 404, { error: "Conversation not found" });
+        return json(response, 200, { conversation: conv });
+    }
+
+    // Message history: /api/admin/chat/messages/:botId/:chatId
+    const chatMsgMatch = url.pathname.match(new RegExp(`^${API_PREFIX.replaceAll("/", "\\\\/")}\\/chat\\/messages\\/([^/]+)\\/(.+)$`));
+    if (chatMsgMatch && request.method === "GET") {
+        const botId = decodeURIComponent(chatMsgMatch[1]);
+        const chatId = decodeURIComponent(chatMsgMatch[2]);
+        const cursor = url.searchParams.get("cursor") || null;
+        const limit = parseInt(url.searchParams.get("limit") || "50", 10);
+        const result = await getMessageHistory(botId, chatId, { cursor, limit });
+        return json(response, 200, result);
+    }
+
+    if (url.pathname === `${API_PREFIX}/chat/send` && request.method === "POST") {
+        if (typeof options.sendChatMessage !== "function") {
+            return json(response, 503, { error: "Chat service chưa sẵn sàng" });
+        }
+        let body;
+        try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
+        const botId = String(body?.botId || "").trim();
+        const chatId = String(body?.chatId || "").trim();
+        const text = String(body?.text || "").trim();
+        if (!botId || !chatId) {
+            return json(response, 400, { error: "botId và chatId là bắt buộc." });
+        }
+        if (!text && !body?.mediaId) {
+            return json(response, 400, { error: "text hoặc mediaId là bắt buộc." });
+        }
+        try {
+            const result = await options.sendChatMessage({ botId, chatId, text, mediaId: body?.mediaId });
+            audit("chat.send", request, { botId, chatId, result: result?.sent ? "success" : "error" });
+            return json(response, 200, result);
+        } catch (error) {
+            audit("chat.send", request, { botId, chatId, result: "error", error: error.message });
+            return json(response, 400, { error: error.message });
+        }
+    }
+
+    if (url.pathname === `${API_PREFIX}/chat/read` && request.method === "POST") {
+        let body;
+        try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
+        const botId = String(body?.botId || "").trim();
+        const chatId = String(body?.chatId || "").trim();
+        if (!botId || !chatId) {
+            return json(response, 400, { error: "botId và chatId là bắt buộc." });
+        }
+        const ok = await markConversationRead(botId, chatId);
+        return json(response, 200, { ok });
+    }
+
     return json(response, 404, { error: "Not found" });
 }
 
 function createAdminServer(options = {}) {
     const server = http.createServer(async (request, response) => {
         const url = new URL(request.url, `http://${request.headers.host || "localhost"}`);
+
+        // Media serving — PUBLIC, không cần auth.
+        // Zalo Bot Platform cần tải ảnh từ URL này để gửi sendPhoto.
+        // mediaId chỉ chứa hex (kiểm tra trong getMediaInfo) nên không path traversal.
+        const mediaMatch = url.pathname.match(/^\/api\/media\/([a-f0-9]+)$/);
+        if (mediaMatch && (request.method === "GET" || request.method === "HEAD")) {
+            try {
+                const info = await getMediaInfo(mediaMatch[1]);
+                if (!info) return json(response, 404, { error: "Media not found" });
+                return sendFile(response, info.filePath, info.mimeType || "application/octet-stream");
+            } catch (error) {
+                return json(response, 500, { error: "Media serving error" });
+            }
+        }
+
         if (url.pathname.startsWith(`${API_PREFIX}/`)) {
             try { await handleApi(request, response, url, options); } catch (error) { json(response, 500, { error: "Internal server error" }); }
             return;

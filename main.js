@@ -76,7 +76,9 @@ const {
     formatWarningMessage,
     formatWelcomeMessage
 } = require("./messageTemplates");
-const { resolveCommandName } = require("./helpContent");
+const { resolveCommandName, findHelpCommand, renderCommand } = require("./helpContent");
+const { recordMessage: recordMessageHistory, DIRECTION: MSG_DIRECTION, STATUS: MSG_STATUS, SOURCE: MSG_SOURCE } = require("./messageRecorder");
+const { storeMedia, getMediaInfo, deleteMedia, listMediaByType, associateHelpImage, getHelpImagesForCommand, validateUploadedFile, MEDIA_TYPES } = require("./mediaStorage");
 const { detectChatType, getInteractionTargets, recordInteraction } = require("./interactionRegistry");
 const {
     ADMISSION_STATE,
@@ -513,6 +515,34 @@ function currentProvider() {
     throw new Error("Nhà cung cấp hiện tại không gửi được tin nhắn");
 }
 
+// Xây URL công khai cho media dựa trên cấu hình admin server.
+// Ảnh phải có URL công khai để Zalo Bot Platform (official) có thể tải.
+// Dùng ADMIN_BASE_URL env hoặc localhost fallback.
+function buildMediaPublicUrl(mediaId) {
+    if (!mediaId) return null;
+    const baseUrl = process.env.ADMIN_BASE_URL || `http://localhost:${process.env.ADMIN_PORT || 3000}`;
+    return `${baseUrl}/api/media/${mediaId}`;
+}
+
+// Gửi ảnh qua nhà cung cấp hiện tại.
+//
+// Official bot: dùng sendPhoto endpoint (URL công khai).
+// ZCA: dùng sendPhoto với Buffer (ảnh local) hoặc URL.
+//
+// Trả về result từ provider. Lỗi gửi ảnh không tự thử lại plain text.
+async function sendPhoto(chatId, photoUrlOrBuffer, options = {}) {
+    const provider = currentProvider();
+    if (typeof provider.sendPhoto !== "function") {
+        throw new Error(`Nhà cung cấp ${provider.botId} không hỗ trợ gửi ảnh`);
+    }
+    const priority = options.priority || PRIORITY.INTERACTIVE;
+    return providerQueues.enqueueFor(
+        provider.botId,
+        () => provider.sendPhoto(chatId, photoUrlOrBuffer, options),
+        priority
+    );
+}
+
 // Chuyển nội dung có markdown của Zalo Bot Platform sang plain text.
 //
 // Dùng cho hai việc: gửi lại khi markdown bị từ chối, và cho những nhà cung cấp
@@ -633,6 +663,29 @@ async function sendMessage(chatId, text, options = {}) {
     deliveryResult.delivered = deliveryResult.sentChunks === chunks.length;
     // Cổng tiếp nhận: báo cho ngữ cảnh sự kiện vào biết đã trả lời được chat này.
     if (deliveryResult.delivered) notifyAdmissionSuccess(chatId);
+
+    // Ghi lịch sử tin nhắn outbound cho Chat Center (không chặn gửi).
+    if (deliveryResult.delivered) {
+        try {
+            const provider = currentProvider();
+            const botId = normalizeBotId(provider.botId) || LEGACY_BOT_ID;
+            recordMessageHistory({
+                botId,
+                chatId: String(chatId),
+                direction: MSG_DIRECTION.OUTBOUND,
+                text: String(text || ""),
+                status: MSG_STATUS.SENT,
+                source: dashboardCommandContext.getStore() ? MSG_SOURCE.ADMIN_CHAT : MSG_SOURCE.BOT_COMMAND,
+                providerMsgId: deliveryResult.providerBotId ? `bot_${deliveryResult.providerBotId}_${Date.now()}` : null
+            }).catch((err) => {
+                // Lỗi ghi lịch sử không được làm lỗi gửi.
+                console.warn(`[MessageRecorder] khong ghi duoc lich su outbound: ${err.message}`);
+            });
+        } catch (_) {
+            // Bỏ qua lỗi ghi lịch sử.
+        }
+    }
+
     return deliveryResult;
 }
 
@@ -1901,7 +1954,39 @@ async function handleCommand(msg, parsedCommand) {
     } else if (command === "feedback") {
         await handleFeedbackCommand(context, argument, msg);
     } else if (command === "help") {
-        await sendMessage(chatId, formatGeneralHelp());
+        // /help không có argument → danh sách lệnh chung.
+        // /help <command> → chi tiết lệnh cụ thể + ảnh hướng dẫn (nếu có).
+        const helpArg = (argument || "").trim();
+        if (helpArg) {
+            const cmd = findHelpCommand(helpArg);
+            if (cmd) {
+                // Gửi text chi tiết lệnh.
+                await sendMessage(chatId, renderCommand(cmd));
+                // Gửi ảnh hướng dẫn nếu có (lấy từ mediaStorage).
+                try {
+                    const images = await getHelpImagesForCommand(cmd.command);
+                    for (const img of images) {
+                        const photoUrl = buildMediaPublicUrl(img.mediaId);
+                        if (photoUrl) {
+                            await sendPhoto(chatId, photoUrl);
+                        }
+                    }
+                } catch (imgError) {
+                    // Lỗi gửi ảnh không được làm lỗi toàn bộ /help.
+                    console.warn(`[Help] khong gui duoc anh huong dan cho ${cmd.command}: ${imgError.message}`);
+                }
+            } else {
+                await sendMessage(
+                    chatId,
+                    formatWarningMessage(
+                        "KHÔNG TÌM THẤY LỆNH",
+                        `> Không có lệnh **/${escapeMarkdown(helpArg)}**.\n> Dùng **/help** để xem danh sách lệnh.`
+                    )
+                );
+            }
+        } else {
+            await sendMessage(chatId, formatGeneralHelp());
+        }
     } else if (command === "helpadmin") {
         if (!await requireOwner(context)) return;
         await sendMessage(chatId, formatAdminHelp());
@@ -2405,7 +2490,71 @@ async function startRuntime() {
         // Không endpoint nào chạm Firestore — chỉ đọc file nguồn rồi gửi.
         previewAnnouncement: (input) => previewRecoveredAnnouncement(input),
         sendAnnouncement: (input) => sendRecoveredAnnouncement(input),
-        announcementStatus: (input) => announcementProgress(input)
+        announcementStatus: (input) => announcementProgress(input),
+
+        // Chat Center — gửi tin nhắn từ admin qua bot.
+        // Chạy trong ngữ cảnh bot đích để provider đúng, storage key đúng.
+        sendChatMessage: async ({ botId, chatId, text, mediaId }) => {
+            const targetBot = normalizeBotId(botId);
+            if (!targetBot) throw new Error("botId là bắt buộc.");
+            const runtime = getBot(targetBot);
+            if (!runtime) throw new Error(`Bot ${targetBot} không đang chạy.`);
+
+            return runWithBot(runtime, async () => {
+                const result = { sent: false, error: null, messageId: null };
+
+                // Đảm bảo hội thoại tồn tại trong message recorder.
+                await ensureConversation({ botId: targetBot, chatId });
+
+                if (mediaId) {
+                    // Gửi ảnh.
+                    const mediaInfo = await getMediaInfo(mediaId);
+                    if (!mediaInfo) throw new Error("Không tìm thấy media.");
+                    const photoUrl = buildMediaPublicUrl(mediaId);
+                    if (!photoUrl) throw new Error("Không xây được URL công khai cho media.");
+
+                    try {
+                        const photoResult = await sendPhoto(chatId, photoUrl);
+                        result.sent = true;
+                        result.messageId = photoResult?.message_id || null;
+                    } catch (error) {
+                        result.error = error.message;
+                        // Vẫn ghi lịch sử với status failed.
+                        await recordMessage({
+                            botId: targetBot,
+                            chatId: String(chatId),
+                            direction: MSG_DIRECTION.OUTBOUND,
+                            text: text || "",
+                            status: MSG_STATUS.FAILED,
+                            source: MSG_SOURCE.ADMIN_CHAT,
+                            error: error.message
+                        });
+                        return result;
+                    }
+                }
+
+                if (text) {
+                    try {
+                        const sendResult = await sendMessage(chatId, text);
+                        result.sent = sendResult?.delivered || false;
+                    } catch (error) {
+                        result.error = error.message;
+                        await recordMessage({
+                            botId: targetBot,
+                            chatId: String(chatId),
+                            direction: MSG_DIRECTION.OUTBOUND,
+                            text,
+                            status: MSG_STATUS.FAILED,
+                            source: MSG_SOURCE.ADMIN_CHAT,
+                            error: error.message
+                        });
+                        return result;
+                    }
+                }
+
+                return result;
+            });
+        }
     });
     await new Promise((resolve, reject) => {
         adminRuntime.server.once("error", reject);
@@ -2516,6 +2665,26 @@ async function handleIncomingMessage(runtime, msg) {
     const effectiveText = groupDecision.text;
 
     console.log("Tin nhắn mới:", from, "→", text);
+
+    // Ghi lịch sử tin nhắn inbound cho Chat Center (không chặn xử lý).
+    try {
+        recordMessageHistory({
+            botId,
+            chatId: String(context.chatId),
+            direction: MSG_DIRECTION.INBOUND,
+            text: String(text || ""),
+            status: MSG_STATUS.DELIVERED,
+            source: context.chatType === "group" ? MSG_SOURCE.INBOUND_GROUP : MSG_SOURCE.INBOUND_USER,
+            chatType: context.chatType || null,
+            displayName: from || null,
+            providerMsgId: msg?.message_id || msg?.msgId || null,
+            timestamp: msg?.date ? new Date(msg.date * 1000).toISOString() : null
+        }).catch((err) => {
+            console.warn(`[MessageRecorder] khong ghi duoc lich su inbound: ${err.message}`);
+        });
+    } catch (_) {
+        // Bỏ qua lỗi ghi lịch sử.
+    }
 
     // CỔNG TIẾP NHẬN.
     //
@@ -2936,6 +3105,8 @@ module.exports = {
     // ĐÚNG nhà cung cấp đã nhận tin nhắn.
     handleIncomingMessage,
     sendMessage,
+    sendPhoto,
+    buildMediaPublicUrl,
     registerShutdownHandlers,
     stopZaloPolling,
     getBroadcastTargets,
