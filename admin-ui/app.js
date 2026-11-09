@@ -376,7 +376,7 @@ function switchTab(name) {
   $$(".tab-panel").forEach((panel) => panel.classList.toggle("active", panel.dataset.panel === name));
   localStorage.setItem("zalobot-admin-tab", name);
   if (name === "helpimages") loadHelpImages();
-  if (name === "chatcenter") loadChatConversations();
+  if (name === "chatcenter") { loadChatConversations(); connectChatStream(); }
 }
 
 function applyTheme(theme) {
@@ -1696,37 +1696,414 @@ $("#helpImageFilter")?.addEventListener("change", loadHelpImages);
 $("#helpImageRefresh")?.addEventListener("click", loadHelpImages);
 
 /* ==========================================================================
-   CHAT CENTER — giao tiếp hai chiều admin ↔ user
+   CHAT CENTER — giao tiếp hai chiều admin ↔ user, cập nhật realtime
    ========================================================================== */
+
 let chatConversations = [];
 let chatActiveConv = null;
 let chatMessageCursor = null;
 let chatMessages = [];
+let chatSeenIds = new Set();
+let chatStream = null;
+let chatStreamFailures = 0;
+let chatPollTimer = null;
+let chatLive = false;
+let chatUnreadTotal = 0;
+let chatPendingAttachment = null;
+let chatPreviewVisible = false;
+let chatSending = false;
+let chatNoticeTimer = null;
 
-async function loadChatConversations() {
+const CHAT_MAX_TEXT = 4000;
+const CHAT_POLL_MS = 5000;
+const CHAT_MAX_STREAM_FAILURES = 3;
+
+/* --------------------------------------------------------------------------
+   Định dạng tin nhắn — dùng ĐÚNG cú pháp mà bot hiểu.
+
+   Nguồn sự thật: providers/zca/zcaRichText.js. Bot chính thức hiểu Markdown qua
+   parse_mode; ZCA được chuyển từ chính cú pháp đó. Bảng dưới đây phải khớp:
+     **đậm**   *nghiêng*   __gạch chân__   ~~gạch ngang~~   `mã`
+     {green}…{/green}  {orange}  {red}  {yellow}
+     # Tiêu đề   > Trích dẫn   - Gạch đầu dòng   1. Danh sách số
+   -------------------------------------------------------------------------- */
+
+const CHAT_INLINE_MARKERS = {
+  bold: ["**", "**"],
+  italic: ["*", "*"],
+  underline: ["__", "__"],
+  strike: ["~~", "~~"],
+  "color-green": ["{green}", "{/green}"],
+  "color-orange": ["{orange}", "{/orange}"],
+  "color-red": ["{red}", "{/red}"],
+  "color-yellow": ["{yellow}", "{/yellow}"]
+};
+
+const CHAT_LINE_PREFIXES = {
+  heading: () => "# ",
+  quote: () => "> ",
+  bullet: () => "- ",
+  ordered: (index) => `${index + 1}. `
+};
+
+const PREVIEW_COLORS = {
+  green: "#15a85f",
+  orange: "#f27806",
+  red: "#db342e",
+  yellow: "#f7b503"
+};
+
+// Thứ tự quan trọng: dấu dài phải đứng trước dấu ngắn, nếu không `**` sẽ bị
+// hiểu thành hai lần `*`.
+const PREVIEW_MARKERS = [
+  { open: "***", close: "***", render: (inner) => `<strong>${inner}</strong>` },
+  { open: "**", close: "**", render: (inner) => `<strong>${inner}</strong>` },
+  { open: "__", close: "__", render: (inner) => `<u>${inner}</u>` },
+  { open: "~~", close: "~~", render: (inner) => `<s>${inner}</s>` },
+  { open: "`", close: "`", render: (inner) => `<strong>${inner}</strong>` },
+  { open: "*", close: "*", render: (inner) => `<em>${inner}</em>` },
+  { open: "_", close: "_", render: (inner) => `<em>${inner}</em>` }
+];
+
+// Render nội dùng một dòng thành HTML, khớp hành vi của renderZcaRichText.
+function renderPreviewInline(text) {
+  let out = "";
+  let buffer = "";
+  let index = 0;
+
+  const flush = () => {
+    if (buffer) {
+      out += escapeHtml(buffer);
+      buffer = "";
+    }
+  };
+
+  while (index < text.length) {
+    // Ký tự escape: \* \$ … hiển thị đúng ký tự sau dấu chéo.
+    if (text[index] === "\\" && index + 1 < text.length) {
+      buffer += text[index + 1];
+      index += 2;
+      continue;
+    }
+
+    // Màu: {green}…{/green}
+    if (text[index] === "{") {
+      const closeBrace = text.indexOf("}", index + 1);
+      if (closeBrace !== -1) {
+        const name = text.slice(index + 1, closeBrace).toLowerCase();
+        const color = PREVIEW_COLORS[name];
+        if (color) {
+          const closeTag = `{/${name}}`;
+          const closeAt = text.indexOf(closeTag, closeBrace + 1);
+          if (closeAt !== -1) {
+            flush();
+            const inner = renderPreviewInline(text.slice(closeBrace + 1, closeAt));
+            out += `<span style="color:${color}">${inner}</span>`;
+            index = closeAt + closeTag.length;
+            continue;
+          }
+        }
+      }
+    }
+
+    let matched = false;
+    for (const marker of PREVIEW_MARKERS) {
+      if (!text.startsWith(marker.open, index)) continue;
+      // `*` đơn không được "ăn" vào `**`, và ngược lại.
+      if (marker.open === "*" && text.startsWith("**", index)) continue;
+      if (marker.open === "_" && text.startsWith("__", index)) continue;
+
+      const close = text.indexOf(marker.close, index + marker.open.length);
+      if (close === -1) continue;
+      if (close === index + marker.open.length) continue;
+      if (marker.open === "*" && text.startsWith("**", close)) continue;
+      if (marker.open === "_" && text.startsWith("__", close)) continue;
+
+      flush();
+      const inner = renderPreviewInline(text.slice(index + marker.open.length, close));
+      out += marker.render(inner);
+      index = close + marker.close.length;
+      matched = true;
+      break;
+    }
+    if (matched) continue;
+
+    buffer += text[index];
+    index += 1;
+  }
+
+  flush();
+  return out;
+}
+
+// Render toàn bộ nội dung (nhiều dòng) thành HTML để xem trước và hiển thị bong bóng.
+function renderChatPreviewHtml(text) {
+  const source = String(text == null ? "" : text);
+  if (!source.trim()) return "";
+
+  const lines = source.split("\n");
+  const out = [];
+  let listTag = null;
+
+  const closeList = () => {
+    if (listTag) {
+      out.push(`</${listTag}>`);
+      listTag = null;
+    }
+  };
+
+  for (const rawLine of lines) {
+    let line = rawLine;
+    let blockTag = null;
+
+    const heading = line.match(/^(#{1,6})\s+(.*)$/);
+    if (heading) {
+      blockTag = `h${Math.min(heading[1].length + 2, 6)}`;
+      line = heading[2];
+    } else {
+      const quote = line.match(/^\s*>\s?(.*)$/);
+      if (quote) {
+        blockTag = "blockquote";
+        line = quote[1];
+      } else {
+        const bullet = line.match(/^(\s*)[-*+]\s+(.*)$/);
+        const ordered = line.match(/^(\s*)(\d+)[.)]\s+(.*)$/);
+        if (bullet) {
+          if (listTag !== "ul") { closeList(); out.push("<ul>"); listTag = "ul"; }
+          line = bullet[2];
+        } else if (ordered) {
+          if (listTag !== "ol") { closeList(); out.push("<ol>"); listTag = "ol"; }
+          line = ordered[3];
+        } else {
+          closeList();
+        }
+      }
+    }
+
+    const html = renderPreviewInline(line);
+
+    if (blockTag) out.push(`<${blockTag}>${html || "&nbsp;"}</${blockTag}>`);
+    else if (listTag) out.push(`<li>${html || "&nbsp;"}</li>`);
+    else out.push(`<p>${html || "&nbsp;"}</p>`);
+  }
+
+  closeList();
+  return out.join("");
+}
+
+/* --------------------------------------------------------------------------
+   Trạng thái realtime
+   -------------------------------------------------------------------------- */
+
+function renderChatStatus() {
+  const badge = $("#chatUnreadBadge");
+  if (!badge) return;
+  const live = chatLive ? "● Trực tiếp" : "○ Đang kết nối lại";
+  const unread = chatUnreadTotal > 0 ? ` · ${chatUnreadTotal} tin chưa đọc` : "";
+  badge.textContent = `${live}${unread}`;
+  badge.className = `chat-live ${chatLive ? "on" : "off"}`;
+}
+
+function showChatNotice(message, isError = false) {
+  const hint = $("#chatComposerHint");
+  if (!hint) return;
+  hint.textContent = message;
+  hint.className = `chat-hint ${isError ? "over" : "info"}`;
+  window.clearTimeout(chatNoticeTimer);
+  chatNoticeTimer = window.setTimeout(() => updateComposerState(), 4000);
+}
+
+// Mở luồng SSE. EventSource tự gửi cookie phiên nên không cần token riêng.
+function connectChatStream() {
+  if (chatStream || typeof EventSource === "undefined") return;
+  try {
+    chatStream = new EventSource(`${base}/api/admin/chat/events`);
+  } catch (_) {
+    chatStream = null;
+    startChatPolling();
+    return;
+  }
+
+  chatStream.addEventListener("ready", () => {
+    chatStreamFailures = 0;
+    chatLive = true;
+    stopChatPolling();
+    renderChatStatus();
+  });
+
+  chatStream.addEventListener("chat", (event) => {
+    let payload;
+    try { payload = JSON.parse(event.data); } catch (_) { return; }
+    handleChatEvent(payload);
+  });
+
+  chatStream.onerror = () => {
+    chatLive = false;
+    renderChatStatus();
+    chatStreamFailures += 1;
+    // Sau vài lần lỗi liên tiếp thì bỏ SSE và chuyển sang hỏi định kỳ. Không thử
+    // lại mãi: nếu phiên đã hết hạn thì mọi lần thử đều 401.
+    if (chatStreamFailures >= CHAT_MAX_STREAM_FAILURES) {
+      try { chatStream.close(); } catch (_) {}
+      chatStream = null;
+      startChatPolling();
+    }
+  };
+}
+
+function startChatPolling() {
+  if (chatPollTimer) return;
+  chatPollTimer = window.setInterval(() => {
+    if (document.hidden) return;   // tab ẩn thì không tốn request
+    refreshChatFromServer();
+  }, CHAT_POLL_MS);
+}
+
+function stopChatPolling() {
+  if (!chatPollTimer) return;
+  window.clearInterval(chatPollTimer);
+  chatPollTimer = null;
+}
+
+async function refreshChatFromServer() {
+  await loadChatConversations({ silent: true });
+  if (chatActiveConv) await fetchNewChatMessages();
+}
+
+/* --------------------------------------------------------------------------
+   Xử lý sự kiện
+   -------------------------------------------------------------------------- */
+
+function handleChatEvent(event) {
+  if (!event || !event.type) return;
+
+  if (event.type === "message") {
+    mergeChatConversation(event.conversation);
+    renderChatConversations();
+
+    const active = chatActiveConv;
+    const isActive = active
+      && active.botId === event.botId
+      && String(active.chatId) === String(event.chatId);
+
+    if (isActive) {
+      appendChatMessage(event.message);
+      if (event.direction === "inbound") markActiveChatRead();
+    } else if (event.direction === "inbound") {
+      chatUnreadTotal += 1;
+    }
+    renderChatStatus();
+    return;
+  }
+
+  if (event.type === "status") {
+    const target = chatMessages.find((item) => item.messageId === event.messageId);
+    if (target) {
+      target.status = event.status;
+      if (event.error) target.error = event.error;
+      renderChatMessages();
+    }
+    return;
+  }
+
+  if (event.type === "read") {
+    const conv = chatConversations.find((item) => item.conversationId === event.conversationId);
+    if (conv) {
+      conv.unreadCount = 0;
+      renderChatConversations();
+    }
+  }
+}
+
+function mergeChatConversation(incoming) {
+  if (!incoming || !incoming.conversationId) return;
+  const index = chatConversations.findIndex((item) => item.conversationId === incoming.conversationId);
+  if (index === -1) {
+    chatConversations.unshift({
+      conversationId: incoming.conversationId,
+      botId: incoming.botId,
+      chatId: incoming.chatId,
+      displayName: incoming.displayName || null,
+      chatType: incoming.chatType || null,
+      unreadCount: incoming.unreadCount || 0,
+      lastMessageAt: incoming.lastMessageAt || null,
+      lastMessagePreview: incoming.lastMessagePreview || "",
+      lastMessageDirection: incoming.lastMessageDirection || null,
+      lastMessageStatus: incoming.lastMessageStatus || null
+    });
+    return;
+  }
+
+  const conv = chatConversations[index];
+  conv.lastMessageAt = incoming.lastMessageAt || conv.lastMessageAt;
+  conv.lastMessagePreview = incoming.lastMessagePreview ?? conv.lastMessagePreview;
+  conv.lastMessageDirection = incoming.lastMessageDirection || conv.lastMessageDirection;
+  conv.lastMessageStatus = incoming.lastMessageStatus || conv.lastMessageStatus;
+  if (incoming.displayName) conv.displayName = incoming.displayName;
+  if (typeof incoming.unreadCount === "number") conv.unreadCount = incoming.unreadCount;
+  else if (incoming.lastMessageDirection === "outbound") conv.unreadCount = 0;
+
+  // Hội thoại vừa có tin mới nhất thì đưa lên đầu danh sách.
+  if (index > 0) {
+    chatConversations.splice(index, 1);
+    chatConversations.unshift(conv);
+  }
+}
+
+function appendChatMessage(message) {
+  if (!message || !message.messageId) return;
+  if (chatSeenIds.has(message.messageId)) return;
+  chatSeenIds.add(message.messageId);
+  chatMessages.push(message);
+  chatMessages.sort((left, right) => String(left.createdAt).localeCompare(String(right.createdAt)));
+  renderChatMessages();
+}
+
+/* --------------------------------------------------------------------------
+   Danh sách hội thoại
+   -------------------------------------------------------------------------- */
+
+async function loadChatConversations(options = {}) {
   try {
     const data = await api("/api/admin/chat/conversations");
-    chatConversations = data.conversations || [];
-    renderChatConversations();
-    // Load unread count.
+    chatConversations = Array.isArray(data.conversations) ? data.conversations : [];
     const unread = await api("/api/admin/chat/unread");
-    const badge = $("#chatUnreadBadge");
-    if (badge) badge.textContent = unread.count > 0 ? `${unread.count} tin chưa đọc` : "Không có tin mới";
+    chatUnreadTotal = Number(unread.count) || 0;
+    renderChatConversations();
+    renderChatStatus();
   } catch (error) {
-    console.error("loadChatConversations:", error.message);
-    $("#chatConversationList").innerHTML = `<div class="empty-state">Lỗi tải hội thoại: ${escapeHtml(error.message)}</div>`;
+    if (!options.silent) {
+      const list = $("#chatConversationList");
+      if (list) list.innerHTML = `<div class="empty-state">Lỗi tải hội thoại: ${escapeHtml(error.message)}</div>`;
+    }
   }
+}
+
+function chatRelativeTime(value) {
+  if (!value) return "";
+  const then = new Date(value).getTime();
+  if (!Number.isFinite(then)) return "";
+  const diff = Date.now() - then;
+  if (diff < 60 * 1000) return "vừa xong";
+  if (diff < 60 * 60 * 1000) return `${Math.floor(diff / 60000)} phút`;
+  const date = new Date(then);
+  const today = new Date();
+  if (date.toDateString() === today.toDateString()) {
+    return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  }
+  return `${String(date.getDate()).padStart(2, "0")}/${String(date.getMonth() + 1).padStart(2, "0")}`;
 }
 
 function renderChatConversations() {
   const list = $("#chatConversationList");
   if (!list) return;
-  const search = $("#chatSearch")?.value.toLowerCase() || "";
-  const filtered = chatConversations.filter((c) => {
+
+  const search = ($("#chatSearch")?.value || "").toLowerCase();
+  const filtered = chatConversations.filter((conv) => {
     if (!search) return true;
-    return String(c.chatId || "").toLowerCase().includes(search) ||
-           String(c.displayName || "").toLowerCase().includes(search) ||
-           String(c.botId || "").toLowerCase().includes(search);
+    return String(conv.chatId || "").toLowerCase().includes(search)
+      || String(conv.displayName || "").toLowerCase().includes(search)
+      || String(conv.botId || "").toLowerCase().includes(search);
   });
 
   if (!filtered.length) {
@@ -1734,136 +2111,495 @@ function renderChatConversations() {
     return;
   }
 
-  list.innerHTML = filtered.map((c) => `
-    <div class="chat-conversation-item ${chatActiveConv?.conversationId === c.conversationId ? "active" : ""}" data-conv="${escapeHtml(c.conversationId)}" data-bot="${escapeHtml(c.botId)}" data-chat="${escapeHtml(c.chatId)}">
-      <div class="conv-name">${escapeHtml(c.displayName || c.chatId)} <small>· ${escapeHtml(c.botId)}</small></div>
-      <div class="conv-preview">${escapeHtml(c.lastMessagePreview || "(chưa có tin)")}</div>
-      <div class="conv-meta">
-        <span class="conv-time">${escapeHtml(formatDate(c.lastMessageAt))}</span>
-        ${c.unreadCount > 0 ? `<span class="conv-unread">${c.unreadCount}</span>` : ""}
-      </div>
-    </div>`).join("");
+  list.innerHTML = filtered.map((conv) => {
+    const active = chatActiveConv?.conversationId === conv.conversationId;
+    const direction = conv.lastMessageDirection === "outbound" ? "Bạn: " : "";
+    const unread = Number(conv.unreadCount) || 0;
+    return `
+      <div class="chat-conversation-item${active ? " active" : ""}" data-bot="${escapeHtml(conv.botId)}" data-chat="${escapeHtml(conv.chatId)}">
+        <div class="conv-row">
+          <span class="conv-name">${escapeHtml(conv.displayName || conv.chatId)}</span>
+          <span class="conv-time">${escapeHtml(chatRelativeTime(conv.lastMessageAt))}</span>
+        </div>
+        <div class="conv-row">
+          <span class="conv-preview">${escapeHtml(direction + (conv.lastMessagePreview || "(chưa có tin)"))}</span>
+          ${unread > 0 ? `<span class="conv-unread">${unread > 99 ? "99+" : unread}</span>` : ""}
+        </div>
+        <div class="conv-bot">${escapeHtml(conv.botId)}${conv.chatType ? ` · ${escapeHtml(conv.chatType)}` : ""}</div>
+      </div>`;
+  }).join("");
 
-  list.querySelectorAll("[data-conv]").forEach((item) => {
+  list.querySelectorAll("[data-chat]").forEach((item) => {
     item.addEventListener("click", () => openChatConversation(item.dataset.bot, item.dataset.chat));
   });
 }
 
+/* --------------------------------------------------------------------------
+   Khung tin nhắn
+   -------------------------------------------------------------------------- */
+
 async function openChatConversation(botId, chatId) {
-  const conv = chatConversations.find((c) => c.botId === botId && c.chatId === chatId);
+  const conv = chatConversations.find((item) => item.botId === botId && String(item.chatId) === String(chatId));
   chatActiveConv = conv || { botId, chatId, displayName: chatId };
   chatMessageCursor = null;
   chatMessages = [];
+  chatSeenIds = new Set();
+  clearChatAttachment();
 
   $("#chatThreadTitle").textContent = conv?.displayName || chatId;
   $("#chatThreadInfo").textContent = `${botId} · ${chatId}`;
   $("#chatSendForm").classList.remove("hidden");
   renderChatConversations();
+  renderChatMessages();
+
   await loadChatMessages();
-  // Mark as read.
-  try {
-    await api("/api/admin/chat/read", { method: "POST", body: JSON.stringify({ botId, chatId }) });
-    await loadChatConversations();
-  } catch (_) {}
+  await markActiveChatRead();
+  connectChatStream();
 }
 
 async function loadChatMessages() {
   if (!chatActiveConv) return;
   const { botId, chatId } = chatActiveConv;
   try {
-    let url = `/api/admin/chat/messages/${encodeURIComponent(botId)}/${encodeURIComponent(chatId)}?limit=50`;
-    if (chatMessageCursor) url += `&cursor=${encodeURIComponent(chatMessageCursor)}`;
+    const url = `/api/admin/chat/messages/${encodeURIComponent(botId)}/${encodeURIComponent(chatId)}?limit=50`;
     const data = await api(url);
-    chatMessages = data.messages || [];
+    chatMessages = Array.isArray(data.messages) ? data.messages : [];
     chatMessageCursor = data.nextCursor || null;
+    chatSeenIds = new Set(chatMessages.map((item) => item.messageId));
     renderChatMessages();
+    scrollChatToBottom(true);
   } catch (error) {
-    console.error("loadChatMessages:", error.message);
     $("#chatMessageList").innerHTML = `<div class="empty-state">Lỗi tải tin nhắn: ${escapeHtml(error.message)}</div>`;
   }
+}
+
+// Chỉ lấy phần tin MỚI hơn mốc cuối cùng đã có — dùng cho nhịp hỏi định kỳ khi
+// SSE không dùng được.
+async function fetchNewChatMessages() {
+  if (!chatActiveConv || !chatMessages.length) {
+    if (chatActiveConv) await loadChatMessages();
+    return;
+  }
+  const { botId, chatId } = chatActiveConv;
+  const since = chatMessages[chatMessages.length - 1].createdAt;
+  if (!since) return;
+  try {
+    const url = `/api/admin/chat/messages/${encodeURIComponent(botId)}/${encodeURIComponent(chatId)}?since=${encodeURIComponent(since)}`;
+    const data = await api(url);
+    for (const message of data.messages || []) appendChatMessage(message);
+  } catch (_) {
+    // Bỏ qua: nhịp sau sẽ thử lại.
+  }
+}
+
+async function markActiveChatRead() {
+  if (!chatActiveConv) return;
+  const { botId, chatId } = chatActiveConv;
+  try {
+    await api("/api/admin/chat/read", { method: "POST", body: JSON.stringify({ botId, chatId }) });
+    const conv = chatConversations.find((item) => item.conversationId === chatActiveConv?.conversationId);
+    if (conv) conv.unreadCount = 0;
+    chatUnreadTotal = Math.max(0, chatUnreadTotal - 1);
+    renderChatConversations();
+    renderChatStatus();
+  } catch (_) {}
+}
+
+function chatDayKey(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
+}
+
+function chatDayLabel(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const today = new Date();
+  const yesterday = new Date(today.getTime() - 86400000);
+  if (chatDayKey(date) === chatDayKey(today)) return "Hôm nay";
+  if (chatDayKey(date) === chatDayKey(yesterday)) return "Hôm qua";
+  return `${String(date.getDate()).padStart(2, "0")}/${String(date.getMonth() + 1).padStart(2, "0")}/${date.getFullYear()}`;
+}
+
+function renderChatAttachment(attachment) {
+  const url = attachment.url || (attachment.mediaId ? `/api/media/${attachment.mediaId}` : "");
+  if (!url) return "";
+
+  if (attachment.type === "image" || /^image\//.test(String(attachment.mimeType || ""))) {
+    return `<a class="msg-attachment image" href="${escapeHtml(url)}" target="_blank" rel="noopener">
+      <img src="${escapeHtml(url)}" alt="${escapeHtml(attachment.name || "ảnh")}" loading="lazy" />
+    </a>`;
+  }
+
+  const name = attachment.name || "tệp đính kèm";
+  const size = attachment.size ? ` · ${formatChatFileSize(attachment.size)}` : "";
+  return `<a class="msg-attachment file" href="${escapeHtml(url)}?download=1" target="_blank" rel="noopener">
+    <span class="file-icon">📄</span>
+    <span class="file-meta"><strong>${escapeHtml(name)}</strong><small>${escapeHtml(size.replace(" · ", ""))}</small></span>
+  </a>`;
+}
+
+function formatChatFileSize(bytes) {
+  const size = Number(bytes) || 0;
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(0)} KB`;
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function renderChatMessages() {
   const list = $("#chatMessageList");
   if (!list) return;
+
   if (!chatMessages.length) {
     list.innerHTML = '<div class="empty-state">Chưa có tin nhắn. Gửi tin đầu tiên bên dưới.</div>';
     return;
   }
-  list.innerHTML = chatMessages.map((m) => `
-    <div class="chat-message ${m.direction === "outbound" ? "outbound" : "inbound"}">
-      ${escapeHtml(m.text || "(ảnh)")}
-      ${m.attachments?.length ? `<br><small>${m.attachments.length} ảnh đính kèm</small>` : ""}
-      <div class="msg-meta">${escapeHtml(formatDate(m.sentAt || m.receivedAt))} · ${escapeHtml(m.status)}</div>
-    </div>`).join("");
-  list.scrollTop = list.scrollHeight;
+
+  let lastDay = null;
+  const parts = [];
+
+  for (const message of chatMessages) {
+    const stamp = message.createdAt || message.sentAt || message.receivedAt;
+    const day = chatDayKey(stamp);
+    if (day && day !== lastDay) {
+      parts.push(`<div class="chat-day-sep"><span>${escapeHtml(chatDayLabel(stamp))}</span></div>`);
+      lastDay = day;
+    }
+
+    const outbound = message.direction === "outbound";
+    const attachments = Array.isArray(message.attachments) ? message.attachments : [];
+    const body = message.text ? renderChatPreviewHtml(message.text) : "";
+    const time = stamp ? new Date(stamp) : null;
+    const clock = time && !Number.isNaN(time.getTime())
+      ? `${String(time.getHours()).padStart(2, "0")}:${String(time.getMinutes()).padStart(2, "0")}`
+      : "";
+    const status = outbound
+      ? (message.status === "failed" ? '<span class="msg-status failed">✕ Lỗi</span>'
+        : message.status === "pending" ? '<span class="msg-status">◷ Đang gửi</span>'
+        : '<span class="msg-status ok">✓</span>')
+      : "";
+
+    parts.push(`<div class="chat-bubble-row ${outbound ? "outbound" : "inbound"}">
+      <div class="chat-message ${outbound ? "outbound" : "inbound"}">
+        ${attachments.map(renderChatAttachment).join("")}
+        ${body ? `<div class="msg-text">${body}</div>` : ""}
+        <div class="msg-meta">${escapeHtml(clock)} ${status}</div>
+      </div>
+    </div>`);
+  }
+
+  list.innerHTML = parts.join("");
+  scrollChatToBottom();
 }
 
-// Send message.
-$("#chatSendForm")?.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  if (!chatActiveConv) return;
-  const input = $("#chatInput");
+function scrollChatToBottom(force = false) {
+  const list = $("#chatMessageList");
+  if (!list) return;
+  const distance = list.scrollHeight - list.scrollTop - list.clientHeight;
+  // Chỉ tự cuộn khi người dùng đang ở gần cuối: nếu họ đang đọc tin cũ thì không
+  // được giật khung nhìn.
+  if (force || distance < 120) list.scrollTop = list.scrollHeight;
+}
+
+/* --------------------------------------------------------------------------
+   Composer: định dạng, đính kèm, gửi
+   -------------------------------------------------------------------------- */
+
+function chatInput() { return $("#chatInput"); }
+
+function updateComposerState() {
+  const input = chatInput();
+  if (!input) return;
+  const length = input.value.length;
+  const hasAttachment = Boolean(chatPendingAttachment);
+  const button = $("#chatSendButton");
+  if (button) button.disabled = chatSending || (length === 0 && !hasAttachment);
+
+  const hint = $("#chatComposerHint");
+  if (hint) {
+    if (length > CHAT_MAX_TEXT) {
+      hint.textContent = `Vượt ${length - CHAT_MAX_TEXT} ký tự`;
+      hint.className = "chat-hint over";
+    } else {
+      hint.textContent = length ? `${length}/${CHAT_MAX_TEXT}` : "";
+      hint.className = "chat-hint";
+    }
+  }
+
+  if (chatPreviewVisible) renderChatPreviewBox();
+}
+
+function wrapChatSelection(open, close) {
+  const input = chatInput();
+  if (!input) return;
+  const start = input.selectionStart;
+  const end = input.selectionEnd;
+  const value = input.value;
+  const selected = value.slice(start, end);
+  const next = `${value.slice(0, start)}${open}${selected}${close}${value.slice(end)}`;
+  input.value = next;
+
+  const caret = selected
+    ? start + open.length + selected.length + close.length
+    : start + open.length;
+  input.setSelectionRange(caret, caret);
+  input.focus();
+  updateComposerState();
+}
+
+function applyChatLinePrefix(prefixFor) {
+  const input = chatInput();
+  if (!input) return;
+  const value = input.value;
+  const start = input.selectionStart;
+  const end = input.selectionEnd;
+
+  const lineStart = value.lastIndexOf("\n", start - 1) + 1;
+  const lineEndRaw = value.indexOf("\n", end);
+  const lineEnd = lineEndRaw === -1 ? value.length : lineEndRaw;
+
+  const lines = value.slice(lineStart, lineEnd).split("\n");
+  const firstPrefix = prefixFor(0);
+  const allPrefixed = lines.every((line, index) => line.startsWith(prefixFor(index)));
+
+  const next = lines.map((line, index) => {
+    const prefix = prefixFor(index);
+    if (allPrefixed) return line.slice(prefix.length);
+    return line.startsWith(prefix) ? line : `${prefix}${line}`;
+  }).join("\n");
+
+  input.value = `${value.slice(0, lineStart)}${next}${value.slice(lineEnd)}`;
+  const delta = next.length - (lineEnd - lineStart);
+  input.setSelectionRange(start + delta, start + delta);
+  input.focus();
+  updateComposerState();
+}
+
+function applyChatFormat(kind) {
+  if (CHAT_INLINE_MARKERS[kind]) {
+    const [open, close] = CHAT_INLINE_MARKERS[kind];
+    wrapChatSelection(open, close);
+    return;
+  }
+  if (CHAT_LINE_PREFIXES[kind]) {
+    applyChatLinePrefix(CHAT_LINE_PREFIXES[kind]);
+  }
+}
+
+function renderChatPreviewBox() {
+  const box = $("#chatPreviewBox");
+  const input = chatInput();
+  if (!box || !input) return;
+  const html = renderChatPreviewHtml(input.value);
+  box.innerHTML = html
+    ? `<div class="preview-label">Xem trước</div><div class="preview-body">${html}</div>`
+    : '<div class="preview-label">Xem trước</div><div class="preview-body muted">Chưa có nội dung.</div>';
+}
+
+function clearChatAttachment() {
+  if (chatPendingAttachment?.previewUrl) {
+    try { URL.revokeObjectURL(chatPendingAttachment.previewUrl); } catch (_) {}
+  }
+  chatPendingAttachment = null;
+  const box = $("#chatAttachPreview");
+  if (box) {
+    box.hidden = true;
+    box.innerHTML = "";
+  }
+  updateComposerState();
+}
+
+function renderChatAttachmentPreview() {
+  const box = $("#chatAttachPreview");
+  if (!box) return;
+  const att = chatPendingAttachment;
+  if (!att) {
+    box.hidden = true;
+    box.innerHTML = "";
+    return;
+  }
+
+  const thumb = att.kind === "image" && att.previewUrl
+    ? `<img src="${escapeHtml(att.previewUrl)}" alt="${escapeHtml(att.name)}" />`
+    : `<span class="attach-icon">${att.kind === "image" ? "🖼" : "📄"}</span>`;
+
+  box.innerHTML = `
+    <div class="attach-card">
+      ${thumb}
+      <div class="attach-meta">
+        <strong>${escapeHtml(att.name)}</strong>
+        <small>${escapeHtml(formatChatFileSize(att.size))}${att.kind === "file" ? " · gửi dạng tệp" : ""}</small>
+      </div>
+      <button type="button" class="attach-remove" id="chatAttachRemove" title="Bỏ đính kèm">×</button>
+    </div>`;
+
+  box.hidden = false;
+  $("#chatAttachRemove")?.addEventListener("click", clearChatAttachment);
+  updateComposerState();
+}
+
+async function uploadChatAttachment(file) {
+  const isImage = /^image\/(jpeg|png|gif|webp)$/i.test(file.type);
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("mediaType", isImage ? "chat-image" : "chat-file");
+
+  showChatNotice("Đang tải tệp lên…");
+  const response = await fetch(`${base}/api/admin/media/upload`, {
+    method: "POST",
+    credentials: "same-origin",
+    body: formData
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || "Tải tệp thất bại");
+
+  return {
+    kind: isImage ? "image" : "file",
+    media: data.media,
+    name: file.name || data.media?.originalName || "tệp",
+    size: file.size || data.media?.size || 0,
+    previewUrl: isImage ? URL.createObjectURL(file) : null
+  };
+}
+
+async function submitChatMessage() {
+  if (!chatActiveConv || chatSending) return;
+  const input = chatInput();
+  if (!input) return;
+
   const text = input.value.trim();
-  if (!text) return;
+  if (!text && !chatPendingAttachment) return;
+  if (text.length > CHAT_MAX_TEXT) {
+    showChatNotice(`Tin nhắn vượt ${text.length - CHAT_MAX_TEXT} ký tự`, true);
+    return;
+  }
 
   const { botId, chatId } = chatActiveConv;
-  input.value = "";
-  input.disabled = true;
+  const attachment = chatPendingAttachment;
+
+  chatSending = true;
+  updateComposerState();
 
   try {
+    const body = { botId, chatId, text };
+    if (attachment?.kind === "image") body.mediaId = attachment.media.mediaId;
+    if (attachment?.kind === "file") body.fileMediaId = attachment.media.mediaId;
+
     const result = await api("/api/admin/chat/send", {
       method: "POST",
-      body: JSON.stringify({ botId, chatId, text })
+      body: JSON.stringify(body)
     });
-    if (result.sent) {
-      await loadChatMessages();
-    } else {
-      alert(`Gửi thất bại: ${result.error || "lỗi không rõ"}`);
+
+    if (!result.sent) {
+      showChatNotice(`Gửi thất bại: ${result.error || "lỗi không rõ"}`, true);
+      return;
     }
+
+    input.value = "";
+    clearChatAttachment();
+    if (result.deliveryMode === "link") {
+      showChatNotice("Bot chính thức chưa hỗ trợ đính kèm tệp — đã gửi dạng liên kết tải.");
+    }
+    await fetchNewChatMessages();
   } catch (error) {
-    alert(`Lỗi: ${error.message}`);
+    showChatNotice(`Lỗi: ${error.message}`, true);
   } finally {
-    input.disabled = false;
+    chatSending = false;
+    updateComposerState();
     input.focus();
   }
+}
+
+/* --------------------------------------------------------------------------
+   Gắn sự kiện
+   -------------------------------------------------------------------------- */
+
+$("#chatSendForm")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  submitChatMessage();
 });
 
-// Send image.
-$("#chatSendImageButton")?.addEventListener("click", () => $("#chatImageInput").click());
-$("#chatImageInput")?.addEventListener("change", async (e) => {
-  if (!chatActiveConv || !e.target.files[0]) return;
-  const { botId, chatId } = chatActiveConv;
-  const formData = new FormData();
-  formData.append("file", e.target.files[0]);
-  // Ảnh chat KHÔNG phải ảnh trợ giúp — khai báo rõ để không lẫn vào tab Help Images.
-  formData.append("mediaType", "chat-image");
+$("#chatInput")?.addEventListener("keydown", (event) => {
+  // Ctrl/Cmd + B/I/U: định dạng nhanh như trình soạn thảo quen thuộc.
+  if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey) {
+    const shortcut = { b: "bold", i: "italic", u: "underline" }[event.key.toLowerCase()];
+    if (shortcut) {
+      event.preventDefault();
+      applyChatFormat(shortcut);
+      return;
+    }
+  }
+
+  if (event.key !== "Enter") return;
+  // Shift+Enter: xuống dòng — để trình soạn thảo tự xử lý.
+  if (event.shiftKey) return;
+  // Đang gõ tiếng Việt qua bộ gõ (Telex/VNI): Enter là để CHỐT ÂM TIẾT, không
+  // phải gửi tin. Bỏ qua để không gửi tin dở dang.
+  if (event.isComposing || event.keyCode === 229) return;
+
+  event.preventDefault();
+  submitChatMessage();
+});
+
+$("#chatInput")?.addEventListener("input", updateComposerState);
+
+// Giữ vùng chọn của textarea khi bấm nút định dạng: nếu để nút nhận focus,
+// một số trình duyệt đặt lại selection và việc bọc ký hiệu sẽ rơi vào cuối dòng.
+$("#chatFormatBar")?.addEventListener("mousedown", (event) => {
+  if (event.target.closest("[data-format]")) event.preventDefault();
+});
+
+$("#chatFormatBar")?.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-format]");
+  if (!button) return;
+  event.preventDefault();
+  applyChatFormat(button.dataset.format);
+});
+
+$("#chatPreviewToggle")?.addEventListener("click", () => {
+  chatPreviewVisible = !chatPreviewVisible;
+  const box = $("#chatPreviewBox");
+  if (box) box.hidden = !chatPreviewVisible;
+  const toggle = $("#chatPreviewToggle");
+  if (toggle) {
+    toggle.classList.toggle("active", chatPreviewVisible);
+    toggle.setAttribute("aria-pressed", String(chatPreviewVisible));
+  }
+  if (chatPreviewVisible) renderChatPreviewBox();
+});
+
+$("#chatAttachButton")?.addEventListener("click", () => $("#chatFileInput")?.click());
+
+$("#chatFileInput")?.addEventListener("change", async (event) => {
+  const file = event.target.files?.[0];
+  event.target.value = "";
+  if (!file) return;
+
+  if (chatPendingAttachment) {
+    showChatNotice("Chỉ gửi được một tệp mỗi tin — hãy bỏ tệp đang chờ trước.", true);
+    return;
+  }
 
   try {
-    // Upload image first.
-    const uploadResp = await fetch(`${base}/api/admin/help-images/upload`, {
-      method: "POST",
-      credentials: "same-origin",
-      body: formData
-    });
-    const uploadData = await uploadResp.json().catch(() => ({}));
-    if (!uploadResp.ok) throw new Error(uploadData.error || "Upload thất bại");
-
-    // Send via chat with mediaId.
-    const result = await api("/api/admin/chat/send", {
-      method: "POST",
-      body: JSON.stringify({ botId, chatId, text: "", mediaId: uploadData.media.mediaId })
-    });
-    if (result.sent) {
-      await loadChatMessages();
-    } else {
-      alert(`Gửi ảnh thất bại: ${result.error || "lỗi không rõ"}`);
-    }
+    chatPendingAttachment = await uploadChatAttachment(file);
+    renderChatAttachmentPreview();
+    showChatNotice("");
   } catch (error) {
-    alert(`Lỗi: ${error.message}`);
+    showChatNotice(`Tải tệp thất bại: ${error.message}`, true);
   }
-  e.target.value = "";
 });
 
 $("#chatSearch")?.addEventListener("input", renderChatConversations);
-$("#chatRefresh")?.addEventListener("click", loadChatConversations);
+$("#chatRefresh")?.addEventListener("click", () => refreshChatFromServer());
+
+// Đóng luồng khi rời tab hoặc ẩn trang để không giữ kết nối vô ích.
+window.addEventListener("beforeunload", () => {
+  try { chatStream?.close(); } catch (_) {}
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) return;
+  // Quay lại tab: hội thoại có thể đã có tin mới trong lúc tab bị treo.
+  if (!chatStream) connectChatStream();
+  refreshChatFromServer();
+});

@@ -21,6 +21,7 @@
 // ============================================================================
 
 const { normalizeBotId, storageKeyPrefix } = require("./bots");
+const { CHAT_EVENT, publishChatEvent } = require("./chatEvents");
 
 const CONVERSATIONS_COLLECTION = "bot_conversations";
 const MESSAGES_SUBCOLLECTION = "messages";
@@ -174,6 +175,16 @@ async function recordMessage({
                 if (error) statusUpdate.error = String(error).slice(0, 500);
                 statusUpdate.status = status;
                 await msgRef.set(statusUpdate, { merge: true });
+                // Báo cho UI đang mở: trạng thái gửi của tin này vừa đổi.
+                publishChatEvent({
+                    type: CHAT_EVENT.STATUS,
+                    conversationId: convId,
+                    botId: normalizeBotId(botId) || "bot1",
+                    chatId: String(chatId),
+                    messageId: msgId,
+                    status,
+                    error: error ? String(error).slice(0, 500) : null
+                });
             }
             return { recorded: false, reason: "duplicate", messageId: msgId };
         }
@@ -203,7 +214,10 @@ async function recordMessage({
         await msgRef.set(message);
 
         // Cập nhật conversation metadata.
-        const preview = String(text || "").slice(0, 120);
+        const attachmentCount = Array.isArray(attachments) ? attachments.length : 0;
+        const preview = String(text || "").trim()
+            ? String(text).slice(0, 120)
+            : (attachmentCount > 0 ? "[tệp đính kèm]" : "");
         const convUpdate = {
             lastMessageAt: ts,
             lastMessagePreview: preview,
@@ -222,6 +236,28 @@ async function recordMessage({
         }
 
         await db.collection(CONVERSATIONS_COLLECTION).doc(convId).set(convUpdate, { merge: true });
+
+        // Đẩy sự kiện xuống dashboard đang mở để không phải F5.
+        publishChatEvent({
+            type: CHAT_EVENT.MESSAGE,
+            conversationId: convId,
+            botId: message.botId,
+            chatId: message.chatId,
+            direction,
+            message,
+            conversation: {
+                conversationId: convId,
+                botId: message.botId,
+                chatId: message.chatId,
+                lastMessageAt: convUpdate.lastMessageAt,
+                lastMessagePreview: convUpdate.lastMessagePreview,
+                lastMessageDirection: convUpdate.lastMessageDirection,
+                lastMessageStatus: convUpdate.lastMessageStatus,
+                unreadCount: convUpdate.unreadCount,
+                displayName: displayName || null,
+                chatType: chatType || null
+            }
+        });
 
         return { recorded: true, messageId: msgId };
     } catch (error) {
@@ -295,6 +331,27 @@ async function getMessageHistory(botId, chatId, options = {}) {
     const convId = conversationIdFor(botId, chatId);
     const limit = Math.min(Number(options.limit) || 50, 200);
 
+    // Chế độ TĂNG DẦN: chỉ lấy tin mới hơn mốc `since`. Dùng cho cập nhật
+    // realtime — client đã có lịch sử cũ, chỉ cần phần vừa phát sinh.
+    // where + orderBy trên CÙNG một trường nên không cần composite index.
+    if (options.since) {
+        try {
+            const snapshot = await db.collection(CONVERSATIONS_COLLECTION)
+                .doc(convId)
+                .collection(MESSAGES_SUBCOLLECTION)
+                .where("createdAt", ">", String(options.since))
+                .orderBy("createdAt", "asc")
+                .limit(limit)
+                .get();
+            const messages = [];
+            snapshot.forEach((doc) => messages.push(doc.data()));
+            return { messages, nextCursor: null, incremental: true };
+        } catch (error) {
+            console.error(`[MessageRecorder] lỗi getMessageHistory(since) ${convId}:`, error.message);
+            return { messages: [], nextCursor: null, incremental: true };
+        }
+    }
+
     try {
         let query = db.collection(CONVERSATIONS_COLLECTION)
             .doc(convId)
@@ -347,6 +404,12 @@ async function markConversationRead(botId, chatId) {
             unreadCount: 0,
             readAt: new Date().toISOString()
         }, { merge: true });
+        publishChatEvent({
+            type: CHAT_EVENT.READ,
+            conversationId: convId,
+            botId: normalizeBotId(botId) || "bot1",
+            chatId: String(chatId)
+        });
         return true;
     } catch (error) {
         console.error(`[MessageRecorder] lỗi markConversationRead ${convId}:`, error.message);
@@ -381,6 +444,16 @@ async function updateMessageStatus(botId, chatId, messageId, { status, error = n
             lastMessageStatus: status,
             updatedAt: now
         }, { merge: true });
+
+        publishChatEvent({
+            type: CHAT_EVENT.STATUS,
+            conversationId: convId,
+            botId: normalizeBotId(botId) || "bot1",
+            chatId: String(chatId),
+            messageId,
+            status,
+            error: error ? String(error).slice(0, 500) : null
+        });
 
         return true;
     } catch (error) {

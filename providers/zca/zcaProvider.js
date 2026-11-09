@@ -521,6 +521,48 @@ function createZcaProvider(options = {}) {
     // Cho phép nơi khác (kiểm thử, chẩn đoán) xem trước payload mà không gửi.
     provider.renderMessage = (text) => renderZcaRichText(String(text));
 
+    // Gửi tệp đính kèm qua tài khoản Zalo cá nhân.
+    //
+    // zca-js nhận tệp qua `attachments` của sendMessage, với nội dung là Buffer.
+    // Đây là đường DUY NHẤT gửi được tệp cho ZCA: URL công khai của dashboard là
+    // http://localhost:<port>, máy chủ Zalo không tải được.
+    provider.sendFile = async function sendFile(chatId, buffer, options = {}) {
+        if (!provider.api) {
+            throw new Error("ZCA chua dang nhap nen khong gui duoc tep");
+        }
+        if (!Buffer.isBuffer(buffer)) {
+            throw new Error("ZCA chi gui duoc tep tu Buffer");
+        }
+        const threadId = String(chatId);
+        const threadType = provider.threadTypes?.get(threadId) === "group" ? ThreadType.Group : ThreadType.User;
+        const filename = String(options.filename || `tepdinhkem_${Date.now()}.bin`);
+
+        const payload = {
+            msg: options.caption || "",
+            attachments: [{
+                data: buffer,
+                filename,
+                metadata: { totalSize: buffer.length }
+            }]
+        };
+
+        try {
+            const result = await provider.api.sendMessage(payload, threadId, threadType);
+            provider.lastActivityAt = new Date().toISOString();
+            return result;
+        } catch (error) {
+            // Một số phiên bản Zalo từ chối caption kèm tệp: thử lại không caption.
+            if (!options.caption) throw error;
+            log("warn", `gui tep kem caption that bai (${error.message}), thu lai khong caption`);
+            const fallback = {
+                attachments: [{ data: buffer, filename, metadata: { totalSize: buffer.length } }]
+            };
+            const result = await provider.api.sendMessage(fallback, threadId, threadType);
+            provider.lastActivityAt = new Date().toISOString();
+            return result;
+        }
+    };
+
     // Ghi nhớ loại luồng của từng chat để lần gửi sau dùng đúng.
     provider.threadTypes = new Map();
     provider.rememberThread = (chatId, chatType) => {

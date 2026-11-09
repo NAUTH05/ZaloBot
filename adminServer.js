@@ -56,16 +56,21 @@ const { getSystemLogs } = require("./operationalLog");
 const { describeRegisteredBots, getBot, listBots, listEnabledBots, runWithBot } = require("./botContext");
 const { LEGACY_BOT_ID, normalizeBotId } = require("./bots");
 const { HELP_COMMANDS } = require("./helpContent");
+const { getChatEventStats, onChatEvent } = require("./chatEvents");
 const {
     storeMedia,
+    storeChatFile,
     getMediaInfo,
     deleteMedia,
     listMediaByType,
     associateHelpImage,
     getHelpImagesForCommand,
     validateUploadedFile,
+    validateChatFile,
+    mimeForExtension,
     MEDIA_TYPES,
-    MAX_FILE_SIZE
+    MAX_FILE_SIZE,
+    MAX_CHAT_FILE_SIZE
 } = require("./mediaStorage");
 const {
     listConversations: listMsgConversations,
@@ -184,7 +189,7 @@ const API_PREFIX_REGEX = API_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const STATIC_DIR = path.join(__dirname, "admin-ui");
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 const MAX_BODY_BYTES = 64 * 1024;
-const MAX_UPLOAD_BYTES = MAX_FILE_SIZE;  // 5 MB, đồng bộ với mediaStorage
+const MAX_UPLOAD_BYTES = MAX_CHAT_FILE_SIZE;  // 20 MB, đồng bộ với mediaStorage
 const sessions = new Map();
 const failedLogins = new Map();
 const requestCounts = new Map();
@@ -239,7 +244,8 @@ function json(res, status, payload, extraHeaders = {}) {
 
 function securityHeaders() {
     return {
-        "Content-Security-Policy": "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+        // img-src có blob: để xem trước ảnh đính kèm ngay trên máy (chưa upload).
+        "Content-Security-Policy": "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff",
         "X-Frame-Options": "DENY",
@@ -247,14 +253,94 @@ function securityHeaders() {
     };
 }
 
-function sendFile(res, filePath, contentType) {
+function sendFile(res, filePath, contentType, extraHeaders = {}) {
     try {
         const body = fs.readFileSync(filePath);
-        res.writeHead(200, { "Content-Type": contentType, "Cache-Control": "no-cache", ...securityHeaders() });
+        res.writeHead(200, {
+            "Content-Type": contentType,
+            "Cache-Control": "no-cache",
+            ...securityHeaders(),
+            ...extraHeaders
+        });
         res.end(body);
     } catch (_) {
         json(res, 404, { error: "Not found" });
     }
+}
+
+// Tạo header Content-Disposition an toàn cho tên tệp có dấu tiếng Việt.
+//
+// `filename=` chỉ nhận ASCII; tên có dấu phải đặt ở `filename*=UTF-8''...` theo
+// RFC 5987. Giữ cả hai để trình duyệt cũ vẫn tải được với tên đã lược dấu.
+function contentDisposition(filename, inline = false) {
+    const kind = inline ? "inline" : "attachment";
+    const raw = String(filename || "tepdinhkem").slice(0, 180);
+    const ascii = raw.replace(/[^\x20-\x7E]/g, "_").replace(/["\\]/g, "_");
+    const encoded = encodeURIComponent(raw).replace(/['()*]/g, (char) =>
+        `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+    return `${kind}; filename="${ascii}"; filename*=UTF-8''${encoded}`;
+}
+
+// ---------------------------------------------------------------------------
+// SSE cho Chat Center — đẩy tin mới xuống dashboard, không cần F5.
+//
+// Vì sao SSE chứ không WebSocket: chỉ cần một chiều server → client, chạy trên
+// đúng HTTP server hiện có, dùng cookie phiên sẵn có (EventSource gửi cookie
+// same-origin), và tự kết nối lại. WebSocket sẽ cần thêm thư viện và đường auth
+// riêng.
+//
+// Giới hạn số kết nối để một tab hỏng không mở được vô hạn luồng.
+// ---------------------------------------------------------------------------
+const MAX_EVENT_STREAMS = 20;
+const activeEventStreams = new Set();
+const EVENT_PING_MS = 20000;
+
+function streamChatEvents(request, response) {
+    if (activeEventStreams.size >= MAX_EVENT_STREAMS) {
+        return json(response, 503, { error: "Quá nhiều kết nối realtime đang mở" });
+    }
+
+    response.writeHead(200, {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        "Connection": "keep-alive",
+        // Tắt buffer của nginx: thiếu header này, tin nhắn bị giữ tới khi đủ
+        // 4KB mới tới trình duyệt, nhìn như realtime bị hỏng.
+        "X-Accel-Buffering": "no",
+        ...securityHeaders()
+    });
+    // Khung mở đầu: đóng vai trò handshake để client biết đã kết nối.
+    response.write(`event: ready\ndata: ${JSON.stringify({ ok: true })}\n\n`);
+    if (typeof response.flushHeaders === "function") response.flushHeaders();
+
+    const write = (chunk) => {
+        try { response.write(chunk); } catch (_) { /* client đã đóng */ }
+    };
+
+    const unsubscribe = onChatEvent((event) => {
+        write(`event: chat\ndata: ${JSON.stringify(event)}\n\n`);
+    });
+
+    // Nhịp giữ kết nối: proxy hay đóng luồng im lặng sau ~60s.
+    const ping = setInterval(() => write(": ping\n\n"), EVENT_PING_MS);
+    ping.unref?.();
+
+    activeEventStreams.add(response);
+
+    let closed = false;
+    const cleanup = () => {
+        if (closed) return;
+        closed = true;
+        clearInterval(ping);
+        unsubscribe();
+        activeEventStreams.delete(response);
+        try { response.end(); } catch (_) {}
+    };
+
+    request.on("close", cleanup);
+    request.on("aborted", cleanup);
+    response.on("error", cleanup);
+    response.on("close", cleanup);
 }
 
 function sameOrigin(request) {
@@ -1571,7 +1657,10 @@ async function handleApi(request, response, url, options = {}) {
         return json(response, 200, { images });
     }
 
-    if (url.pathname === `${API_PREFIX}/help-images/upload` && request.method === "POST") {
+    // Một đường upload duy nhất cho ba loại media. `/media/upload` là tên chính
+    // thức; `/help-images/upload` giữ lại cho client cũ.
+    if ((url.pathname === `${API_PREFIX}/media/upload` || url.pathname === `${API_PREFIX}/help-images/upload`)
+        && request.method === "POST") {
         let upload;
         try {
             upload = await readUploadBody(request);
@@ -1579,16 +1668,35 @@ async function handleApi(request, response, url, options = {}) {
             return json(response, 400, { error: error.message });
         }
         if (!upload.file) {
-            return json(response, 400, { error: "Không tìm thấy file ảnh trong upload." });
+            return json(response, 400, { error: "Không tìm thấy tệp trong upload." });
         }
+
+        // Mặc định là ảnh trợ giúp để không phá vỡ client cũ. Ảnh chat và tệp
+        // đính kèm phải khai báo tường minh, nếu không chúng sẽ lẫn vào danh sách
+        // ảnh hướng dẫn của /help.
+        const requestedType = String(upload.fields.mediaType || "").trim();
+
+        if (requestedType === MEDIA_TYPES.CHAT_FILE) {
+            const check = validateChatFile(upload.file);
+            if (!check.valid) return json(response, 400, { error: check.error });
+            try {
+                const media = await storeChatFile({
+                    buffer: check.buffer,
+                    originalName: upload.file.originalName,
+                    declaredMime: upload.file.declaredMime
+                });
+                audit("media.upload", request, { mediaId: media.mediaId, mediaType: MEDIA_TYPES.CHAT_FILE, result: "success" });
+                return json(response, 201, { media });
+            } catch (error) {
+                audit("media.upload", request, { result: "error", error: error.message });
+                return json(response, 400, { error: error.message });
+            }
+        }
+
         const validation = validateUploadedFile(upload.file);
         if (!validation.valid) {
             return json(response, 400, { error: validation.error });
         }
-        // Cùng một đường upload phục vụ hai loại ảnh. Mặc định là ảnh trợ giúp để
-        // không phá vỡ client cũ; ảnh chat phải khai báo tường minh, nếu không nó
-        // sẽ lẫn vào danh sách ảnh hướng dẫn của /help.
-        const requestedType = String(upload.fields.mediaType || "").trim();
         const mediaType = requestedType === MEDIA_TYPES.CHAT_IMAGE
             ? MEDIA_TYPES.CHAT_IMAGE
             : MEDIA_TYPES.HELP_IMAGE;
@@ -1609,7 +1717,7 @@ async function handleApi(request, response, url, options = {}) {
             audit("media.upload", request, { mediaId: media.mediaId, mediaType, command, result: "success" });
             return json(response, 201, { media });
         } catch (error) {
-            audit("help-image.upload", request, { result: "error", error: error.message });
+            audit("media.upload", request, { result: "error", error: error.message });
             return json(response, 400, { error: error.message });
         }
     }
@@ -1641,10 +1749,19 @@ async function handleApi(request, response, url, options = {}) {
     //   GET  .../chat/conversations          — danh sách hội thoại
     //   GET  .../chat/conversations/:botId/:chatId — chi tiết hội thoại
     //   GET  .../chat/messages/:botId/:chatId — lịch sử tin nhắn (cursor)
-    //   POST .../chat/send                   — gửi tin nhắn (text/image)
+    //   POST .../chat/send                   — gửi tin nhắn (text/image/file)
     //   POST .../chat/read                   — đánh dấu đã đọc
     //   GET  .../chat/unread                 — số chưa đọc
+    //   GET  .../chat/events                 — SSE: tin mới đẩy xuống UI
     // ---------------------------------------------------------------------
+    if (url.pathname === `${API_PREFIX}/chat/events` && request.method === "GET") {
+        return streamChatEvents(request, response);
+    }
+
+    if (url.pathname === `${API_PREFIX}/chat/events/stats` && request.method === "GET") {
+        return json(response, 200, { ...getChatEventStats(), streams: activeEventStreams.size });
+    }
+
     if (url.pathname === `${API_PREFIX}/chat/conversations` && request.method === "GET") {
         const botId = url.searchParams.get("botId") || null;
         const cursor = url.searchParams.get("cursor") || null;
@@ -1682,23 +1799,38 @@ async function handleApi(request, response, url, options = {}) {
     }
 
     if (url.pathname === `${API_PREFIX}/chat/send` && request.method === "POST") {
-        if (typeof options.sendChatMessage !== "function") {
-            return json(response, 503, { error: "Chat service chưa sẵn sàng" });
-        }
         let body;
         try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
         const botId = String(body?.botId || "").trim();
         const chatId = String(body?.chatId || "").trim();
         const text = String(body?.text || "").trim();
+        const mediaId = body?.mediaId || null;
+        const fileMediaId = body?.fileMediaId || null;
+
         if (!botId || !chatId) {
             return json(response, 400, { error: "botId và chatId là bắt buộc." });
         }
-        if (!text && !body?.mediaId) {
-            return json(response, 400, { error: "text hoặc mediaId là bắt buộc." });
+        if (!text && !mediaId && !fileMediaId) {
+            return json(response, 400, { error: "Cần text, mediaId hoặc fileMediaId." });
         }
+
         try {
-            const result = await options.sendChatMessage({ botId, chatId, text, mediaId: body?.mediaId });
-            audit("chat.send", request, { botId, chatId, result: result?.sent ? "success" : "error" });
+            // Tệp đính kèm đi qua hàm riêng vì đường gửi của hai provider khác
+            // nhau (ZCA gửi Buffer, bot chính thức có thể chỉ gửi được liên kết).
+            const sender = fileMediaId ? options.sendChatFile : options.sendChatMessage;
+            if (typeof sender !== "function") {
+                return json(response, 503, { error: "Chat service chưa sẵn sàng" });
+            }
+            const result = fileMediaId
+                ? await sender({ botId, chatId, fileMediaId, caption: text })
+                : await sender({ botId, chatId, text, mediaId });
+
+            audit("chat.send", request, {
+                botId,
+                chatId,
+                kind: fileMediaId ? "file" : (mediaId ? "image" : "text"),
+                result: result?.sent ? "success" : "error"
+            });
             return json(response, 200, result);
         } catch (error) {
             audit("chat.send", request, { botId, chatId, result: "error", error: error.message });
@@ -1733,7 +1865,20 @@ function createAdminServer(options = {}) {
             try {
                 const info = await getMediaInfo(mediaMatch[1]);
                 if (!info) return json(response, 404, { error: "Media not found" });
-                return sendFile(response, info.filePath, info.mimeType || "application/octet-stream");
+
+                // Ảnh hiển thị trực tiếp; tệp đính kèm luôn tải về. Ép tải về là
+                // lớp bảo vệ thứ hai: kể cả khi định dạng bị đoán sai, trình duyệt
+                // cũng không hiển thị nó trong origin của dashboard.
+                const forceDownload = String(url.searchParams.get("download") || "") === "1";
+                const isFile = info.mediaType === MEDIA_TYPES.CHAT_FILE || forceDownload;
+                const disposition = contentDisposition(
+                    info.originalName || (isFile ? "tepdinhkem" : "hinhanh"),
+                    !isFile
+                );
+
+                return sendFile(response, info.filePath, info.mimeType || "application/octet-stream", {
+                    "Content-Disposition": disposition
+                });
             } catch (error) {
                 return json(response, 500, { error: "Media serving error" });
             }

@@ -23,6 +23,12 @@ function isPermanentChatError(error) {
 //   - photo: URL công khai của ảnh (HTTP/HTTPS)
 const SEND_PHOTO_ENDPOINT = "sendPhoto";
 
+// Endpoint gửi tệp đính kèm. KHÁC sendPhoto ở chỗ đây là suy đoán có kiểm soát:
+// SDK node-zalo-bot 0.1.6 chỉ công bố sendMessage/sendSticker/sendChatAction,
+// không có sendFile. Ta vẫn thử vì API có thể đã có endpoint này; nếu Zalo trả
+// lỗi "không hỗ trợ", nơi gọi sẽ chuyển sang gửi liên kết tải thay vì báo hỏng.
+const SEND_FILE_ENDPOINT = "sendFile";
+
 function createOfficialProvider(config = {}) {
     const botId = normalizeBotId(config.botId) || LEGACY_BOT_ID;
     const client = config.client || new ZaloBot(config.token, { polling: false });
@@ -67,6 +73,17 @@ function createOfficialProvider(config = {}) {
                 ...options
             };
             return provider.client._request(SEND_PHOTO_ENDPOINT, { form });
+        },
+
+        // Gửi tệp đính kèm. fileUrl phải là URL công khai.
+        // Có thể ném lỗi nếu API không hỗ trợ endpoint này — nơi gọi phải xử lý.
+        async sendFile(chatId, fileUrl, options = {}) {
+            const form = {
+                chat_id: String(chatId),
+                file: String(fileUrl),
+                ...options
+            };
+            return provider.client._request(SEND_FILE_ENDPOINT, { form });
         },
 
         async start() {

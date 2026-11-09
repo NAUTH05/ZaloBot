@@ -24,12 +24,14 @@ const UPLOAD_ROOT = path.join(PROJECT_ROOT, "data", "uploads");
 
 const MEDIA_TYPES = Object.freeze({
     HELP_IMAGE: "help-image",
-    CHAT_IMAGE: "chat-image"
+    CHAT_IMAGE: "chat-image",
+    CHAT_FILE: "chat-file"
 });
 
 const SUBDIR_FOR_TYPE = {
     [MEDIA_TYPES.HELP_IMAGE]: "help-images",
-    [MEDIA_TYPES.CHAT_IMAGE]: "chat-images"
+    [MEDIA_TYPES.CHAT_IMAGE]: "chat-images",
+    [MEDIA_TYPES.CHAT_FILE]: "chat-files"
 };
 
 const ALLOWED_MIME = new Set([
@@ -46,9 +48,67 @@ const MIME_TO_EXT = {
     "image/webp": ".webp"
 };
 
-const MAX_FILE_SIZE = 5 * 1024 * 1024;  // 5 MB
+const MAX_FILE_SIZE = 5 * 1024 * 1024;  // 5 MB — ảnh
+const MAX_CHAT_FILE_SIZE = 20 * 1024 * 1024;  // 20 MB — tệp đính kèm
 
 const MEDIA_COLLECTION = "bot_media";
+
+// ---------------------------------------------------------------------------
+// Tệp đính kèm trong chat: danh sách TRẮNG theo phần mở rộng.
+//
+// Vì sao danh sách trắng chứ không phải danh sách đen: tệp được phục vụ từ CÙNG
+// origin với dashboard, nên một tệp HTML/SVG sẽ chạy được JavaScript trong phiên
+// quản trị. Chặn theo danh sách đen luôn thiếu trường hợp mới; chỉ cho những
+// định dạng đã biết là an toàn và dễ kiểm toán.
+// ---------------------------------------------------------------------------
+const ALLOWED_FILE_EXTENSIONS = Object.freeze(new Set([
+    // Văn bản / tài liệu
+    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "csv", "rtf",
+    "odt", "ods", "odp", "md", "json", "xml", "log",
+    // Nén
+    "zip", "rar", "7z",
+    // Ảnh (dùng chung đường tệp khi cần gửi ảnh như một tệp)
+    "png", "jpg", "jpeg", "gif", "webp", "bmp",
+    // Âm thanh / video
+    "mp3", "wav", "m4a", "mp4", "mov", "webm"
+]));
+
+// Kiểu MIME khi phục vụ tệp. Không có trong bảng ⇒ application/octet-stream,
+// luôn kèm Content-Disposition: attachment và X-Content-Type-Options: nosniff.
+const EXT_TO_MIME = Object.freeze({
+    pdf: "application/pdf",
+    doc: "application/msword",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    xls: "application/vnd.ms-excel",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ppt: "application/vnd.ms-powerpoint",
+    pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    txt: "text/plain; charset=utf-8",
+    csv: "text/csv; charset=utf-8",
+    rtf: "application/rtf",
+    odt: "application/vnd.oasis.opendocument.text",
+    ods: "application/vnd.oasis.opendocument.spreadsheet",
+    odp: "application/vnd.oasis.opendocument.presentation",
+    md: "text/markdown; charset=utf-8",
+    json: "application/json; charset=utf-8",
+    xml: "application/xml; charset=utf-8",
+    log: "text/plain; charset=utf-8",
+    zip: "application/zip",
+    rar: "application/vnd.rar",
+    "7z": "application/x-7z-compressed",
+    png: "image/png",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    gif: "image/gif",
+    webp: "image/webp",
+    bmp: "image/bmp",
+    mp3: "audio/mpeg",
+    wav: "audio/wav",
+    m4a: "audio/mp4",
+    mp4: "video/mp4",
+    mov: "video/quicktime",
+    webm: "video/webm"
+});
 
 // Magic bytes để kiểm tra nội dung file thật sự là ảnh, không chỉ dựa vào MIME header.
 const MAGIC_BYTES = [
@@ -87,6 +147,36 @@ function ensureUploadDir(mediaType) {
 // Sinh ID ngẫu nhiên 16 byte hex dùng làm tên file và mediaId.
 function generateMediaId() {
     return crypto.randomBytes(16).toString("hex");
+}
+
+// ---------------------------------------------------------------------------
+// Sidecar metadata.
+//
+// Firestore là nguồn chính, nhưng KHÔNG phải lúc nào cũng có: khi chưa kết nối
+// Firestore, hoặc khi ghi metadata thất bại, tên tệp gốc và kiểu MIME sẽ mất —
+// người nhận phải tải về một file tên "tepdinhkem.pdf". Ghi kèm một tệp JSON nhỏ
+// cạnh tệp thật để thông tin hiển thị luôn còn.
+// ---------------------------------------------------------------------------
+function sidecarPath(dir, mediaId) {
+    return path.join(dir, `${mediaId}.meta.json`);
+}
+
+function writeSidecar(dir, mediaId, record) {
+    try {
+        fs.writeFileSync(sidecarPath(dir, mediaId), JSON.stringify(record), "utf8");
+    } catch (error) {
+        console.warn(`[MediaStorage] không ghi được sidecar ${mediaId}: ${error.message}`);
+    }
+}
+
+function readSidecar(dir, mediaId) {
+    try {
+        const target = sidecarPath(dir, mediaId);
+        if (!fs.existsSync(target)) return null;
+        return JSON.parse(fs.readFileSync(target, "utf8"));
+    } catch (_) {
+        return null;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -138,6 +228,8 @@ async function storeMedia({ buffer, originalName, declaredMime, mediaType, metad
         ...metadata
     };
 
+    writeSidecar(dir, mediaId, record);
+
     // Ghi metadata vào Firestore nếu có db.
     const db = safeGetDb();
     if (db) {
@@ -157,6 +249,65 @@ async function storeMedia({ buffer, originalName, declaredMime, mediaType, metad
         ...record,
         url: `/api/media/${mediaId}`
     };
+}
+
+// ---------------------------------------------------------------------------
+// Lưu một TỆP ĐÍNH KÈM trong chat (không phải ảnh trợ giúp).
+//
+// Khác storeMedia ở ba điểm:
+//   - giới hạn 20 MB thay vì 5 MB,
+//   - kiểm tra theo danh sách trắng phần mở rộng (không dùng magic bytes vì tệp
+//     văn phòng/nén không có chữ ký ảnh),
+//   - giữ tên gốc để hiển thị và để trình duyệt tải về đúng tên.
+// ---------------------------------------------------------------------------
+async function storeChatFile({ buffer, originalName, declaredMime = null, metadata = {} }) {
+    if (!buffer || !Buffer.isBuffer(buffer)) {
+        throw new Error("Dữ liệu tải lên không hợp lệ (không phải buffer).");
+    }
+    if (buffer.length === 0) throw new Error("Tệp rỗng.");
+    if (buffer.length > MAX_CHAT_FILE_SIZE) {
+        throw new Error(`Tệp quá lớn: ${(buffer.length / 1024 / 1024).toFixed(1)} MB (giới hạn ${MAX_CHAT_FILE_SIZE / 1024 / 1024} MB).`);
+    }
+
+    const rawName = String(originalName || "").trim();
+    const ext = path.extname(rawName).replace(/^\./, "").toLowerCase();
+    if (!ext) throw new Error("Tệp không có phần mở rộng nên không xác định được định dạng.");
+    if (!ALLOWED_FILE_EXTENSIONS.has(ext)) {
+        throw new Error(`Định dạng ".${ext}" không được phép gửi.`);
+    }
+
+    const mimeType = EXT_TO_MIME[ext] || declaredMime || "application/octet-stream";
+    const dir = ensureUploadDir(MEDIA_TYPES.CHAT_FILE);
+    const mediaId = generateMediaId();
+    const filePath = path.join(dir, `${mediaId}.${ext}`);
+
+    const tempPath = `${filePath}.tmp`;
+    fs.writeFileSync(tempPath, buffer);
+    fs.renameSync(tempPath, filePath);
+
+    const record = {
+        mediaId,
+        mediaType: MEDIA_TYPES.CHAT_FILE,
+        mimeType,
+        size: buffer.length,
+        originalName: rawName.slice(0, 255),
+        extension: ext,
+        storedAt: new Date().toISOString(),
+        ...metadata
+    };
+
+    writeSidecar(dir, mediaId, record);
+
+    const db = safeGetDb();
+    if (db) {
+        try {
+            await db.collection(MEDIA_COLLECTION).doc(mediaId).set({ ...record, filePath });
+        } catch (error) {
+            console.error(`[MediaStorage] không ghi được metadata tệp: ${error.message}`);
+        }
+    }
+
+    return { ...record, url: `/api/media/${mediaId}` };
 }
 
 // ---------------------------------------------------------------------------
@@ -195,26 +346,43 @@ async function getMediaInfo(mediaId) {
     }
 
     // Fallback: quét thư mục upload để tìm file khớp mediaId.
-    for (const subdir of Object.values(SUBDIR_FOR_TYPE)) {
+    //
+    // Không dò theo danh sách đuôi cố định nữa: tệp đính kèm có thể là bất kỳ
+    // đuôi nào trong danh sách trắng. Đọc tên thư mục mục là cách duy nhất đúng
+    // cho mọi trường hợp.
+    for (const [mediaType, subdir] of Object.entries(SUBDIR_FOR_TYPE)) {
         const dir = path.join(UPLOAD_ROOT, subdir);
         if (!fs.existsSync(dir)) continue;
-        for (const ext of Object.values(MIME_TO_EXT)) {
-            const candidate = path.join(dir, `${mediaId}${ext}`);
-            if (fs.existsSync(candidate)) {
-                const buffer = fs.readFileSync(candidate);
-                const mimeType = detectMimeFromBuffer(buffer) || "application/octet-stream";
-                return {
-                    mediaId,
-                    mediaType: null,
-                    mimeType,
-                    size: buffer.length,
-                    originalName: null,
-                    filePath: candidate,
-                    storedAt: null,
-                    metadata: {}
-                };
-            }
-        }
+
+        let names;
+        try { names = fs.readdirSync(dir); } catch (_) { continue; }
+        const hit = names.find((name) =>
+            name.startsWith(`${mediaId}.`)
+            && !name.endsWith(".tmp")
+            && !name.endsWith(".meta.json"));
+        if (!hit) continue;
+
+        const candidate = path.join(dir, hit);
+        let buffer;
+        try { buffer = fs.readFileSync(candidate); } catch (_) { continue; }
+
+        const sidecar = readSidecar(dir, mediaId);
+        const ext = path.extname(hit).slice(1).toLowerCase();
+        const mimeType = sidecar?.mimeType
+            || detectMimeFromBuffer(buffer)
+            || EXT_TO_MIME[ext]
+            || "application/octet-stream";
+        return {
+            mediaId,
+            mediaType: sidecar?.mediaType || mediaType,
+            mimeType,
+            size: buffer.length,
+            originalName: sidecar?.originalName || null,
+            extension: sidecar?.extension || ext || null,
+            filePath: candidate,
+            storedAt: sidecar?.storedAt || null,
+            metadata: sidecar || {}
+        };
     }
 
     return null;
@@ -237,6 +405,14 @@ async function deleteMedia(mediaId) {
         } catch (error) {
             console.error(`[MediaStorage] không xoá được file ${mediaId}: ${error.message}`);
         }
+    }
+
+    // Xoá sidecar đi kèm để không để lại rác.
+    if (info && info.filePath) {
+        try {
+            const meta = sidecarPath(path.dirname(info.filePath), mediaId);
+            if (fs.existsSync(meta)) fs.unlinkSync(meta);
+        } catch (_) {}
     }
 
     // Xoá metadata trong Firestore.
@@ -340,7 +516,7 @@ function safeGetDb() {
     }
 }
 
-// Validation helper cho middleware xử lý upload.
+// Validation cho ẢNH tải lên: bắt buộc magic bytes khớp một định dạng ảnh.
 function validateUploadedFile(file) {
     if (!file) return { valid: false, error: "Không có file." };
     if (file.truncated) return { valid: false, error: `File vượt giới hạn ${MAX_FILE_SIZE} bytes.` };
@@ -353,17 +529,49 @@ function validateUploadedFile(file) {
     return { valid: true, mimeType: detectedMime, buffer };
 }
 
+// Validation cho tệp đính kèm chat. Khác validateUploadedFile ở chỗ không đòi
+// magic bytes ảnh, nhưng bắt buộc đuôi tệp nằm trong danh sách trắng.
+function validateChatFile(file) {
+    if (!file) return { valid: false, error: "Không có tệp." };
+    const buffer = file.buffer || file.data;
+    if (!buffer || buffer.length === 0) return { valid: false, error: "Tệp rỗng." };
+    if (buffer.length > MAX_CHAT_FILE_SIZE) {
+        return {
+            valid: false,
+            error: `Tệp quá lớn (${(buffer.length / 1024 / 1024).toFixed(1)} MB, giới hạn ${MAX_CHAT_FILE_SIZE / 1024 / 1024} MB).`
+        };
+    }
+    const rawName = String(file.originalName || "").trim();
+    const ext = path.extname(rawName).replace(/^\./, "").toLowerCase();
+    if (!ext) return { valid: false, error: "Tệp không có phần mở rộng." };
+    if (!ALLOWED_FILE_EXTENSIONS.has(ext)) {
+        return { valid: false, error: `Định dạng ".${ext}" không được phép gửi.` };
+    }
+    return { valid: true, buffer, extension: ext, mimeType: EXT_TO_MIME[ext] || "application/octet-stream" };
+}
+
+// Kiểu MIME để phục vụ một tệp theo đuôi (dùng cho endpoint tải về).
+function mimeForExtension(extension) {
+    return EXT_TO_MIME[String(extension || "").toLowerCase()] || "application/octet-stream";
+}
+
 module.exports = {
     MEDIA_TYPES,
     MEDIA_COLLECTION,
     MAX_FILE_SIZE,
+    MAX_CHAT_FILE_SIZE,
     ALLOWED_MIME,
+    ALLOWED_FILE_EXTENSIONS,
+    EXT_TO_MIME,
     storeMedia,
+    storeChatFile,
     getMediaInfo,
     deleteMedia,
     listMediaByType,
     associateHelpImage,
     getHelpImagesForCommand,
     validateUploadedFile,
+    validateChatFile,
+    mimeForExtension,
     detectMimeFromBuffer
 };

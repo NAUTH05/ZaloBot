@@ -567,6 +567,38 @@ async function sendPhoto(chatId, photoUrlOrBuffer, options = {}) {
     );
 }
 
+// Gửi tệp đính kèm qua nhà cung cấp hiện tại.
+//
+// Cùng quy tắc với sendPhoto: bot chính thức nhận URL công khai, ZCA nhận Buffer.
+// Nhưng khác một điểm quan trọng — endpoint sendFile của Zalo Bot Platform KHÔNG
+// được SDK công bố, nên lỗi ở đây là chuyện có thể xảy ra. Nơi gọi phải có
+// phương án dự phòng; hàm này chỉ báo lỗi thật.
+async function sendFile(chatId, fileUrl, options = {}) {
+    const provider = currentProvider();
+    if (typeof provider.sendFile !== "function") {
+        throw new Error(`Nhà cung cấp ${provider.botId} không hỗ trợ gửi tệp`);
+    }
+
+    let payload = fileUrl;
+    const isPersonalAccount = provider.isPersonalAccount === true || provider.providerType === "zca";
+    if (isPersonalAccount && options.filePath && !Buffer.isBuffer(payload)) {
+        if (!fs.existsSync(options.filePath)) {
+            throw new Error(`Không tìm thấy tệp: ${options.filePath}`);
+        }
+        payload = fs.readFileSync(options.filePath);
+    }
+
+    const { filePath, ...providerOptions } = options;
+    const priority = providerOptions.priority || PRIORITY.INTERACTIVE;
+    delete providerOptions.priority;
+
+    return providerQueues.enqueueFor(
+        provider.botId,
+        () => provider.sendFile(chatId, payload, providerOptions),
+        priority
+    );
+}
+
 // Chuyển nội dung có markdown của Zalo Bot Platform sang plain text.
 //
 // Dùng cho hai việc: gửi lại khi markdown bị từ chối, và cho những nhà cung cấp
@@ -808,6 +840,111 @@ async function sendChatMessageToChat({ botId, chatId, text, mediaId } = {}) {
 
         return result;
     });
+}
+
+// Gửi TỆP ĐÍNH KÈM từ Chat Center.
+//
+// Hai nhà cung cấp không tương đương nhau:
+//   - ZCA: gửi được tệp thật qua attachments (Buffer).
+//   - Bot chính thức: SDK không công bố endpoint gửi tệp. Ta vẫn thử; nếu Zalo
+//     từ chối, chuyển sang gửi TIN NHẮN chứa liên kết tải. Đây là gửi thật (người
+//     dùng nhận được tệp), nhưng KHÔNG phải bong bóng tệp — nên kết quả trả về
+//     ghi rõ `deliveryMode` để UI không hiển thị sai.
+async function sendChatFileToChat({ botId, chatId, fileMediaId, caption } = {}) {
+    const targetBot = normalizeBotId(botId);
+    if (!targetBot) throw new Error("botId là bắt buộc.");
+    const targetChatId = String(chatId || "").trim();
+    if (!targetChatId) throw new Error("chatId là bắt buộc.");
+    if (!fileMediaId) throw new Error("fileMediaId là bắt buộc.");
+
+    const runtime = getBot(targetBot);
+    if (!runtime) throw new Error(`Bot ${targetBot} không đang chạy.`);
+
+    return runWithBot(runtime, async () => {
+        const result = { sent: false, error: null, messageId: null, deliveryMode: "file" };
+
+        const mediaInfo = await getMediaInfo(fileMediaId);
+        if (!mediaInfo) throw new Error("Không tìm thấy tệp.");
+        if (mediaInfo.mediaType !== MEDIA_TYPES.CHAT_FILE) {
+            throw new Error("Media này không phải tệp đính kèm.");
+        }
+
+        const fileUrl = buildMediaPublicUrl(fileMediaId);
+        if (!fileUrl) throw new Error("Không xây được URL công khai cho tệp.");
+
+        await ensureConversation({ botId: targetBot, chatId: targetChatId });
+
+        const filename = mediaInfo.originalName || `tepdinhkem.${mediaInfo.extension || "bin"}`;
+        const label = String(caption || "").trim();
+        const attachment = [{
+            mediaId: fileMediaId,
+            type: "file",
+            name: filename,
+            size: mediaInfo.size,
+            url: fileUrl,
+            mimeType: mediaInfo.mimeType || null
+        }];
+
+        try {
+            const nativeResult = await sendFile(targetChatId, fileUrl, {
+                filePath: mediaInfo.filePath,
+                filename,
+                caption: label || undefined
+            });
+            result.sent = true;
+            result.messageId = nativeResult?.message_id || nativeResult?.message?.msgId || null;
+            await recordMessageHistory({
+                botId: targetBot,
+                chatId: targetChatId,
+                direction: MSG_DIRECTION.OUTBOUND,
+                text: label || `[tệp] ${filename}`,
+                attachments: attachment,
+                status: MSG_STATUS.SENT,
+                source: MSG_SOURCE.ADMIN_CHAT
+            });
+            return result;
+        } catch (nativeError) {
+            // Không gửi được dạng tệp ⇒ gửi liên kết. Vẫn là gửi thật.
+            const fallbackText = [
+                label,
+                `📎 ${filename} (${formatFileSize(mediaInfo.size)})`,
+                fileUrl
+            ].filter(Boolean).join("\n");
+
+            try {
+                const linkResult = await sendMessage(targetChatId, fallbackText, {
+                    historySource: MSG_SOURCE.ADMIN_CHAT
+                });
+                result.sent = Boolean(linkResult?.delivered);
+                result.deliveryMode = "link";
+                if (!result.sent) {
+                    result.error = nativeError.message;
+                    return result;
+                }
+                return result;
+            } catch (linkError) {
+                result.error = `${nativeError.message} / ${linkError.message}`;
+                await recordMessageHistory({
+                    botId: targetBot,
+                    chatId: targetChatId,
+                    direction: MSG_DIRECTION.OUTBOUND,
+                    text: label || `[tệp] ${filename}`,
+                    attachments: attachment,
+                    status: MSG_STATUS.FAILED,
+                    source: MSG_SOURCE.ADMIN_CHAT,
+                    error: result.error
+                });
+                return result;
+            }
+        }
+    });
+}
+
+function formatFileSize(bytes) {
+    const size = Number(bytes) || 0;
+    if (size < 1024) return `${size} B`;
+    if (size < 1024 * 1024) return `${(size / 1024).toFixed(0)} KB`;
+    return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
 // Thông báo cho ngữ cảnh cổng tiếp nhận (nếu có) rằng một lần gửi tới chatId vừa
@@ -2614,8 +2751,9 @@ async function startRuntime() {
         announcementStatus: (input) => announcementProgress(input),
 
         // Chat Center — gửi tin nhắn từ admin qua bot.
-        // Logic nằm ở sendChatMessageToChat() để kiểm thử được trực tiếp.
-        sendChatMessage: (input) => sendChatMessageToChat(input)
+        // Logic nằm ở sendChatMessageToChat()/sendChatFileToChat() để kiểm thử được.
+        sendChatMessage: (input) => sendChatMessageToChat(input),
+        sendChatFile: (input) => sendChatFileToChat(input)
     });
     await new Promise((resolve, reject) => {
         adminRuntime.server.once("error", reject);
@@ -3167,7 +3305,9 @@ module.exports = {
     handleIncomingMessage,
     sendMessage,
     sendPhoto,
+    sendFile,
     sendChatMessageToChat,
+    sendChatFileToChat,
     buildMediaPublicUrl,
     registerShutdownHandlers,
     stopZaloPolling,
