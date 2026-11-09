@@ -521,12 +521,46 @@ function currentProvider() {
     throw new Error("Nhà cung cấp hiện tại không gửi được tin nhắn");
 }
 
-// Xây URL công khai cho media dựa trên cấu hình admin server.
-// Ảnh phải có URL công khai để Zalo Bot Platform (official) có thể tải.
-// Dùng ADMIN_BASE_URL env hoặc localhost fallback.
-function buildMediaPublicUrl(mediaId) {
+// Origin công khai đã biết. Được ghi lại mỗi khi dashboard gọi API, để những
+// đường gửi KHÔNG có request đi kèm (ví dụ ảnh hướng dẫn của /help) cũng dùng
+// được địa chỉ thật thay vì localhost.
+let cachedPublicBaseUrl = String(process.env.ADMIN_BASE_URL || "").trim() || null;
+
+function rememberPublicBaseUrl(baseUrl) {
+    const value = String(baseUrl || "").trim().replace(/\/+$/, "");
+    if (!value) return;
+    if (!/^https?:\/\/[^\s/]+$/i.test(value)) return;
+    cachedPublicBaseUrl = value;
+}
+
+function isLoopbackUrl(url) {
+    try {
+        const host = new URL(url).hostname.toLowerCase();
+        return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
+    } catch (_) {
+        return false;
+    }
+}
+
+// Xây URL công khai cho media.
+//
+// Vì sao KHÔNG được mặc định về localhost: bot chính thức gửi ảnh bằng cách đưa
+// URL cho Zalo Bot Platform, và máy chủ Zalo phải tự tải URL đó về. Một địa chỉ
+// http://localhost:6003 chỉ mở được trên chính VPS, nên Zalo luôn tải thất bại —
+// đúng lỗi "không gửi được ảnh".
+//
+// Thứ tự ưu tiên:
+//   1. baseOverride — origin thật của request dashboard (xem publicBaseUrlFrom
+//      trong adminServer.js). Đây là đường dùng bình thường.
+//   2. ADMIN_BASE_URL — dùng khi chạy script/scheduler không có request.
+//   3. localhost — chỉ còn dùng được cho ZCA (gửi Buffer) và môi trường thử.
+function buildMediaPublicUrl(mediaId, baseOverride = null) {
     if (!mediaId) return null;
-    const baseUrl = process.env.ADMIN_BASE_URL || `http://localhost:${process.env.ADMIN_PORT || 3000}`;
+    const override = String(baseOverride || "").trim();
+    const configured = String(process.env.ADMIN_BASE_URL || "").trim();
+    const baseUrl = (override || configured || cachedPublicBaseUrl || `http://localhost:${process.env.ADMIN_PORT || 3000}`)
+        .replace(/\/+$/, "");
+    if (override) rememberPublicBaseUrl(override);
     return `${baseUrl}/api/media/${mediaId}`;
 }
 
@@ -556,14 +590,31 @@ async function sendPhoto(chatId, photoUrlOrBuffer, options = {}) {
         payload = fs.readFileSync(options.filePath);
     }
 
-    const { filePath, ...providerOptions } = options;
-    const priority = providerOptions.priority || PRIORITY.INTERACTIVE;
-    delete providerOptions.priority;
+    // Bot chính thức: Zalo tự tải ảnh từ URL. Địa chỉ localhost chỉ mở được trên
+    // chính VPS nên request chắc chắn hỏng. Báo lỗi rõ ràng thay vì để Zalo trả
+    // một lỗi mơ hồ rồi quản trị viên phải đoán.
+    if (!isPersonalAccount && typeof payload === "string" && isLoopbackUrl(payload)) {
+        throw new Error(
+            "Chưa có địa chỉ công khai cho ảnh: máy chủ Zalo không tải được " +
+            `${payload}. Hãy mở dashboard qua tên miền thật, hoặc đặt ADMIN_BASE_URL ` +
+            "(ví dụ https://zalobot.example.com) trong .env."
+        );
+    }
+
+    // Chỉ chuyển những tham số provider thật sự hiểu.
+    //
+    // Trước đây chỗ này spread toàn bộ options xuống provider, nên `mimeType` và
+    // `filename` của tầng lưu trữ bị gửi lên Zalo Bot Platform như tham số form
+    // không tồn tại — API có thể từ chối cả request vì thế.
+    const { filePath, priority: _priority, ...rest } = options;
+    const providerOptions = isPersonalAccount
+        ? { filename: rest.filename, mimeType: rest.mimeType, caption: rest.caption }
+        : {};
 
     return providerQueues.enqueueFor(
         provider.botId,
         () => provider.sendPhoto(chatId, payload, providerOptions),
-        priority
+        options.priority || PRIORITY.INTERACTIVE
     );
 }
 
@@ -588,14 +639,23 @@ async function sendFile(chatId, fileUrl, options = {}) {
         payload = fs.readFileSync(options.filePath);
     }
 
-    const { filePath, ...providerOptions } = options;
-    const priority = providerOptions.priority || PRIORITY.INTERACTIVE;
-    delete providerOptions.priority;
+    if (!isPersonalAccount && typeof payload === "string" && isLoopbackUrl(payload)) {
+        throw new Error(
+            "Chưa có địa chỉ công khai cho tệp: máy chủ Zalo không tải được " +
+            `${payload}. Hãy mở dashboard qua tên miền thật, hoặc đặt ADMIN_BASE_URL trong .env.`
+        );
+    }
+
+    // Cùng lý do như sendPhoto: chỉ chuyển tham số provider hiểu.
+    const { filePath, priority: _priority, ...rest } = options;
+    const providerOptions = isPersonalAccount
+        ? { filename: rest.filename, caption: rest.caption }
+        : {};
 
     return providerQueues.enqueueFor(
         provider.botId,
         () => provider.sendFile(chatId, payload, providerOptions),
-        priority
+        options.priority || PRIORITY.INTERACTIVE
     );
 }
 
@@ -758,7 +818,7 @@ async function sendMessage(chatId, text, options = {}) {
 // Ghi lịch sử: đường TEXT đi qua sendMessage(), mà sendMessage() đã tự ghi
 // outbound khi thành công. Ở đây chỉ ghi thêm khi THẤT BẠI (sendMessage không ghi)
 // và cho đường ẢNH (sendPhoto không tự ghi). Ghi ở cả hai nơi sẽ thành hai bản.
-async function sendChatMessageToChat({ botId, chatId, text, mediaId } = {}) {
+async function sendChatMessageToChat({ botId, chatId, text, mediaId, publicBaseUrl = null } = {}) {
     const targetBot = normalizeBotId(botId);
     if (!targetBot) throw new Error("botId là bắt buộc.");
     const targetChatId = String(chatId || "").trim();
@@ -776,7 +836,7 @@ async function sendChatMessageToChat({ botId, chatId, text, mediaId } = {}) {
         if (mediaId) {
             const mediaInfo = await getMediaInfo(mediaId);
             if (!mediaInfo) throw new Error("Không tìm thấy media.");
-            const photoUrl = buildMediaPublicUrl(mediaId);
+            const photoUrl = buildMediaPublicUrl(mediaId, publicBaseUrl);
             if (!photoUrl) throw new Error("Không xây được URL công khai cho media.");
 
             const attachment = [{ mediaId, type: "image", url: photoUrl }];
@@ -850,7 +910,7 @@ async function sendChatMessageToChat({ botId, chatId, text, mediaId } = {}) {
 //     từ chối, chuyển sang gửi TIN NHẮN chứa liên kết tải. Đây là gửi thật (người
 //     dùng nhận được tệp), nhưng KHÔNG phải bong bóng tệp — nên kết quả trả về
 //     ghi rõ `deliveryMode` để UI không hiển thị sai.
-async function sendChatFileToChat({ botId, chatId, fileMediaId, caption } = {}) {
+async function sendChatFileToChat({ botId, chatId, fileMediaId, caption, publicBaseUrl = null } = {}) {
     const targetBot = normalizeBotId(botId);
     if (!targetBot) throw new Error("botId là bắt buộc.");
     const targetChatId = String(chatId || "").trim();
@@ -869,7 +929,7 @@ async function sendChatFileToChat({ botId, chatId, fileMediaId, caption } = {}) 
             throw new Error("Media này không phải tệp đính kèm.");
         }
 
-        const fileUrl = buildMediaPublicUrl(fileMediaId);
+        const fileUrl = buildMediaPublicUrl(fileMediaId, publicBaseUrl);
         if (!fileUrl) throw new Error("Không xây được URL công khai cho tệp.");
 
         await ensureConversation({ botId: targetBot, chatId: targetChatId });
@@ -904,6 +964,23 @@ async function sendChatFileToChat({ botId, chatId, fileMediaId, caption } = {}) 
             });
             return result;
         } catch (nativeError) {
+            // Nếu URL vẫn là localhost thì gửi liên kết cũng vô nghĩa — người nhận
+            // sẽ nhận một địa chỉ chết. Báo lỗi thật thay vì "gửi thành công" giả.
+            if (isLoopbackUrl(fileUrl)) {
+                result.error = nativeError.message;
+                await recordMessageHistory({
+                    botId: targetBot,
+                    chatId: targetChatId,
+                    direction: MSG_DIRECTION.OUTBOUND,
+                    text: label || `[tệp] ${filename}`,
+                    attachments: attachment,
+                    status: MSG_STATUS.FAILED,
+                    source: MSG_SOURCE.ADMIN_CHAT,
+                    error: result.error
+                });
+                return result;
+            }
+
             // Không gửi được dạng tệp ⇒ gửi liên kết. Vẫn là gửi thật.
             const fallbackText = [
                 label,

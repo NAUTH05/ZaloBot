@@ -2278,11 +2278,17 @@ function renderChatMessages() {
         : message.status === "pending" ? '<span class="msg-status">◷ Đang gửi</span>'
         : '<span class="msg-status ok">✓</span>')
       : "";
+    // Hiện nguyên văn lỗi: "✕ Lỗi" không nói được vì sao, và người dùng phải mở
+    // log mới biết (ví dụ ảnh hỏng vì thiếu địa chỉ công khai).
+    const errorLine = message.status === "failed" && message.error
+      ? `<div class="msg-error">${escapeHtml(message.error)}</div>`
+      : "";
 
     parts.push(`<div class="chat-bubble-row ${outbound ? "outbound" : "inbound"}">
-      <div class="chat-message ${outbound ? "outbound" : "inbound"}">
+      <div class="chat-message ${outbound ? "outbound" : "inbound"}"${message.error ? ` title="${escapeHtml(message.error)}"` : ""}>
         ${attachments.map(renderChatAttachment).join("")}
         ${body ? `<div class="msg-text">${body}</div>` : ""}
+        ${errorLine}
         <div class="msg-meta">${escapeHtml(clock)} ${status}</div>
       </div>
     </div>`);

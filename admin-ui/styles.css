@@ -1333,6 +1333,24 @@ button[disabled] {
 .msg-status.failed { color: var(--danger); font-weight: 600; }
 .chat-message.outbound .msg-status.failed { color: #ffd7dd; }
 
+/* Lỗi hiện ngay trong bong bóng: không bắt người dùng mở log mới hiểu. */
+.msg-error {
+    margin-top: 4px;
+    padding: 4px 6px;
+    border-radius: var(--r-sm);
+    background: rgba(173, 47, 66, 0.12);
+    border-left: 3px solid var(--danger);
+    color: var(--danger);
+    font-size: var(--fs-xs);
+    line-height: 1.4;
+    word-break: break-word;
+}
+.chat-message.outbound .msg-error {
+    background: rgba(255, 255, 255, 0.16);
+    border-left-color: #ffd7dd;
+    color: #ffe9ec;
+}
+
 /* Tệp đính kèm trong bong bóng */
 .msg-attachment {
     display: block;

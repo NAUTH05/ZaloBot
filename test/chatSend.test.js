@@ -149,6 +149,38 @@ test("bot chưa chạy thì báo rõ, không gửi bằng bot khác", async () =
     assert.equal(calls.messages.length, 0);
 });
 
+// Bài này phải đứng TRƯỚC bài truyền publicBaseUrl: origin công khai được ghi
+// nhớ trong module, nên nếu chạy sau thì nó không còn là localhost nữa.
+test("bot chính thức thiếu địa chỉ công khai thì báo lỗi rõ, không gửi URL chết", async () => {
+    const { bot, calls } = makeFakeBot("bot1");
+    registerBot(bot);
+
+    // Ép origin về localhost để bài test không phụ thuộc thứ tự chạy: origin công
+    // khai được ghi nhớ trong module, nên một bài trước đó có thể đã đặt nó.
+    const oldBase = process.env.ADMIN_BASE_URL;
+    process.env.ADMIN_BASE_URL = "http://localhost:9999";
+
+    const media = await storeMedia({
+        buffer: minimalJpeg(),
+        originalName: "no-base.jpg",
+        mediaType: MEDIA_TYPES.CHAT_IMAGE
+    });
+
+    try {
+        // Nhánh ảnh trả kết quả {sent:false, error} chứ không ném ra ngoài — UI
+        // cần hiện được lý do thất bại ngay trong bong bóng tin nhắn.
+        const result = await sendChatMessageToChat({ botId: "bot1", chatId: "chat-1", mediaId: media.mediaId });
+
+        assert.equal(result.sent, false);
+        assert.match(String(result.error), /địa chỉ công khai|ADMIN_BASE_URL/i);
+        assert.equal(calls.photos.length, 0, "không được gọi Zalo với URL localhost");
+    } finally {
+        await deleteMedia(media.mediaId);
+        if (oldBase === undefined) delete process.env.ADMIN_BASE_URL;
+        else process.env.ADMIN_BASE_URL = oldBase;
+    }
+});
+
 test("gửi ẢNH qua bot chính thức dùng URL công khai", async () => {
     const { bot, calls } = makeFakeBot("bot1");
     registerBot(bot);
@@ -160,12 +192,17 @@ test("gửi ẢNH qua bot chính thức dùng URL công khai", async () => {
     });
 
     try {
-        const result = await sendChatMessageToChat({ botId: "bot1", chatId: "chat-1", mediaId: media.mediaId });
+        const result = await sendChatMessageToChat({
+            botId: "bot1",
+            chatId: "chat-1",
+            mediaId: media.mediaId,
+            publicBaseUrl: "https://bot.example.com"
+        });
 
         assert.equal(result.sent, true, `mong sent=true, nhận: ${JSON.stringify(result)}`);
         assert.equal(calls.photos.length, 1);
         assert.equal(typeof calls.photos[0].payload, "string", "official provider nhận URL, không nhận Buffer");
-        assert.match(calls.photos[0].payload, /\/api\/media\//);
+        assert.match(calls.photos[0].payload, /^https:\/\/bot\.example\.com\/api\/media\//);
         assert.equal(calls.messages.length, 0, "không gửi kèm tin text khi chỉ có ảnh");
     } finally {
         await deleteMedia(media.mediaId);

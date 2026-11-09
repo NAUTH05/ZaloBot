@@ -7,6 +7,10 @@ const { importJsonDirectory } = require("./firestorePersistence");
 const { getCollectionName, getDatabaseId } = require("./firebaseConfig");
 
 const sourceDirectory = path.resolve(process.argv[2] || path.join(__dirname, "recent_json"));
+// Phân biệt "người dùng chỉ định thư mục" với "dùng mặc định recent_json": chỉ
+// trường hợp sau mới cần gợi ý thêm, vì rất dễ nhầm lệnh này với bước kiểm tra
+// cấu hình Firebase.
+const usingDefaultSource = !process.argv[2];
 
 async function main() {
     console.log(`[Migrate] Nguồn: ${sourceDirectory}`);
@@ -17,6 +21,23 @@ async function main() {
         result = await importJsonDirectory(sourceDirectory);
     } catch (error) {
         console.error(`[Migrate] Thất bại: ${error.message}`);
+        // Lệnh này chỉ NHẬP DỮ LIỆU JSON CŨ lên Firestore. Nó không kiểm tra và
+        // cũng không cần file service account để chạy đúng — nhưng khi thiếu
+        // thư mục nguồn, thông báo lỗi rất dễ bị hiểu thành "Firebase chưa cấu
+        // hình đúng". Nói rõ ra để khỏi mất thời gian dò nhầm hướng.
+        if (usingDefaultSource) {
+            console.error(
+                "[Migrate] Lưu ý: lệnh này KHÔNG kiểm tra cấu hình Firebase. Nó chỉ nhập các file JSON " +
+                "cũ trong thư mục recent_json/ lên Firestore."
+            );
+            console.error(
+                "[Migrate] Máy chủ mới (dữ liệu đã ở Firestore) KHÔNG cần chạy migrate. " +
+                "Muốn kiểm tra service account, chạy: npm run verify:firebase-admin"
+            );
+            console.error(
+                "[Migrate] Muốn nhập từ thư mục khác: npm run migrate:firestore -- <đường-dẫn-thư-mục>"
+            );
+        }
         process.exitCode = 1;
         return;
     }

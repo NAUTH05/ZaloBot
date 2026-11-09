@@ -282,6 +282,32 @@ function contentDisposition(filename, inline = false) {
 }
 
 // ---------------------------------------------------------------------------
+// Gốc URL công khai của dashboard, suy ra từ CHÍNH request đang phục vụ.
+//
+// Vì sao cần: bot chính thức gửi ảnh/tệp bằng cách đưa URL cho Zalo Bot Platform,
+// và máy chủ Zalo phải tự tải URL đó. Nếu ta dựng URL từ localhost thì Zalo luôn
+// thất bại. Request đã đi qua tên miền thật, nên header của nó là nguồn đúng.
+//
+// Thứ tự: ADMIN_BASE_URL (nếu cấu hình) → X-Forwarded-* → Host.
+// ---------------------------------------------------------------------------
+function publicBaseUrlFrom(request) {
+    const configured = String(process.env.ADMIN_BASE_URL || "").trim();
+    if (configured) return configured.replace(/\/+$/, "");
+
+    const forwardedProto = String(request.headers["x-forwarded-proto"] || "").split(",")[0].trim().toLowerCase();
+    const proto = forwardedProto === "https" || forwardedProto === "http"
+        ? forwardedProto
+        : (request.socket?.encrypted ? "https" : "http");
+
+    const rawHost = String(request.headers["x-forwarded-host"] || request.headers.host || "").split(",")[0].trim();
+    // Chỉ nhận host hợp lệ. Host do client gửi lên, nên phải lọc trước khi ghép
+    // vào URL đem đi gửi cho Zalo.
+    if (!/^[A-Za-z0-9.\-:[\]]+$/.test(rawHost)) return "";
+
+    return `${proto}://${rawHost}`;
+}
+
+// ---------------------------------------------------------------------------
 // SSE cho Chat Center — đẩy tin mới xuống dashboard, không cần F5.
 //
 // Vì sao SSE chứ không WebSocket: chỉ cần một chiều server → client, chạy trên
@@ -1822,8 +1848,8 @@ async function handleApi(request, response, url, options = {}) {
                 return json(response, 503, { error: "Chat service chưa sẵn sàng" });
             }
             const result = fileMediaId
-                ? await sender({ botId, chatId, fileMediaId, caption: text })
-                : await sender({ botId, chatId, text, mediaId });
+                ? await sender({ botId, chatId, fileMediaId, caption: text, publicBaseUrl: publicBaseUrlFrom(request) })
+                : await sender({ botId, chatId, text, mediaId, publicBaseUrl: publicBaseUrlFrom(request) });
 
             audit("chat.send", request, {
                 botId,

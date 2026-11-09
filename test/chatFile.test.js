@@ -130,6 +130,36 @@ test("ZCA nhận Buffer khi gửi tệp", async () => {
     }
 });
 
+// Bài này phải đứng TRƯỚC các bài truyền publicBaseUrl: origin công khai được
+// ghi nhớ trong module.
+test("bot chính thức thiếu địa chỉ công khai thì KHÔNG gửi liên kết chết", async () => {
+    const texts = [];
+    registerBot({
+        botId: "bot1",
+        providerType: "official",
+        supportsMarkdown: true,
+        async sendMessage(chatId, text) { texts.push(text); return { message_id: "m1" }; },
+        async sendFile() { return { message_id: "f1" }; }
+    });
+
+    // Ép origin về localhost để không phụ thuộc thứ tự chạy giữa các file test.
+    const oldBase = process.env.ADMIN_BASE_URL;
+    process.env.ADMIN_BASE_URL = "http://localhost:9999";
+
+    const stored = await storeChatFile({ buffer: pdfBytes(), originalName: "no-base.pdf" });
+    try {
+        const result = await sendChatFileToChat({ botId: "bot1", chatId: "chat-1", fileMediaId: stored.mediaId });
+
+        assert.equal(result.sent, false, "không được coi là gửi thành công");
+        assert.match(String(result.error), /địa chỉ công khai|ADMIN_BASE_URL/i);
+        assert.equal(texts.length, 0, "không được gửi liên kết localhost cho người dùng");
+    } finally {
+        await deleteMedia(stored.mediaId);
+        if (oldBase === undefined) delete process.env.ADMIN_BASE_URL;
+        else process.env.ADMIN_BASE_URL = oldBase;
+    }
+});
+
 test("bot chính thức gửi được tệp thì dùng URL công khai", async () => {
     const received = [];
     registerBot({
@@ -142,12 +172,17 @@ test("bot chính thức gửi được tệp thì dùng URL công khai", async (
 
     const stored = await storeChatFile({ buffer: pdfBytes(), originalName: "official.pdf" });
     try {
-        const result = await sendChatFileToChat({ botId: "bot1", chatId: "chat-1", fileMediaId: stored.mediaId });
+        const result = await sendChatFileToChat({
+            botId: "bot1",
+            chatId: "chat-1",
+            fileMediaId: stored.mediaId,
+            publicBaseUrl: "https://bot.example.com"
+        });
 
         assert.equal(result.sent, true);
         assert.equal(result.deliveryMode, "file");
         assert.equal(typeof received[0].payload, "string");
-        assert.match(received[0].payload, /\/api\/media\//);
+        assert.match(received[0].payload, /^https:\/\/bot\.example\.com\/api\/media\//);
     } finally {
         await deleteMedia(stored.mediaId);
     }
@@ -165,7 +200,12 @@ test("bot chính thức không gửi được tệp thì chuyển sang gửi li�
 
     const stored = await storeChatFile({ buffer: pdfBytes(), originalName: "fallback.pdf" });
     try {
-        const result = await sendChatFileToChat({ botId: "bot1", chatId: "chat-1", fileMediaId: stored.mediaId });
+        const result = await sendChatFileToChat({
+            botId: "bot1",
+            chatId: "chat-1",
+            fileMediaId: stored.mediaId,
+            publicBaseUrl: "https://bot.example.com"
+        });
 
         assert.equal(result.sent, true, "vẫn phải gửi được, chỉ là dạng liên kết");
         assert.equal(result.deliveryMode, "link", "phải báo rõ không phải bong bóng tệp");

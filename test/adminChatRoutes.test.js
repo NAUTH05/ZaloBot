@@ -49,7 +49,7 @@ require.cache[persistencePath] = {
 
 const { createAdminServer } = require("../adminServer");
 
-function request(port, method, urlPath, body = null, cookie = "") {
+function request(port, method, urlPath, body = null, cookie = "", extraHeaders = {}) {
     return new Promise((resolve, reject) => {
         const req = http.request({
             hostname: "127.0.0.1",
@@ -58,7 +58,8 @@ function request(port, method, urlPath, body = null, cookie = "") {
             path: urlPath,
             headers: {
                 ...(body ? { "Content-Type": "application/json" } : {}),
-                ...(cookie ? { Cookie: cookie } : {})
+                ...(cookie ? { Cookie: cookie } : {}),
+                ...extraHeaders
             }
         }, (response) => {
             let payload = "";
@@ -76,14 +77,14 @@ function request(port, method, urlPath, body = null, cookie = "") {
 }
 
 // Khởi động server + đăng nhập một lần cho cả file.
-async function startServer(t) {
+async function startServer(t, extraOptions = {}) {
     const oldUsername = process.env.ADMIN_USERNAME;
     const oldPassword = process.env.ADMIN_PASSWORD;
     process.env.ADMIN_USERNAME = "route-test-admin";
     process.env.ADMIN_PASSWORD = "route-test-password";
 
     memoryFiles.clear();
-    const runtime = createAdminServer({ port: 0 });
+    const runtime = createAdminServer({ port: 0, ...extraOptions });
     await new Promise((resolve) => runtime.server.listen(0, "127.0.0.1", resolve));
     const port = runtime.server.address().port;
 
@@ -184,4 +185,67 @@ test("route chat không bị nhầm với nhau", async (t) => {
     const incomplete = await request(port, "GET", "/api/admin/chat/messages/bot1", null, cookie);
     assert.equal(incomplete.status, 404);
     assert.equal(incomplete.body?.error, "Not found");
+});
+
+/* ==========================================================================
+   Origin công khai cho media
+
+   Bot chính thức gửi ảnh/tệp bằng URL, và máy chủ Zalo phải tự tải URL đó. Nếu
+   ta dựng URL từ localhost thì việc gửi luôn thất bại. Origin phải lấy từ chính
+   request đang phục vụ dashboard.
+   ========================================================================== */
+
+test("chat/send truyền origin thật của request xuống tầng gửi", async (t) => {
+    let captured = null;
+    const { port, cookie } = await startServer(t, {
+        sendChatMessage: async (input) => { captured = input; return { sent: true }; }
+    });
+
+    const response = await request(port, "POST", "/api/admin/chat/send",
+        { botId: "bot1", chatId: "chat-1", text: "xin chào" }, cookie);
+
+    assert.equal(response.status, 200);
+    assert.ok(captured, "tầng gửi phải được gọi");
+    assert.equal(captured.publicBaseUrl, `http://127.0.0.1:${port}`);
+});
+
+test("chat/send tôn trọng X-Forwarded-Proto khi đi qua proxy https", async (t) => {
+    let captured = null;
+    const { port, cookie } = await startServer(t, {
+        sendChatMessage: async (input) => { captured = input; return { sent: true }; }
+    });
+
+    await request(port, "POST", "/api/admin/chat/send",
+        { botId: "bot1", chatId: "chat-1", text: "qua proxy" }, cookie,
+        { "X-Forwarded-Proto": "https", "X-Forwarded-Host": "zalobot.example.com" });
+
+    assert.equal(captured.publicBaseUrl, "https://zalobot.example.com");
+});
+
+test("chat/send gửi tệp cũng nhận origin công khai", async (t) => {
+    let captured = null;
+    const { port, cookie } = await startServer(t, {
+        sendChatFile: async (input) => { captured = input; return { sent: true }; }
+    });
+
+    const response = await request(port, "POST", "/api/admin/chat/send",
+        { botId: "bot1", chatId: "chat-1", fileMediaId: "0".repeat(32) }, cookie);
+
+    assert.equal(response.status, 200);
+    assert.ok(captured, "tầng gửi tệp phải được gọi");
+    assert.match(String(captured.publicBaseUrl), /^http:\/\/127\.0\.0\.1:\d+$/);
+});
+
+test("Host lạ không được ghép vào URL gửi cho Zalo", async (t) => {
+    let captured = null;
+    const { port, cookie } = await startServer(t, {
+        sendChatMessage: async (input) => { captured = input; return { sent: true }; }
+    });
+
+    await request(port, "POST", "/api/admin/chat/send",
+        { botId: "bot1", chatId: "chat-1", text: "host độc" }, cookie,
+        { Host: "evil.example.com/<script>" });
+
+    // Host không hợp lệ ⇒ không dựng được origin ⇒ chuỗi rỗng, không phải URL rác.
+    assert.equal(captured.publicBaseUrl, "");
 });
