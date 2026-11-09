@@ -1585,20 +1585,28 @@ async function handleApi(request, response, url, options = {}) {
         if (!validation.valid) {
             return json(response, 400, { error: validation.error });
         }
-        const command = upload.fields.command || null;
+        // Cùng một đường upload phục vụ hai loại ảnh. Mặc định là ảnh trợ giúp để
+        // không phá vỡ client cũ; ảnh chat phải khai báo tường minh, nếu không nó
+        // sẽ lẫn vào danh sách ảnh hướng dẫn của /help.
+        const requestedType = String(upload.fields.mediaType || "").trim();
+        const mediaType = requestedType === MEDIA_TYPES.CHAT_IMAGE
+            ? MEDIA_TYPES.CHAT_IMAGE
+            : MEDIA_TYPES.HELP_IMAGE;
+        // Ảnh chat không gắn với lệnh nào.
+        const command = mediaType === MEDIA_TYPES.HELP_IMAGE ? (upload.fields.command || null) : null;
         try {
             const media = await storeMedia({
                 buffer: validation.buffer,
                 originalName: upload.file.originalName,
                 declaredMime: validation.mimeType,
-                mediaType: MEDIA_TYPES.HELP_IMAGE,
+                mediaType,
                 metadata: { command }
             });
             // Nếu có command, gắn luôn.
             if (command) {
                 await associateHelpImage(media.mediaId, command);
             }
-            audit("help-image.upload", request, { mediaId: media.mediaId, command, result: "success" });
+            audit("media.upload", request, { mediaId: media.mediaId, mediaType, command, result: "success" });
             return json(response, 201, { media });
         } catch (error) {
             audit("help-image.upload", request, { result: "error", error: error.message });

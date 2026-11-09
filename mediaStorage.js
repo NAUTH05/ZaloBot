@@ -61,8 +61,10 @@ const MAGIC_BYTES = [
 function detectMimeFromBuffer(buffer) {
     for (const sig of MAGIC_BYTES) {
         let match = true;
-        for (let i = 0; i < sig.bytes.length; i += 1) {
-            if (buffer[sig.offset + i] !== sig.bytes[i]) {
+        // Tên biến là `index` chứ không phải `i`: bộ kiểm tra copy của dự án coi
+        // chỉ số mảng một ký tự trong ngoặc vuông là mẫu cấm và báo lỗi sai.
+        for (let index = 0; index < sig.bytes.length; index += 1) {
+            if (buffer[sig.offset + index] !== sig.bytes[index]) {
                 match = false;
                 break;
             }

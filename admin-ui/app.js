@@ -1836,7 +1836,8 @@ $("#chatImageInput")?.addEventListener("change", async (e) => {
   const { botId, chatId } = chatActiveConv;
   const formData = new FormData();
   formData.append("file", e.target.files[0]);
-  formData.append("command", "");
+  // Ảnh chat KHÔNG phải ảnh trợ giúp — khai báo rõ để không lẫn vào tab Help Images.
+  formData.append("mediaType", "chat-image");
 
   try {
     // Upload image first.
