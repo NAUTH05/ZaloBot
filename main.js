@@ -92,6 +92,7 @@ const {
 } = require("./inboundMedia");
 const {
     buildMediaUrl,
+    getPublicOrigin,
     isLoopbackUrl,
     rememberPublicOrigin
 } = require("./publicOrigin");
@@ -1069,6 +1070,27 @@ function planHelpIllustrations(images, options = {}) {
     };
 }
 
+// Chẩn đoán lần gửi ảnh hướng dẫn gần nhất.
+//
+// Vì sao cần: khi ảnh không gửi được, người dùng chỉ thấy bot gửi mỗi dòng tên
+// lệnh, còn lý do thật nằm trong log pm2 — phải SSH mới biết. Giữ lại thông tin
+// này để dashboard hiển thị ngay.
+let lastHelpImageFailure = null;
+
+function recordHelpImageFailure(detail) {
+    lastHelpImageFailure = { ...detail, at: new Date().toISOString() };
+}
+
+function getHelpMediaDiagnostics() {
+    return {
+        publicOrigin: getPublicOrigin(),
+        // Origin có thể chưa biết nếu chưa cấu hình ADMIN_BASE_URL và quản trị
+        // viên chưa mở dashboard lần nào sau khi khởi động.
+        publicOriginKnown: Boolean(getPublicOrigin()),
+        lastFailure: lastHelpImageFailure
+    };
+}
+
 async function sendHelpIllustrations(chatId, images, options = {}) {
     const plan = planHelpIllustrations(images, options);
     if (plan.groups.length === 0) return 0;
@@ -1086,11 +1108,18 @@ async function sendHelpIllustrations(chatId, images, options = {}) {
             console.warn(`[Help] không gửi được nhãn /${group.command}: ${error.message}`);
         }
         for (const image of group.images) {
+            const url = buildMediaPublicUrl(image.mediaId);
             try {
-                await sendPhoto(chatId, buildMediaPublicUrl(image.mediaId));
+                await sendPhoto(chatId, url);
                 sent += 1;
             } catch (error) {
                 console.warn(`[Help] ảnh ${image.mediaId} của /${group.command} không gửi được: ${error.message}`);
+                recordHelpImageFailure({
+                    command: group.command,
+                    mediaId: image.mediaId,
+                    url,
+                    error: String(error.message || error)
+                });
             }
         }
     }
@@ -2925,7 +2954,10 @@ async function startRuntime() {
         // Chat Center — gửi tin nhắn từ admin qua bot.
         // Logic nằm ở sendChatMessageToChat()/sendChatFileToChat() để kiểm thử được.
         sendChatMessage: (input) => sendChatMessageToChat(input),
-        sendChatFile: (input) => sendChatFileToChat(input)
+        sendChatFile: (input) => sendChatFileToChat(input),
+
+        // Chẩn đoán gửi ảnh hướng dẫn, hiển thị trên tab Help Images.
+        getHelpMediaDiagnostics: () => getHelpMediaDiagnostics()
     });
     await new Promise((resolve, reject) => {
         adminRuntime.server.once("error", reject);
@@ -2934,6 +2966,19 @@ async function startRuntime() {
     console.log(`[Dashboard] Listening on http://127.0.0.1:${adminRuntime.port}${adminRuntime.basePath}`);
     metrics.mark("Dashboard");
     metrics.logMemory("sau dashboard");
+
+    // Bot chính thức gửi ảnh bằng URL công khai; thiếu origin thì mọi lần gửi ảnh
+    // đều hỏng. Nói ra ngay lúc khởi động thay vì để quản trị viên tự đoán khi
+    // thấy bot chỉ gửi mỗi dòng tên lệnh.
+    if (!getPublicOrigin()) {
+        console.warn(
+            "[Media] Chưa biết địa chỉ công khai. Ảnh/tệp gửi qua bot chính thức sẽ không gửi được " +
+            "cho tới khi bạn mở dashboard một lần hoặc đặt ADMIN_BASE_URL trong .env " +
+            "(ví dụ https://zalobot.example.com)."
+        );
+    } else {
+        console.log(`[Media] Địa chỉ công khai: ${getPublicOrigin()}`);
+    }
 
     // Bước 4: chỉ bật scheduler sau khi state Firestore đã được hydrate vào bộ nhớ.
     runtimeSchedulerJobs = registerRuntimeJobs() || [];
@@ -3500,6 +3545,7 @@ module.exports = {
     sendChatMessageToChat,
     sendChatFileToChat,
     planHelpIllustrations,
+    getHelpMediaDiagnostics,
     buildMediaPublicUrl,
     registerShutdownHandlers,
     stopZaloPolling,

@@ -1673,6 +1673,14 @@ async function handleApi(request, response, url, options = {}) {
         return json(response, 200, { commands });
     }
 
+    if (url.pathname === `${API_PREFIX}/help-images/diagnostics` && request.method === "GET") {
+        // Cho quản trị viên thấy vì sao ảnh không gửi được, không cần SSH đọc log.
+        const diagnostics = typeof options.getHelpMediaDiagnostics === "function"
+            ? options.getHelpMediaDiagnostics()
+            : { publicOrigin: null, publicOriginKnown: false, lastFailure: null };
+        return json(response, 200, diagnostics);
+    }
+
     if (url.pathname === `${API_PREFIX}/help-images` && request.method === "GET") {
         const command = url.searchParams.get("command") || null;
         const images = await listMediaByType(MEDIA_TYPES.HELP_IMAGE, { command });

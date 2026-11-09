@@ -249,3 +249,45 @@ test("Host lạ không được ghép vào URL gửi cho Zalo", async (t) => {
     // Host không hợp lệ ⇒ không dựng được origin ⇒ chuỗi rỗng, không phải URL rác.
     assert.equal(captured.publicBaseUrl, "");
 });
+
+/* ==========================================================================
+   Chẩn đoán gửi ảnh hướng dẫn
+   ========================================================================== */
+
+test("help-images/diagnostics trả mặc định khi tiến trình chưa nối hàm", async (t) => {
+    const { port, cookie } = await startServer(t);
+
+    const response = await request(port, "GET", "/api/admin/help-images/diagnostics", null, cookie);
+
+    assert.equal(response.status, 200);
+    assert.equal(response.body.publicOriginKnown, false);
+    assert.equal(response.body.lastFailure, null);
+});
+
+test("help-images/diagnostics trả đúng dữ liệu tiến trình cung cấp", async (t) => {
+    const { port, cookie } = await startServer(t, {
+        getHelpMediaDiagnostics: () => ({
+            publicOrigin: "https://zalobot.example.com",
+            publicOriginKnown: true,
+            lastFailure: {
+                at: "2026-11-10T00:00:00.000Z",
+                command: "help",
+                mediaId: "a".repeat(32),
+                url: "https://zalobot.example.com/api/media/" + "a".repeat(32),
+                error: "400 Bad Request"
+            }
+        })
+    });
+
+    const response = await request(port, "GET", "/api/admin/help-images/diagnostics", null, cookie);
+
+    assert.equal(response.status, 200);
+    assert.equal(response.body.publicOrigin, "https://zalobot.example.com");
+    assert.equal(response.body.lastFailure.error, "400 Bad Request");
+});
+
+test("help-images/diagnostics yêu cầu đăng nhập", async (t) => {
+    const { port } = await startServer(t);
+    const response = await request(port, "GET", "/api/admin/help-images/diagnostics");
+    assert.equal(response.status, 401);
+});

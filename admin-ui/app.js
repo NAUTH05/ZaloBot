@@ -1617,9 +1617,48 @@ async function loadHelpImages() {
     const data = await api(url);
     helpImages = data.images || [];
     renderHelpImages();
+    await loadHelpImageDiagnostics();
   } catch (error) {
     console.error("loadHelpImages:", error.message);
     $("#helpImageGrid").innerHTML = `<div class="empty-state">Lỗi tải ảnh: ${escapeHtml(error.message)}</div>`;
+  }
+}
+
+// Hiện lý do ảnh không gửi được ngay trên tab, thay vì bắt quản trị viên đọc log.
+async function loadHelpImageDiagnostics() {
+  const banner = $("#helpImageDiagnostics");
+  if (!banner) return;
+  try {
+    const data = await api("/api/admin/help-images/diagnostics");
+    const problems = [];
+
+    if (!data.publicOriginKnown) {
+      problems.push(
+        "Chưa biết địa chỉ công khai của dashboard. Bot chính thức cần URL công khai để Zalo tải ảnh, " +
+        "nên ảnh sẽ không gửi được. Hãy mở dashboard một lần (đủ để hệ thống ghi nhận), " +
+        "hoặc đặt ADMIN_BASE_URL trong .env."
+      );
+    }
+
+    if (data.lastFailure) {
+      const failure = data.lastFailure;
+      problems.push(
+        `Lần gửi gần nhất thất bại (${formatDate(failure.at)}) — lệnh /${failure.command}: ${failure.error}` +
+        (failure.url ? ` · URL: ${failure.url}` : "")
+      );
+    }
+
+    if (problems.length === 0) {
+      banner.hidden = true;
+      banner.innerHTML = "";
+      return;
+    }
+
+    banner.hidden = false;
+    banner.className = "app-status error";
+    banner.innerHTML = problems.map((text) => `<div>${escapeHtml(text)}</div>`).join("");
+  } catch (_) {
+    banner.hidden = true;
   }
 }
 
