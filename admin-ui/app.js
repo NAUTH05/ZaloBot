@@ -1578,15 +1578,34 @@ async function loadHelpImageCommands() {
     const select = $("#helpImageCommand");
     const filter = $("#helpImageFilter");
     if (select) {
+      const previous = select.value;
       select.innerHTML = '<option value="">-- Chọn lệnh --</option>' +
         helpImageCommands.map((c) => `<option value="${escapeHtml(c.command)}">${escapeHtml(c.command)} — ${escapeHtml(c.description || c.usage || "")}</option>`).join("");
+      if (previous) select.value = previous;
     }
     if (filter) {
+      const previous = filter.value;
       filter.innerHTML = '<option value="">Tất cả lệnh</option>' +
         helpImageCommands.map((c) => `<option value="${escapeHtml(c.command)}">${escapeHtml(c.command)}</option>`).join("");
+      if (previous) filter.value = previous;
     }
+    syncHelpUploadState();
   } catch (error) {
     console.error("loadHelpImageCommands:", error.message);
+  }
+}
+
+// Ảnh không gắn lệnh thì KHÔNG bao giờ được gửi kèm /help. Bắt buộc chọn lệnh
+// trước khi tải lên để tránh đúng cái bẫy "upload xong mà bot không gửi gì".
+function syncHelpUploadState() {
+  const select = $("#helpImageCommand");
+  const button = $("#helpImageUploadForm button[type=submit]");
+  const hint = $("#helpImageCommandHint");
+  const chosen = Boolean(select?.value);
+  if (button) button.disabled = !chosen;
+  if (hint) {
+    hint.textContent = chosen ? "" : "Chọn lệnh trước khi tải lên — ảnh không gắn lệnh sẽ không được gửi.";
+    hint.className = chosen ? "" : "field-hint warn";
   }
 }
 
@@ -1604,6 +1623,13 @@ async function loadHelpImages() {
   }
 }
 
+function helpCommandOptions(selected) {
+  return '<option value="">-- Chưa gắn lệnh --</option>' +
+    helpImageCommands.map((c) =>
+      `<option value="${escapeHtml(c.command)}"${c.command === selected ? " selected" : ""}>/${escapeHtml(c.command)}</option>`
+    ).join("");
+}
+
 function renderHelpImages() {
   const grid = $("#helpImageGrid");
   if (!grid) return;
@@ -1611,18 +1637,24 @@ function renderHelpImages() {
     grid.innerHTML = '<div class="empty-state">Chưa có ảnh nào. Upload ảnh hướng dẫn ở bảng bên trái.</div>';
     return;
   }
-  grid.innerHTML = helpImages.map((img) => `
-    <div class="help-image-card">
+
+  grid.innerHTML = helpImages.map((img) => {
+    const unassigned = !img.command;
+    return `
+    <div class="help-image-card${unassigned ? " unassigned" : ""}">
       <img src="${escapeHtml(img.url)}" alt="${escapeHtml(img.originalName || "")}" loading="lazy" />
       <div class="help-image-meta">
-        <div class="help-image-command">/${escapeHtml(img.command || "(chưa gắn lệnh)")}</div>
-        <small>${escapeHtml(img.originalName || "")} · ${formatDate(img.storedAt)}</small>
+        <select class="help-image-command-select" data-media="${escapeHtml(img.mediaId)}" aria-label="Lệnh cho ảnh này">
+          ${helpCommandOptions(img.command || "")}
+        </select>
+        ${unassigned ? '<small class="help-image-warn">Chưa gắn lệnh — ảnh này sẽ không được gửi kèm.</small>' : ""}
+        <small class="muted">${escapeHtml(img.originalName || "")} · ${formatDate(img.storedAt)}</small>
         <div class="help-image-actions">
-          <button class="ghost small" data-associate="${escapeHtml(img.mediaId)}">Gắn lệnh</button>
           <button class="ghost small" data-delete-image="${escapeHtml(img.mediaId)}">Xoá</button>
         </div>
       </div>
-    </div>`).join("");
+    </div>`;
+  }).join("");
 
   grid.querySelectorAll("[data-delete-image]").forEach((btn) => {
     btn.addEventListener("click", async () => {
@@ -1636,18 +1668,27 @@ function renderHelpImages() {
     });
   });
 
-  grid.querySelectorAll("[data-associate]").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      const command = prompt("Nhập tên lệnh để gắn ảnh (ví dụ: nhanlich):");
-      if (!command) return;
+  // Gắn lệnh bằng select thật thay vì prompt(): prompt() bị chặn ở nhiều môi
+  // trường và không cho thấy danh sách lệnh hợp lệ.
+  grid.querySelectorAll("[data-media]").forEach((select) => {
+    select.addEventListener("change", async () => {
+      const command = select.value;
+      if (!command) {
+        alert("Hiện chưa hỗ trợ bỏ gắn lệnh. Hãy xoá ảnh và tải lại nếu cần đổi sang ảnh không gắn lệnh.");
+        select.value = "";
+        return;
+      }
+      select.disabled = true;
       try {
         await api("/api/admin/help-images/associate", {
           method: "POST",
-          body: JSON.stringify({ mediaId: btn.dataset.associate, command: command.trim() })
+          body: JSON.stringify({ mediaId: select.dataset.media, command })
         });
         await loadHelpImages();
       } catch (error) {
         alert(`Lỗi: ${error.message}`);
+      } finally {
+        select.disabled = false;
       }
     });
   });
@@ -1661,6 +1702,11 @@ $("#helpImageUploadForm")?.addEventListener("submit", async (e) => {
   const fileInput = $("#helpImageFile");
   const msg = $("#helpImageUploadMsg");
 
+  if (!command) {
+    msg.textContent = "Chọn lệnh trước khi tải lên.";
+    msg.className = "error";
+    return;
+  }
   if (!fileInput.files[0]) {
     msg.textContent = "Chưa chọn file.";
     msg.className = "error";
@@ -1669,7 +1715,7 @@ $("#helpImageUploadForm")?.addEventListener("submit", async (e) => {
 
   const formData = new FormData();
   formData.append("file", fileInput.files[0]);
-  if (command) formData.append("command", command);
+  formData.append("command", command);
 
   msg.textContent = "Đang tải lên...";
   msg.className = "";
@@ -1682,19 +1728,20 @@ $("#helpImageUploadForm")?.addEventListener("submit", async (e) => {
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || "Upload thất bại");
-    msg.textContent = `Đã tải lên: ${data.media.mediaId}`;
+    msg.textContent = `Đã tải lên và gắn vào /${command}. Người dùng gõ /help ${command} sẽ nhận ảnh này.`;
     msg.className = "success";
     form.reset();
     await loadHelpImages();
+    syncHelpUploadState();
   } catch (error) {
     msg.textContent = `Lỗi: ${error.message}`;
     msg.className = "error";
   }
 });
 
+$("#helpImageCommand")?.addEventListener("change", syncHelpUploadState);
 $("#helpImageFilter")?.addEventListener("change", loadHelpImages);
 $("#helpImageRefresh")?.addEventListener("click", loadHelpImages);
-
 /* ==========================================================================
    CHAT CENTER — giao tiếp hai chiều admin ↔ user, cập nhật realtime
    ========================================================================== */

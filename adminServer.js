@@ -57,6 +57,7 @@ const { describeRegisteredBots, getBot, listBots, listEnabledBots, runWithBot } 
 const { LEGACY_BOT_ID, normalizeBotId } = require("./bots");
 const { HELP_COMMANDS } = require("./helpContent");
 const { getChatEventStats, onChatEvent } = require("./chatEvents");
+const { publicOriginFromRequest, rememberPublicOrigin } = require("./publicOrigin");
 const {
     storeMedia,
     storeChatFile,
@@ -282,29 +283,11 @@ function contentDisposition(filename, inline = false) {
 }
 
 // ---------------------------------------------------------------------------
-// Gốc URL công khai của dashboard, suy ra từ CHÍNH request đang phục vụ.
-//
-// Vì sao cần: bot chính thức gửi ảnh/tệp bằng cách đưa URL cho Zalo Bot Platform,
-// và máy chủ Zalo phải tự tải URL đó. Nếu ta dựng URL từ localhost thì Zalo luôn
-// thất bại. Request đã đi qua tên miền thật, nên header của nó là nguồn đúng.
-//
-// Thứ tự: ADMIN_BASE_URL (nếu cấu hình) → X-Forwarded-* → Host.
+// Gốc URL công khai của dashboard — logic nằm ở publicOrigin.js (dùng chung với
+// main.js), vì /help cũng cần biết địa chỉ này khi không có request đi kèm.
 // ---------------------------------------------------------------------------
 function publicBaseUrlFrom(request) {
-    const configured = String(process.env.ADMIN_BASE_URL || "").trim();
-    if (configured) return configured.replace(/\/+$/, "");
-
-    const forwardedProto = String(request.headers["x-forwarded-proto"] || "").split(",")[0].trim().toLowerCase();
-    const proto = forwardedProto === "https" || forwardedProto === "http"
-        ? forwardedProto
-        : (request.socket?.encrypted ? "https" : "http");
-
-    const rawHost = String(request.headers["x-forwarded-host"] || request.headers.host || "").split(",")[0].trim();
-    // Chỉ nhận host hợp lệ. Host do client gửi lên, nên phải lọc trước khi ghép
-    // vào URL đem đi gửi cho Zalo.
-    if (!/^[A-Za-z0-9.\-:[\]]+$/.test(rawHost)) return "";
-
-    return `${proto}://${rawHost}`;
+    return publicOriginFromRequest(request);
 }
 
 // ---------------------------------------------------------------------------
@@ -963,6 +946,12 @@ async function handleApi(request, response, url, options = {}) {
         return json(response, 200, { ok: true }, { "Set-Cookie": sessionCookie(request, "", 0) });
     }
     if (!requireAdmin(request, response)) return;
+
+    // Ghi nhớ origin công khai ngay khi quản trị viên dùng dashboard. Nhờ vậy ảnh
+    // hướng dẫn của /help gửi được sau khi restart mà không cần cấu hình gì thêm:
+    // chỉ cần mở dashboard một lần là đủ biết tên miền thật.
+    rememberPublicOrigin(publicBaseUrlFrom(request));
+
     if (url.pathname === `${API_PREFIX}/workspace` && request.method === "GET") return json(response, 200, buildAdminData());
     if (url.pathname === `${API_PREFIX}/dashboard` && request.method === "GET") return json(response, 200, dashboardSummary());
     // Danh sách bot đang chạy. describeRegisteredBots chỉ trả vân tay token,

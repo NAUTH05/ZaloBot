@@ -90,6 +90,11 @@ const {
     ingestInboundAttachments,
     pendingDescriptors
 } = require("./inboundMedia");
+const {
+    buildMediaUrl,
+    isLoopbackUrl,
+    rememberPublicOrigin
+} = require("./publicOrigin");
 const { storeMedia, getMediaInfo, deleteMedia, listMediaByType, associateHelpImage, getHelpImagesForCommand, validateUploadedFile, MEDIA_TYPES } = require("./mediaStorage");
 const { detectChatType, getInteractionTargets, recordInteraction } = require("./interactionRegistry");
 const {
@@ -527,47 +532,15 @@ function currentProvider() {
     throw new Error("Nhà cung cấp hiện tại không gửi được tin nhắn");
 }
 
-// Origin công khai đã biết. Được ghi lại mỗi khi dashboard gọi API, để những
-// đường gửi KHÔNG có request đi kèm (ví dụ ảnh hướng dẫn của /help) cũng dùng
-// được địa chỉ thật thay vì localhost.
-let cachedPublicBaseUrl = String(process.env.ADMIN_BASE_URL || "").trim() || null;
-
-function rememberPublicBaseUrl(baseUrl) {
-    const value = String(baseUrl || "").trim().replace(/\/+$/, "");
-    if (!value) return;
-    if (!/^https?:\/\/[^\s/]+$/i.test(value)) return;
-    cachedPublicBaseUrl = value;
-}
-
-function isLoopbackUrl(url) {
-    try {
-        const host = new URL(url).hostname.toLowerCase();
-        return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
-    } catch (_) {
-        return false;
-    }
-}
-
 // Xây URL công khai cho media.
 //
-// Vì sao KHÔNG được mặc định về localhost: bot chính thức gửi ảnh bằng cách đưa
-// URL cho Zalo Bot Platform, và máy chủ Zalo phải tự tải URL đó về. Một địa chỉ
-// http://localhost:6003 chỉ mở được trên chính VPS, nên Zalo luôn tải thất bại —
-// đúng lỗi "không gửi được ảnh".
-//
-// Thứ tự ưu tiên:
-//   1. baseOverride — origin thật của request dashboard (xem publicBaseUrlFrom
-//      trong adminServer.js). Đây là đường dùng bình thường.
-//   2. ADMIN_BASE_URL — dùng khi chạy script/scheduler không có request.
-//   3. localhost — chỉ còn dùng được cho ZCA (gửi Buffer) và môi trường thử.
+// Việc quản lý origin nằm ở publicOrigin.js (dùng chung với adminServer), vì cả
+// hai phía đều cần biết địa chỉ công khai: dashboard để truyền xuống khi gửi, và
+// /help để gửi ảnh hướng dẫn khi không có request nào đi kèm.
 function buildMediaPublicUrl(mediaId, baseOverride = null) {
     if (!mediaId) return null;
-    const override = String(baseOverride || "").trim();
-    const configured = String(process.env.ADMIN_BASE_URL || "").trim();
-    const baseUrl = (override || configured || cachedPublicBaseUrl || `http://localhost:${process.env.ADMIN_PORT || 3000}`)
-        .replace(/\/+$/, "");
-    if (override) rememberPublicBaseUrl(override);
-    return `${baseUrl}/api/media/${mediaId}`;
+    if (baseOverride) rememberPublicOrigin(baseOverride);
+    return buildMediaUrl(mediaId, baseOverride);
 }
 
 // Gửi ảnh qua nhà cung cấp hiện tại.
@@ -2304,17 +2277,23 @@ async function handleCommand(msg, parsedCommand) {
                 // Gửi text chi tiết lệnh.
                 await sendMessage(chatId, renderCommand(cmd));
                 // Gửi ảnh hướng dẫn nếu có (lấy từ mediaStorage).
+                //
+                // Bọc từng ảnh riêng: một ảnh lỗi không được chặn các ảnh còn
+                // lại, và không được làm hỏng cả câu trả lời /help.
                 try {
                     const images = await getHelpImagesForCommand(cmd.command);
                     for (const img of images) {
-                        const photoUrl = buildMediaPublicUrl(img.mediaId);
-                        if (photoUrl) {
-                            await sendPhoto(chatId, photoUrl);
+                        try {
+                            await sendPhoto(chatId, buildMediaPublicUrl(img.mediaId));
+                        } catch (imgError) {
+                            console.warn(`[Help] ảnh ${img.mediaId} của /${cmd.command} không gửi được: ${imgError.message}`);
                         }
                     }
-                } catch (imgError) {
-                    // Lỗi gửi ảnh không được làm lỗi toàn bộ /help.
-                    console.warn(`[Help] khong gui duoc anh huong dan cho ${cmd.command}: ${imgError.message}`);
+                    if (images.length > 0) {
+                        console.log(`[Help] /${cmd.command}: ${images.length} ảnh hướng dẫn`);
+                    }
+                } catch (listError) {
+                    console.warn(`[Help] không đọc được ảnh của /${cmd.command}: ${listError.message}`);
                 }
             } else {
                 await sendMessage(

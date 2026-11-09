@@ -438,21 +438,22 @@ async function listMediaByType(mediaType, options = {}) {
     if (!db) return [];
 
     try {
-        let query = db.collection(MEDIA_COLLECTION).where("mediaType", "==", mediaType);
-        if (options.command) {
-            query = query.where("command", "==", options.command);
-        }
-        const snapshot = await query.limit(limit).get();
+        // Lọc `command` trong bộ nhớ (xem lý do ở getHelpImagesForCommand).
+        const snapshot = await db.collection(MEDIA_COLLECTION)
+            .where("mediaType", "==", mediaType)
+            .limit(limit * 4)
+            .get();
         const results = [];
         snapshot.forEach((doc) => {
             const data = doc.data();
+            if (options.command && data.command !== options.command) return;
             // Không trả filePath ra API.
             const { filePath, ...safe } = data;
             results.push({ ...safe, url: `/api/media/${data.mediaId}` });
         });
         // Sắp xếp theo thời gian tạo mới nhất.
         results.sort((a, b) => (b.storedAt || "").localeCompare(a.storedAt || ""));
-        return results;
+        return results.slice(0, limit);
     } catch (error) {
         console.error(`[MediaStorage] lỗi listMediaByType: ${error.message}`);
         return [];
@@ -488,13 +489,18 @@ async function getHelpImagesForCommand(command) {
     if (!db) return [];
 
     try {
+        // Chỉ lọc theo `command` rồi kiểm tra mediaType trong bộ nhớ.
+        //
+        // Vì sao không dùng hai điều kiện Firestore: truy vấn hai trường bằng nhau
+        // phụ thuộc vào index hợp nhất, và nếu index chưa sẵn thì trả về rỗng một
+        // cách im lặng — đúng kiểu "gán ảnh rồi mà bot không gửi gì".
         const snapshot = await db.collection(MEDIA_COLLECTION)
-            .where("mediaType", "==", MEDIA_TYPES.HELP_IMAGE)
-            .where("command", "==", command)
+            .where("command", "==", String(command))
             .get();
         const results = [];
         snapshot.forEach((doc) => {
             const data = doc.data();
+            if (data.mediaType !== MEDIA_TYPES.HELP_IMAGE) return;
             const { filePath, ...safe } = data;
             results.push({ ...safe, url: `/api/media/${data.mediaId}` });
         });
