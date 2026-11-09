@@ -199,3 +199,34 @@ test("SOURCE có đúng các giá trị", () => {
     assert.ok(SOURCE.ADMIN_CHAT);
     assert.ok(SOURCE.INBOUND_USER);
 });
+
+/* ---------------------------------------------------------------------------
+   Ảnh bị cụt phải bị từ chối ngay lúc upload.
+
+   Magic bytes chỉ kiểm tra phần ĐẦU, nên một ảnh mất vài byte cuối vẫn lọt qua
+   và chỉ hỏng khi Zalo tải về — đúng sự cố bộ phân tích multipart cắt 2 byte.
+   --------------------------------------------------------------------------- */
+
+test("ảnh JPEG đủ byte cuối thì hợp lệ", () => {
+    const result = validateUploadedFile({ buffer: minimalJpeg() });
+    assert.equal(result.valid, true);
+});
+
+test("ảnh JPEG mất 2 byte cuối (FF D9) bị từ chối", () => {
+    const truncated = minimalJpeg().slice(0, -2);
+    const result = validateUploadedFile({ buffer: truncated });
+
+    assert.equal(result.valid, false);
+    assert.match(String(result.error), /cụt|thiếu dữ liệu/i);
+});
+
+test("ảnh PNG thiếu chunk IEND bị từ chối", () => {
+    const head = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+    const iend = Buffer.from([0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82]);
+    const valid = Buffer.concat([head, Buffer.alloc(16, 0), iend]);
+
+    assert.equal(validateUploadedFile({ buffer: valid }).valid, true);
+
+    const truncated = valid.slice(0, -4);
+    assert.equal(validateUploadedFile({ buffer: truncated }).valid, false);
+});

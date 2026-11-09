@@ -1076,18 +1076,50 @@ function planHelpIllustrations(images, options = {}) {
 // lệnh, còn lý do thật nằm trong log pm2 — phải SSH mới biết. Giữ lại thông tin
 // này để dashboard hiển thị ngay.
 let lastHelpImageFailure = null;
+let lastHelpImageSuccess = null;
 
 function recordHelpImageFailure(detail) {
     lastHelpImageFailure = { ...detail, at: new Date().toISOString() };
 }
 
+function recordHelpImageSuccess(detail) {
+    lastHelpImageSuccess = { ...detail, at: new Date().toISOString() };
+}
+
+// Tự tải lại URL công khai từ chính máy chủ.
+//
+// Mục đích: tách hai nguyên nhân rất khác nhau —
+//   - máy chủ mình trả 404/403  ⇒ URL sai, tệp mất, hoặc proxy chặn;
+//   - máy chủ mình trả 200 nhưng Zalo vẫn lỗi ⇒ phía Zalo/Cloudflare chặn.
+// Chỉ chạy khi đã có lỗi, và chỉ một lần cho mỗi đợt gửi, để không làm chậm /help.
+async function probeMediaUrl(url, timeoutMs = 6000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const response = await fetch(url, { method: "GET", signal: controller.signal, redirect: "follow" });
+        const contentType = response.headers.get("content-type") || "";
+        // Không cần tải cả ảnh: đóng luồng ngay sau khi có header.
+        try { await response.body?.cancel?.(); } catch (_) {}
+        return { ok: response.ok, status: response.status, contentType };
+    } catch (error) {
+        return { ok: false, status: 0, error: String(error.message || error) };
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
 function getHelpMediaDiagnostics() {
+    const origin = getPublicOrigin();
+    // Chỉ coi lỗi là "đang có vấn đề" khi nó MỚI HƠN lần gửi thành công gần nhất.
+    // Nếu không, banner sẽ treo mãi một lỗi cũ đã được khắc phục.
+    const failureIsCurrent = Boolean(lastHelpImageFailure)
+        && (!lastHelpImageSuccess || lastHelpImageFailure.at > lastHelpImageSuccess.at);
+
     return {
-        publicOrigin: getPublicOrigin(),
-        // Origin có thể chưa biết nếu chưa cấu hình ADMIN_BASE_URL và quản trị
-        // viên chưa mở dashboard lần nào sau khi khởi động.
-        publicOriginKnown: Boolean(getPublicOrigin()),
-        lastFailure: lastHelpImageFailure
+        publicOrigin: origin,
+        publicOriginKnown: Boolean(origin),
+        lastFailure: failureIsCurrent ? lastHelpImageFailure : null,
+        lastSuccess: lastHelpImageSuccess
     };
 }
 
@@ -1100,6 +1132,7 @@ async function sendHelpIllustrations(chatId, images, options = {}) {
     }
 
     let sent = 0;
+    let probed = false;
     for (const group of plan.groups) {
         try {
             await sendMessage(chatId, `**/${group.command}**`);
@@ -1114,14 +1147,23 @@ async function sendHelpIllustrations(chatId, images, options = {}) {
                 sent += 1;
             } catch (error) {
                 console.warn(`[Help] ảnh ${image.mediaId} của /${group.command} không gửi được: ${error.message}`);
+                // Tự kiểm tra URL một lần cho cả đợt: nếu máy chủ mình tải được
+                // thì lỗi nằm phía Zalo, còn không thì URL/tệp có vấn đề.
+                const probe = probed ? undefined : await probeMediaUrl(url);
+                probed = true;
                 recordHelpImageFailure({
                     command: group.command,
                     mediaId: image.mediaId,
                     url,
-                    error: String(error.message || error)
+                    error: String(error.message || error),
+                    probe
                 });
             }
         }
+    }
+
+    if (sent > 0) {
+        recordHelpImageSuccess({ count: sent });
     }
 
     if (plan.skippedImages > 0) {

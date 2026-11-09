@@ -522,6 +522,35 @@ function safeGetDb() {
     }
 }
 
+// Kiểm tra ảnh có ĐỦ byte kết thúc hay không.
+//
+// Magic bytes chỉ xác nhận phần ĐẦU. Một ảnh bị cụt vài byte vẫn qua được kiểm
+// tra đó nhưng Zalo có thể từ chối khi tải về — đúng sự cố do bộ phân tích
+// multipart cắt mất 2 byte cuối. Kiểm tra thêm phần đuôi để biến lỗi âm thầm
+// thành lỗi rõ ràng ngay lúc tải lên.
+function looksCompleteImage(buffer, mimeType) {
+    if (!buffer || buffer.length < 12) return false;
+
+    if (mimeType === "image/jpeg") {
+        // EOI marker: FF D9
+        return buffer[buffer.length - 2] === 0xFF && buffer[buffer.length - 1] === 0xD9;
+    }
+    if (mimeType === "image/png") {
+        // Kết thúc bằng chunk IEND: 49 45 4E 44 AE 42 60 82
+        const iend = Buffer.from([0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82]);
+        return buffer.length >= 8 && buffer.slice(-8).equals(iend);
+    }
+    if (mimeType === "image/gif") {
+        return buffer[buffer.length - 1] === 0x3B;   // trailer 0x3B
+    }
+    if (mimeType === "image/webp") {
+        // RIFF container: 4 byte đầu là "RIFF", 4 byte sau là kích thước khai báo.
+        const declared = buffer.readUInt32LE(4) + 8;
+        return buffer.length >= declared;
+    }
+    return true;
+}
+
 // Validation cho ẢNH tải lên: bắt buộc magic bytes khớp một định dạng ảnh.
 function validateUploadedFile(file) {
     if (!file) return { valid: false, error: "Không có file." };
@@ -532,6 +561,12 @@ function validateUploadedFile(file) {
     const detectedMime = detectMimeFromBuffer(buffer);
     if (!detectedMime) return { valid: false, error: "File không phải ảnh hợp lệ." };
     if (!ALLOWED_MIME.has(detectedMime)) return { valid: false, error: `Định dạng ${detectedMime} không được hỗ trợ.` };
+    if (!looksCompleteImage(buffer, detectedMime)) {
+        return {
+            valid: false,
+            error: "Ảnh bị thiếu dữ liệu ở cuối tệp (tệp cụt). Hãy tải lên lại bản gốc."
+        };
+    }
     return { valid: true, mimeType: detectedMime, buffer };
 }
 

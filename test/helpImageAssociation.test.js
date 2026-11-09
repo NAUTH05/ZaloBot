@@ -11,23 +11,28 @@ const assert = require("node:assert/strict");
 const path = require("node:path");
 
 // --- Firestore giả, đủ dùng cho mediaStorage -------------------------------
-const store = new Map();   // "collection/id" -> data
+//
+// Phải hỗ trợ cả collection LỒNG NHAU (`.../doc(id)/collection(name)`): mocha nạp
+// tất cả file test vào CÙNG một tiến trình, nên db giả này còn được messageRecorder
+// dùng khi các file test khác chạy sau. Thiếu `.collection()` trên doc sẽ làm hỏng
+// những bài test đó với lỗi rất khó lần.
+const store = new Map();   // "đường/dẫn/docId" -> data
 
-function makeQuery(collectionName, filters = [], max = null) {
+function makeQuery(collectionPath, filters = [], max = null) {
     const query = {
         where(field, op, value) {
-            return makeQuery(collectionName, [...filters, { field, op, value }], max);
+            return makeQuery(collectionPath, [...filters, { field, op, value }], max);
         },
         limit(count) {
-            return makeQuery(collectionName, filters, count);
+            return makeQuery(collectionPath, filters, count);
         },
         orderBy() {
             return query;
         },
         async get() {
-            const prefix = `${collectionName}/`;
+            const prefix = `${collectionPath}/`;
             const all = [...store.entries()]
-                .filter(([key]) => key.startsWith(prefix))
+                .filter(([key]) => key.startsWith(prefix) && !key.slice(prefix.length).includes("/"))
                 .map(([key, data]) => ({ id: key.slice(prefix.length), data: () => data }));
 
             const matched = all.filter((doc) => filters.every((filter) => {
@@ -48,8 +53,8 @@ function makeQuery(collectionName, filters = [], max = null) {
     return query;
 }
 
-function makeDoc(collectionName, id) {
-    const key = `${collectionName}/${id}`;
+function makeDoc(collectionPath, id) {
+    const key = `${collectionPath}/${id}`;
     return {
         async get() {
             return {
@@ -63,19 +68,24 @@ function makeDoc(collectionName, id) {
         },
         async delete() {
             store.delete(key);
-        }
+        },
+        // Collection con (messageRecorder dùng cho bot_conversations/.../messages).
+        collection: (name) => makeCollection(`${key}/${name}`)
+    };
+}
+
+function makeCollection(pathPrefix) {
+    return {
+        doc: (id) => makeDoc(pathPrefix, id),
+        where: (field, op, value) => makeQuery(pathPrefix, [{ field, op, value }]),
+        limit: (count) => makeQuery(pathPrefix, [], count),
+        orderBy: () => makeQuery(pathPrefix, [], null),
+        get: () => makeQuery(pathPrefix, [], null).get()
     };
 }
 
 const fakeDb = {
-    collection(name) {
-        return {
-            doc: (id) => makeDoc(name, id),
-            where: (field, op, value) => makeQuery(name, [{ field, op, value }]),
-            limit: (count) => makeQuery(name, [], count),
-            get: () => makeQuery(name, [], null).get()
-        };
-    }
+    collection: (name) => makeCollection(name)
 };
 
 // Gắn db giả vào firestorePersistence TRƯỚC khi mediaStorage đọc.

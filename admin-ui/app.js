@@ -1642,15 +1642,26 @@ async function loadHelpImageDiagnostics() {
 
     if (data.lastFailure) {
       const failure = data.lastFailure;
-      problems.push(
-        `Lần gửi gần nhất thất bại (${formatDate(failure.at)}) — lệnh /${failure.command}: ${failure.error}` +
-        (failure.url ? ` · URL: ${failure.url}` : "")
-      );
+      let line = `Lần gửi gần nhất thất bại (${formatDate(failure.at)}) — lệnh /${failure.command}: ${failure.error}`;
+      if (failure.url) line += ` · URL: ${failure.url}`;
+      if (failure.probe) {
+        // Kết quả tự tải URL từ chính máy chủ: tách được lỗi phía mình và phía Zalo.
+        line += failure.probe.ok
+          ? ` · Máy chủ tự tải được URL (HTTP ${failure.probe.status}, ${failure.probe.contentType || "?"}) ⇒ URL ổn, lỗi nằm ở phía Zalo.`
+          : ` · Máy chủ CŨNG không tải được URL (${failure.probe.status || failure.probe.error}) ⇒ kiểm tra tệp/proxy.`;
+      }
+      problems.push(line);
     }
 
     if (problems.length === 0) {
-      banner.hidden = true;
-      banner.innerHTML = "";
+      if (data.lastSuccess) {
+        banner.hidden = false;
+        banner.className = "app-status success";
+        banner.innerHTML = `<div>Ảnh hướng dẫn gửi được — ${formatDate(data.lastSuccess.at)}, ${data.lastSuccess.count} ảnh.</div>`;
+      } else {
+        banner.hidden = true;
+        banner.innerHTML = "";
+      }
       return;
     }
 
