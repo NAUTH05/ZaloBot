@@ -174,6 +174,13 @@ const configuredBasePath = String(process.env.ADMIN_BASE_PATH || "/zalobot").tri
 const BASE_PATH = configuredBasePath === "/" ? "/" : `/${configuredBasePath.replace(/^\/+|\/+$/g, "")}`;
 const API_PREFIX = BASE_PATH === "/" ? "/api/admin" : `${BASE_PATH}/api/admin`;
 const UI_PREFIX = BASE_PATH === "/" ? "/" : `${BASE_PATH}/`;
+// Tiền tố đã escape ký tự đặc biệt của regex, dùng cho các route có tham số động.
+//
+// Vì sao cần hằng riêng: ghép chuỗi thủ công kiểu replaceAll("/", "\\/") rất dễ
+// thừa/thiếu một cấp escape. Sai một cấp thì `\\` trong regex khớp một dấu `\`
+// THẬT, nên pattern đòi đường dẫn bắt đầu bằng `\` và không bao giờ khớp — đúng
+// lỗi 404 đã gặp ở /chat/messages. Escape tập ký tự đặc biệt là cách chuẩn.
+const API_PREFIX_REGEX = API_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const STATIC_DIR = path.join(__dirname, "admin-ui");
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 const MAX_BODY_BYTES = 64 * 1024;
@@ -1612,7 +1619,7 @@ async function handleApi(request, response, url, options = {}) {
     }
 
     // Delete help image: /api/admin/help-images/:mediaId
-    const helpImageMatch = url.pathname.match(new RegExp(`^${API_PREFIX.replaceAll("/", "\\\\/")}\\/help-images\\/([a-f0-9]+)$`));
+    const helpImageMatch = url.pathname.match(new RegExp(`^${API_PREFIX_REGEX}/help-images/([a-f0-9]+)$`));
     if (helpImageMatch && request.method === "DELETE") {
         const mediaId = helpImageMatch[1];
         const deleted = await deleteMedia(mediaId);
@@ -1646,7 +1653,7 @@ async function handleApi(request, response, url, options = {}) {
 
     // Chat conversation detail: /api/admin/chat/conversations/:botId/:chatId
     // chatId có thể chứa ký tự đặc biệt nên phải dùng URL encoding.
-    const chatConvMatch = url.pathname.match(new RegExp(`^${API_PREFIX.replaceAll("/", "\\\\/")}\\/chat\\/conversations\\/([^/]+)\\/(.+)$`));
+    const chatConvMatch = url.pathname.match(new RegExp(`^${API_PREFIX_REGEX}/chat/conversations/([^/]+)/(.+)$`));
     if (chatConvMatch && request.method === "GET") {
         const botId = decodeURIComponent(chatConvMatch[1]);
         const chatId = decodeURIComponent(chatConvMatch[2]);
@@ -1656,7 +1663,7 @@ async function handleApi(request, response, url, options = {}) {
     }
 
     // Message history: /api/admin/chat/messages/:botId/:chatId
-    const chatMsgMatch = url.pathname.match(new RegExp(`^${API_PREFIX.replaceAll("/", "\\\\/")}\\/chat\\/messages\\/([^/]+)\\/(.+)$`));
+    const chatMsgMatch = url.pathname.match(new RegExp(`^${API_PREFIX_REGEX}/chat/messages/([^/]+)/(.+)$`));
     if (chatMsgMatch && request.method === "GET") {
         const botId = decodeURIComponent(chatMsgMatch[1]);
         const chatId = decodeURIComponent(chatMsgMatch[2]);
