@@ -339,6 +339,15 @@ async function getMediaInfo(mediaId) {
                         metadata: data
                     };
                 }
+                // Có bản ghi nhưng KHÔNG có tệp: ảnh đã bị xoá khỏi đĩa (dọn thư
+                // mục, git clean, hoặc ổ đĩa). Ghi log để lần sau còn dấu vết —
+                // nếu không, biểu hiện chỉ là "Zalo không tải được ảnh".
+                if (data.filePath) {
+                    console.warn(
+                        `[MediaStorage] bản ghi ${mediaId} tồn tại nhưng tệp đã mất: ${data.filePath}. ` +
+                        "Hãy xoá ảnh này trong tab Help Images và tải lên lại."
+                    );
+                }
             }
         } catch (error) {
             console.error(`[MediaStorage] lỗi đọc metadata Firestore: ${error.message}`);
@@ -596,6 +605,17 @@ function mimeForExtension(extension) {
     return EXT_TO_MIME[String(extension || "").toLowerCase()] || "application/octet-stream";
 }
 
+// Đuôi tệp tương ứng một kiểu MIME ảnh. Dùng để ghép vào URL công khai.
+//
+// Vì sao cần: Zalo Bot Platform từ chối URL ảnh không có phần mở rộng — nó báo
+// "File not found" dù máy chủ trả 200 kèm Content-Type đúng. URL dạng
+// /api/media/<id> (không đuôi) vì thế không gửi được ảnh; thêm ".png"/".jpg" thì
+// nhận đúng. Vẫn giữ đường dẫn không đuôi cho các link cũ.
+function extensionForMime(mimeType) {
+    const ext = MIME_TO_EXT[String(mimeType || "").toLowerCase()];
+    return ext ? ext.replace(/^\./, "") : null;
+}
+
 module.exports = {
     MEDIA_TYPES,
     MEDIA_COLLECTION,
@@ -614,5 +634,6 @@ module.exports = {
     validateUploadedFile,
     validateChatFile,
     mimeForExtension,
+    extensionForMime,
     detectMimeFromBuffer
 };

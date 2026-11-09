@@ -126,12 +126,17 @@ function publicOriginFromRequest(request) {
 }
 
 // URL công khai cho một media. baseOverride thắng mọi nguồn khác.
-function buildMediaUrl(mediaId, baseOverride = null) {
+//
+// `extension` nên được truyền vào: Zalo Bot Platform từ chối URL ảnh không có
+// phần mở rộng (báo "File not found" dù máy chủ trả 200). Đường dẫn không đuôi
+// vẫn được phục vụ để không phá các liên kết cũ.
+function buildMediaUrl(mediaId, baseOverride = null, extension = null) {
     if (!mediaId) return null;
     const base = String(baseOverride || "").trim().replace(/\/+$/, "")
         || getPublicOrigin()
         || `http://localhost:${process.env.ADMIN_PORT || 3000}`;
-    return `${base}/api/media/${mediaId}`;
+    const suffix = extension ? `.${String(extension).replace(/^\./, "")}` : "";
+    return `${base}/api/media/${mediaId}${suffix}`;
 }
 
 module.exports = {

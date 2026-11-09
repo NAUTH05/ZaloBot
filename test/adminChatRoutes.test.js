@@ -300,8 +300,7 @@ test("help-images/probe từ chối mediaId không hợp lệ", async (t) => {
     assert.match(String(response.body?.error), /mediaId/);
 });
 
-test("help-images/probe trả trạng thái bản ghi/tệp/URL", async (t) => {
-    const mediaId = "a".repeat(32);
+test("help-images/probe trả trạng thái bản ghi/tệp/URL", async (t) => {    const mediaId = "a".repeat(32);
     const { port, cookie } = await startServer(t, {
         buildMediaPublicUrl: (id) => `https://zalobot.example.com/api/media/${id}`,
         probeMediaUrl: async (targetUrl) => ({ ok: true, status: 200, contentType: "image/jpeg" })
@@ -316,4 +315,45 @@ test("help-images/probe trả trạng thái bản ghi/tệp/URL", async (t) => {
     assert.equal(typeof response.body.fileExists, "boolean");
     assert.equal(response.body.url, `https://zalobot.example.com/api/media/${mediaId}`);
     assert.equal(response.body.probe.ok, true);
+});
+
+/* ==========================================================================
+   Route media phải nhận CẢ HAI dạng URL
+
+   Zalo Bot Platform từ chối URL ảnh không có phần mở rộng ("File not found"),
+   nên đường gửi ảnh sinh URL dạng /api/media/<id>.png. Đường dẫn không đuôi vẫn
+   phải chạy để không phá các liên kết đã phát ra trước đó.
+   ========================================================================== */
+
+test("route media nhận URL có đuôi tệp", async (t) => {
+    const { port } = await startServer(t);
+    const mediaId = "a".repeat(32);
+
+    const response = await request(port, "GET", `/api/media/${mediaId}.png`);
+
+    // Không có tệp trong test ⇒ 404 nghiệp vụ. Điều cần chốt là route KHỚP,
+    // không rơi vào 404 chung của server.
+    assert.equal(response.status, 404);
+    assert.equal(response.body?.error, "Media not found");
+});
+
+test("route media vẫn nhận URL không đuôi", async (t) => {
+    const { port } = await startServer(t);
+    const mediaId = "b".repeat(32);
+
+    const response = await request(port, "GET", `/api/media/${mediaId}`);
+
+    assert.equal(response.status, 404);
+    assert.equal(response.body?.error, "Media not found");
+});
+
+test("route media từ chối id không phải 32 ký tự hex", async (t) => {
+    const { port } = await startServer(t);
+
+    const response = await request(port, "GET", "/api/media/abc.png");
+
+    // Không khớp route media ⇒ 404 JSON, KHÔNG được trả "Media not found"
+    // (và cũng không được rơi xuống trang HTML của dashboard).
+    assert.equal(response.status, 404);
+    assert.equal(response.body?.error, "Not found");
 });

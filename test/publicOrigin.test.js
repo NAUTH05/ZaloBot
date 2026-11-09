@@ -89,6 +89,19 @@ test("buildMediaUrl cắt dấu / thừa ở cuối origin", () => {
     );
 });
 
+test("buildMediaUrl ghép đuôi tệp khi được yêu cầu", () => {
+    // Zalo Bot Platform từ chối URL ảnh không có phần mở rộng ("File not found"),
+    // nên đường gửi ảnh luôn truyền đuôi vào.
+    assert.equal(
+        buildMediaUrl("abc", "https://bot.example.com", "png"),
+        "https://bot.example.com/api/media/abc.png"
+    );
+    assert.equal(
+        buildMediaUrl("abc", "https://bot.example.com", ".jpg"),
+        "https://bot.example.com/api/media/abc.jpg"
+    );
+});
+
 test("rememberPublicOrigin lưu xuống đĩa để sống qua restart", () => {
     const saved = rememberPublicOrigin("https://help.example.com");
     assert.equal(saved, true);

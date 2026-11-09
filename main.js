@@ -96,7 +96,7 @@ const {
     isLoopbackUrl,
     rememberPublicOrigin
 } = require("./publicOrigin");
-const { storeMedia, getMediaInfo, deleteMedia, listMediaByType, associateHelpImage, getHelpImagesForCommand, validateUploadedFile, MEDIA_TYPES } = require("./mediaStorage");
+const { storeMedia, getMediaInfo, deleteMedia, listMediaByType, associateHelpImage, getHelpImagesForCommand, validateUploadedFile, extensionForMime, MEDIA_TYPES } = require("./mediaStorage");
 const { detectChatType, getInteractionTargets, recordInteraction } = require("./interactionRegistry");
 const {
     ADMISSION_STATE,
@@ -538,10 +538,10 @@ function currentProvider() {
 // Việc quản lý origin nằm ở publicOrigin.js (dùng chung với adminServer), vì cả
 // hai phía đều cần biết địa chỉ công khai: dashboard để truyền xuống khi gửi, và
 // /help để gửi ảnh hướng dẫn khi không có request nào đi kèm.
-function buildMediaPublicUrl(mediaId, baseOverride = null) {
+function buildMediaPublicUrl(mediaId, baseOverride = null, extension = null) {
     if (!mediaId) return null;
     if (baseOverride) rememberPublicOrigin(baseOverride);
-    return buildMediaUrl(mediaId, baseOverride);
+    return buildMediaUrl(mediaId, baseOverride, extension);
 }
 
 // Gửi ảnh qua nhà cung cấp hiện tại.
@@ -816,7 +816,11 @@ async function sendChatMessageToChat({ botId, chatId, text, mediaId, publicBaseU
         if (mediaId) {
             const mediaInfo = await getMediaInfo(mediaId);
             if (!mediaInfo) throw new Error("Không tìm thấy media.");
-            const photoUrl = buildMediaPublicUrl(mediaId, publicBaseUrl);
+            const photoUrl = buildMediaPublicUrl(
+                mediaId,
+                publicBaseUrl,
+                extensionForMime(mediaInfo.mimeType) || mediaInfo.extension || null
+            );
             if (!photoUrl) throw new Error("Không xây được URL công khai cho media.");
 
             const attachment = [{ mediaId, type: "image", url: photoUrl }];
@@ -909,7 +913,11 @@ async function sendChatFileToChat({ botId, chatId, fileMediaId, caption, publicB
             throw new Error("Media này không phải tệp đính kèm.");
         }
 
-        const fileUrl = buildMediaPublicUrl(fileMediaId, publicBaseUrl);
+        const fileUrl = buildMediaPublicUrl(
+            fileMediaId,
+            publicBaseUrl,
+            mediaInfo.extension || extensionForMime(mediaInfo.mimeType) || null
+        );
         if (!fileUrl) throw new Error("Không xây được URL công khai cho tệp.");
 
         await ensureConversation({ botId: targetBot, chatId: targetChatId });
@@ -1093,14 +1101,23 @@ function recordHelpImageSuccess(detail) {
 //   - máy chủ mình trả 200 nhưng Zalo vẫn lỗi ⇒ phía Zalo/Cloudflare chặn.
 // Chỉ chạy khi đã có lỗi, và chỉ một lần cho mỗi đợt gửi, để không làm chậm /help.
 async function probeMediaUrl(url, timeoutMs = 6000) {
+    // Phá cache khi kiểm tra: Cloudflare có thể trả bản ảnh đã cache dù tệp trên
+    // máy chủ đã mất, khiến phép thử báo "200 OK" sai và che mất nguyên nhân thật.
+    const target = url.includes("?") ? `${url}&probe=${Date.now()}` : `${url}?probe=${Date.now()}`;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-        const response = await fetch(url, { method: "GET", signal: controller.signal, redirect: "follow" });
+        const response = await fetch(target, {
+            method: "GET",
+            signal: controller.signal,
+            redirect: "follow",
+            headers: { "Cache-Control": "no-cache", "Pragma": "no-cache" }
+        });
         const contentType = response.headers.get("content-type") || "";
+        const cacheState = response.headers.get("cf-cache-status") || null;
         // Không cần tải cả ảnh: đóng luồng ngay sau khi có header.
         try { await response.body?.cancel?.(); } catch (_) {}
-        return { ok: response.ok, status: response.status, contentType };
+        return { ok: response.ok, status: response.status, contentType, cacheState };
     } catch (error) {
         return { ok: false, status: 0, error: String(error.message || error) };
     } finally {
@@ -1141,7 +1158,7 @@ async function sendHelpIllustrations(chatId, images, options = {}) {
             console.warn(`[Help] không gửi được nhãn /${group.command}: ${error.message}`);
         }
         for (const image of group.images) {
-            const url = buildMediaPublicUrl(image.mediaId);
+            const url = buildMediaPublicUrl(image.mediaId, null, extensionForMime(image.mimeType));
             try {
                 await sendPhoto(chatId, url);
                 sent += 1;
@@ -2453,7 +2470,7 @@ async function handleCommand(msg, parsedCommand) {
                     const images = await getHelpImagesForCommand(cmd.command);
                     for (const img of images) {
                         try {
-                            await sendPhoto(chatId, buildMediaPublicUrl(img.mediaId));
+                            await sendPhoto(chatId, buildMediaPublicUrl(img.mediaId, null, extensionForMime(img.mimeType)));
                         } catch (imgError) {
                             console.warn(`[Help] ảnh ${img.mediaId} của /${cmd.command} không gửi được: ${imgError.message}`);
                         }

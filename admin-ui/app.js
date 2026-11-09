@@ -1730,15 +1730,19 @@ function renderHelpImages() {
 
         const lines = [];
         lines.push(result.recordExists ? "✓ Có bản ghi media" : "✗ KHÔNG có bản ghi media (ảnh đã bị xoá?)");
-        lines.push(result.fileExists ? "✓ Có tệp trên đĩa" : "✗ KHÔNG có tệp trên đĩa");
+        lines.push(result.fileExists ? "✓ Có tệp trên đĩa" : "✗ KHÔNG có tệp trên đĩa — ảnh này hỏng, hãy xoá và tải lên lại");
         if (result.url) lines.push(`URL: ${result.url}`);
         if (result.probe) {
+          const cacheNote = result.probe.cacheState ? `, cache: ${result.probe.cacheState}` : "";
           lines.push(result.probe.ok
-            ? `✓ Máy chủ tải được URL (HTTP ${result.probe.status}, ${result.probe.contentType || "?"})`
-            : `✗ Máy chủ KHÔNG tải được URL (${result.probe.status || result.probe.error})`);
-          if (result.probe.ok) {
-            lines.push("⇒ Phía máy chủ ổn. Nếu Zalo vẫn báo lỗi thì lỗi nằm ở Zalo/Cloudflare khi tải ảnh.");
-          }
+            ? `• Tải URL: HTTP ${result.probe.status} (${result.probe.contentType || "?"}${cacheNote})`
+            : `✗ Tải URL thất bại (${result.probe.status || result.probe.error})`);
+        }
+
+        if (!result.fileExists) {
+          lines.push("⇒ Tệp không còn trên máy chủ. Nếu vẫn thấy ảnh khi mở link, đó là bản cache — Zalo thì không thấy.");
+        } else if (result.probe?.ok) {
+          lines.push("⇒ Phía máy chủ ổn. Nếu Zalo vẫn báo lỗi thì lỗi nằm ở Zalo/Cloudflare khi tải ảnh.");
         }
         alert(lines.join("\n"));
       } catch (error) {

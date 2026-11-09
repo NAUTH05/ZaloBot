@@ -72,6 +72,7 @@ const {
     validateUploadedFile,
     validateChatFile,
     mimeForExtension,
+    extensionForMime,
     MEDIA_TYPES,
     MAX_FILE_SIZE,
     MAX_CHAT_FILE_SIZE
@@ -1703,8 +1704,9 @@ async function handleApi(request, response, url, options = {}) {
         };
 
         if (typeof options.probeMediaUrl === "function") {
+            const extension = info?.extension || (info?.mimeType ? extensionForMime(info.mimeType) : null);
             result.url = typeof options.buildMediaPublicUrl === "function"
-                ? options.buildMediaPublicUrl(mediaId)
+                ? options.buildMediaPublicUrl(mediaId, null, extension)
                 : null;
             if (result.url) result.probe = await options.probeMediaUrl(result.url);
         }
@@ -1934,11 +1936,18 @@ function createAdminServer(options = {}) {
         // Media serving — PUBLIC, không cần auth.
         // Zalo Bot Platform cần tải ảnh từ URL này để gửi sendPhoto.
         // mediaId chỉ chứa hex (kiểm tra trong getMediaInfo) nên không path traversal.
-        const mediaMatch = url.pathname.match(/^\/api\/media\/([a-f0-9]+)$/);
+        // Đuôi tệp là TUỲ CHỌN: Zalo Bot Platform từ chối URL ảnh không có phần
+        // mở rộng ("File not found"), nên ta sinh URL dạng /api/media/<id>.png.
+        // Vẫn nhận dạng không đuôi để các liên kết cũ tiếp tục chạy.
+        const mediaMatch = url.pathname.match(/^\/api\/media\/([a-f0-9]{32})(?:\.[A-Za-z0-9]{1,6})?$/);
         if (mediaMatch && (request.method === "GET" || request.method === "HEAD")) {
             try {
                 const info = await getMediaInfo(mediaMatch[1]);
-                if (!info) return json(response, 404, { error: "Media not found" });
+                if (!info) {
+                    // no-store: đừng để Cloudflare/CDN cache một 404 tạm thời.
+                    // Nếu cache lại, ảnh sẽ tiếp tục 404 ngay cả sau khi tệp có.
+                    return json(response, 404, { error: "Media not found" }, { "Cache-Control": "no-store" });
+                }
 
                 // Ảnh hiển thị trực tiếp; tệp đính kèm luôn tải về. Ép tải về là
                 // lớp bảo vệ thứ hai: kể cả khi định dạng bị đoán sai, trình duyệt
@@ -1962,6 +1971,10 @@ function createAdminServer(options = {}) {
             try { await handleApi(request, response, url, options); } catch (error) { json(response, 500, { error: "Internal server error" }); }
             return;
         }
+        // Mọi đường dẫn dưới /api/ mà không khớp route nào phải trả JSON, không
+        // được rơi xuống trang HTML của dashboard — client gọi API sẽ nhận HTML
+        // và báo lỗi khó hiểu.
+        if (url.pathname.startsWith("/api/")) return json(response, 404, { error: "Not found" });
         if (request.method !== "GET" && request.method !== "HEAD") return json(response, 405, { error: "Method not allowed" });
         if (BASE_PATH !== "/" && url.pathname === BASE_PATH) {
             response.writeHead(308, { Location: `${BASE_PATH}/`, ...securityHeaders() });
