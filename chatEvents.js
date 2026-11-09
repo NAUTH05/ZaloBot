@@ -20,6 +20,7 @@ const CHANNEL = "chat";
 const CHAT_EVENT = Object.freeze({
     MESSAGE: "message",        // có tin mới (inbound hoặc outbound)
     STATUS: "status",          // trạng thái gửi của một tin đã đổi
+    UPDATE: "update",          // nội dung một tin đã đổi (ví dụ: tải xong ảnh vào)
     READ: "read",              // một hội thoại được đánh dấu đã đọc
     CONVERSATION: "conversation" // metadata hội thoại đổi (tên, loại)
 });

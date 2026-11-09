@@ -80,10 +80,16 @@ const { resolveCommandName, findHelpCommand, renderCommand } = require("./helpCo
 const {
     recordMessage: recordMessageHistory,
     ensureConversation,
+    updateMessageAttachments,
     DIRECTION: MSG_DIRECTION,
     STATUS: MSG_STATUS,
     SOURCE: MSG_SOURCE
 } = require("./messageRecorder");
+const {
+    extractInboundAttachments,
+    ingestInboundAttachments,
+    pendingDescriptors
+} = require("./inboundMedia");
 const { storeMedia, getMediaInfo, deleteMedia, listMediaByType, associateHelpImage, getHelpImagesForCommand, validateUploadedFile, MEDIA_TYPES } = require("./mediaStorage");
 const { detectChatType, getInteractionTargets, recordInteraction } = require("./interactionRegistry");
 const {
@@ -2943,18 +2949,37 @@ async function handleIncomingMessage(runtime, msg) {
     console.log("Tin nhắn mới:", from, "→", text);
 
     // Ghi lịch sử tin nhắn inbound cho Chat Center (không chặn xử lý).
+    //
+    // Ảnh/tệp: tin của Zalo KHÔNG có `text`, nên trước đây mọi ảnh người dùng
+    // gửi đều bị ghi thành "[không có nội dung]". Nay ta ghi kèm mô tả tạm
+    // (pending) để UI hiện "đang tải", rồi tải media về ở nền và cập nhật lại.
     try {
+        const inboundAttachments = extractInboundAttachments(msg);
+        const hasAttachments = inboundAttachments.length > 0;
+        const historyText = msg.text
+            ? String(msg.text)
+            : (hasAttachments ? "" : "[không có nội dung]");
+
         recordMessageHistory({
             botId,
             chatId: String(context.chatId),
             direction: MSG_DIRECTION.INBOUND,
-            text: String(text || ""),
+            text: historyText,
+            attachments: hasAttachments ? pendingDescriptors(inboundAttachments) : [],
             status: MSG_STATUS.DELIVERED,
             source: context.chatType === "group" ? MSG_SOURCE.INBOUND_GROUP : MSG_SOURCE.INBOUND_USER,
             chatType: context.chatType || null,
             displayName: from || null,
             providerMsgId: msg?.message_id || msg?.msgId || null,
             timestamp: msg?.date ? new Date(msg.date * 1000).toISOString() : null
+        }).then(async (result) => {
+            if (!result?.recorded || !hasAttachments) return;
+            const stored = await ingestInboundAttachments(inboundAttachments);
+            if (stored.length === 0) return;
+            await updateMessageAttachments(botId, String(context.chatId), result.messageId, stored, {
+                // Bỏ văn bản rỗng thay thế: nếu tin chỉ có ảnh thì không cần chữ.
+                text: msg.text ? String(msg.text) : ""
+            });
         }).catch((err) => {
             console.warn(`[MessageRecorder] khong ghi duoc lich su inbound: ${err.message}`);
         });

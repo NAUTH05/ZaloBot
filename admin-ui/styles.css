@@ -1357,6 +1357,30 @@ button[disabled] {
     text-decoration: none;
     margin-bottom: 4px;
 }
+/* Trạng thái tải media của tin vào */
+.msg-attachment.pending,
+.msg-attachment.failed {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: var(--s-2);
+    border-radius: var(--r-md);
+    background: rgba(127, 127, 127, 0.12);
+    font-size: var(--fs-xs);
+    color: var(--text-soft);
+}
+.msg-attachment.failed {
+    background: rgba(173, 47, 66, 0.1);
+    color: var(--danger);
+}
+.attach-spinner {
+    display: inline-block;
+    animation: attach-spin 1.2s linear infinite;
+}
+@keyframes attach-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
 .msg-attachment.image img {
     display: block;
     max-width: 100%;

@@ -418,6 +418,43 @@ async function markConversationRead(botId, chatId) {
 }
 
 // ---------------------------------------------------------------------------
+// Gắn (hoặc thay) attachment của một tin đã ghi.
+//
+// Dùng cho tin VÀO có ảnh/tệp: ghi lịch sử ngay khi tin tới (để không chặn xử lý
+// lệnh), rồi tải media về sau và cập nhật lại. UI nhận sự kiện UPDATE để thay
+// chỗ "đang tải" bằng ảnh thật mà không cần tải lại trang.
+// ---------------------------------------------------------------------------
+async function updateMessageAttachments(botId, chatId, messageId, attachments, options = {}) {
+    const db = getDb();
+    if (!db || !messageId) return false;
+
+    const convId = conversationIdFor(botId, chatId);
+    const msgRef = db.collection(CONVERSATIONS_COLLECTION)
+        .doc(convId)
+        .collection(MESSAGES_SUBCOLLECTION)
+        .doc(messageId);
+
+    try {
+        const patch = { attachments: Array.isArray(attachments) ? attachments.slice(0, 10) : [] };
+        if (options.text !== undefined) patch.text = String(options.text).slice(0, 4096);
+        await msgRef.set(patch, { merge: true });
+
+        publishChatEvent({
+            type: CHAT_EVENT.UPDATE,
+            conversationId: convId,
+            botId: normalizeBotId(botId) || "bot1",
+            chatId: String(chatId),
+            messageId,
+            patch
+        });
+        return true;
+    } catch (error) {
+        console.error(`[MessageRecorder] lỗi updateMessageAttachments ${convId}/${messageId}:`, error.message);
+        return false;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Cập nhật trạng thái delivery cho một tin nhắn.
 // ---------------------------------------------------------------------------
 async function updateMessageStatus(botId, chatId, messageId, { status, error = null }) {
@@ -526,5 +563,6 @@ module.exports = {
     getMessageHistory,
     markConversationRead,
     updateMessageStatus,
+    updateMessageAttachments,
     getUnreadCount
 };

@@ -38,6 +38,41 @@ function extractText(message) {
     return "";
 }
 
+// URL media trong `content` của zca-js. Tên trường khác nhau theo loại tin:
+// ảnh thường có `href`/`thumb`, tệp có `href` kèm `title`.
+const CONTENT_URL_KEYS = ["href", "url", "normalUrl", "hdUrl", "thumb", "fileUrl", "file_url"];
+const CONTENT_NAME_KEYS = ["title", "fileName", "filename", "name", "description"];
+
+function firstStringField(source, keys) {
+    for (const key of keys) {
+        const value = source[key];
+        if (typeof value === "string" && value.trim()) return value.trim();
+    }
+    return null;
+}
+
+// Chuẩn hoá attachment để tầng trên lưu được vào lịch sử Chat Center.
+//
+// Trước đây hàm này không tồn tại nên tin ảnh của ZCA bị mất hoàn toàn: chỉ còn
+// chuỗi rỗng, và Chat Center hiển thị "[không có nội dung]".
+function extractAttachments(message) {
+    const content = message?.data?.content;
+    if (!content || typeof content !== "object" || Array.isArray(content)) return [];
+
+    const url = firstStringField(content, CONTENT_URL_KEYS);
+    if (!url) return [];
+
+    // Có `fileUrl`/`title` là tệp; còn lại coi là ảnh.
+    const looksLikeFile = Boolean(content.fileUrl || content.file_url)
+        || /\.(pdf|docx?|xlsx?|pptx?|zip|rar|7z|txt|csv)$/i.test(String(content.title || ""));
+
+    return [{
+        kind: looksLikeFile ? "file" : "image",
+        url,
+        name: firstStringField(content, CONTENT_NAME_KEYS) || (looksLikeFile ? "tepdinhkem.bin" : "anh.jpg")
+    }];
+}
+
 // Tên hiển thị của người gửi. zca-js đặt tên ở `data.dName`.
 function senderDisplayName(message) {
     const value = message?.data?.dName;
@@ -68,6 +103,9 @@ function toInternalMessage(message) {
 
     return {
         text: extractText(message),
+        // Ảnh/tệp người dùng gửi kèm. Tầng Chat Center tải về rồi phục vụ lại
+        // qua /api/media để URL của Zalo (có hạn) không lọt vào lịch sử.
+        attachments: extractAttachments(message),
         chat: {
             id: chatId,
             type: isGroup ? "group" : "private",
@@ -107,6 +145,7 @@ function isBotMentioned(message, ownUid) {
 module.exports = {
     THREAD_TYPE_GROUP,
     THREAD_TYPE_USER,
+    extractAttachments,
     extractText,
     isBotMentioned,
     isGroupMessage,

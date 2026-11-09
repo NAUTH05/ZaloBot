@@ -2006,6 +2006,16 @@ function handleChatEvent(event) {
     return;
   }
 
+  // Media của tin vào tải xong: thay chỗ "đang tải" bằng ảnh/tệp thật.
+  if (event.type === "update") {
+    const target = chatMessages.find((item) => item.messageId === event.messageId);
+    if (target && event.patch) {
+      Object.assign(target, event.patch);
+      renderChatMessages();
+    }
+    return;
+  }
+
   if (event.type === "read") {
     const conv = chatConversations.find((item) => item.conversationId === event.conversationId);
     if (conv) {
@@ -2222,6 +2232,19 @@ function chatDayLabel(value) {
 }
 
 function renderChatAttachment(attachment) {
+  if (!attachment) return "";
+
+  // Media của tin vào đang được tải về máy chủ.
+  if (attachment.pending) {
+    const label = attachment.type === "file" ? "tệp" : "ảnh";
+    return `<div class="msg-attachment pending"><span class="attach-spinner">◌</span> Đang tải ${label}…</div>`;
+  }
+
+  // Tải thất bại: nói rõ, không im lặng bỏ qua.
+  if (attachment.failed) {
+    return `<div class="msg-attachment failed">⚠ Không tải được ${escapeHtml(attachment.type === "file" ? "tệp" : "ảnh")}${attachment.name ? `: ${escapeHtml(attachment.name)}` : ""}</div>`;
+  }
+
   const url = attachment.url || (attachment.mediaId ? `/api/media/${attachment.mediaId}` : "");
   if (!url) return "";
 
