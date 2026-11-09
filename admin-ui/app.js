@@ -1710,11 +1710,44 @@ function renderHelpImages() {
         ${unknownCommand ? `<small class="help-image-warn">Lệnh "/${escapeHtml(img.command)}" không tồn tại — ảnh này sẽ không được gửi. Chọn lại lệnh bên trên.</small>` : ""}
         <small class="muted">${escapeHtml(img.originalName || "")} · ${formatDate(img.storedAt)}</small>
         <div class="help-image-actions">
+          <button class="ghost small" data-probe-image="${escapeHtml(img.mediaId)}">Kiểm tra</button>
           <button class="ghost small" data-delete-image="${escapeHtml(img.mediaId)}">Xoá</button>
         </div>
       </div>
     </div>`;
   }).join("");
+
+  // Kiểm tra một ảnh: bản ghi, tệp, và URL công khai. Ba câu trả lời này chỉ ra
+  // đúng nguyên nhân, thay vì đoán.
+  grid.querySelectorAll("[data-probe-image]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      try {
+        const result = await api("/api/admin/help-images/probe", {
+          method: "POST",
+          body: JSON.stringify({ mediaId: btn.dataset.probeImage })
+        });
+
+        const lines = [];
+        lines.push(result.recordExists ? "✓ Có bản ghi media" : "✗ KHÔNG có bản ghi media (ảnh đã bị xoá?)");
+        lines.push(result.fileExists ? "✓ Có tệp trên đĩa" : "✗ KHÔNG có tệp trên đĩa");
+        if (result.url) lines.push(`URL: ${result.url}`);
+        if (result.probe) {
+          lines.push(result.probe.ok
+            ? `✓ Máy chủ tải được URL (HTTP ${result.probe.status}, ${result.probe.contentType || "?"})`
+            : `✗ Máy chủ KHÔNG tải được URL (${result.probe.status || result.probe.error})`);
+          if (result.probe.ok) {
+            lines.push("⇒ Phía máy chủ ổn. Nếu Zalo vẫn báo lỗi thì lỗi nằm ở Zalo/Cloudflare khi tải ảnh.");
+          }
+        }
+        alert(lines.join("\n"));
+      } catch (error) {
+        alert(`Lỗi kiểm tra: ${error.message}`);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
 
   grid.querySelectorAll("[data-delete-image]").forEach((btn) => {
     btn.addEventListener("click", async () => {

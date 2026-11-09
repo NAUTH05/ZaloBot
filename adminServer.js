@@ -1681,6 +1681,43 @@ async function handleApi(request, response, url, options = {}) {
         return json(response, 200, diagnostics);
     }
 
+    // Kiểm tra một ảnh cụ thể theo yêu cầu: bản ghi còn không, tệp còn không, và
+    // URL công khai có tải được không. Ba câu trả lời này chỉ đúng một nguyên nhân.
+    if (url.pathname === `${API_PREFIX}/help-images/probe` && request.method === "POST") {
+        let body;
+        try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
+        const mediaId = String(body?.mediaId || "").trim();
+        if (!/^[a-f0-9]{32}$/.test(mediaId)) {
+            return json(response, 400, { error: "mediaId không hợp lệ." });
+        }
+
+        const info = await getMediaInfo(mediaId);
+        const result = {
+            mediaId,
+            recordExists: Boolean(info),
+            fileExists: Boolean(info?.filePath && fs.existsSync(info.filePath)),
+            size: info?.size ?? null,
+            mimeType: info?.mimeType ?? null,
+            url: null,
+            probe: null
+        };
+
+        if (typeof options.probeMediaUrl === "function") {
+            result.url = typeof options.buildMediaPublicUrl === "function"
+                ? options.buildMediaPublicUrl(mediaId)
+                : null;
+            if (result.url) result.probe = await options.probeMediaUrl(result.url);
+        }
+
+        audit("help-image.probe", request, {
+            mediaId,
+            recordExists: result.recordExists,
+            fileExists: result.fileExists,
+            probeStatus: result.probe?.status ?? null
+        });
+        return json(response, 200, result);
+    }
+
     if (url.pathname === `${API_PREFIX}/help-images` && request.method === "GET") {
         const command = url.searchParams.get("command") || null;
         const images = await listMediaByType(MEDIA_TYPES.HELP_IMAGE, { command });

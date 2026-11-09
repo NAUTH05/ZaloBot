@@ -291,3 +291,29 @@ test("help-images/diagnostics yêu cầu đăng nhập", async (t) => {
     const response = await request(port, "GET", "/api/admin/help-images/diagnostics");
     assert.equal(response.status, 401);
 });
+
+test("help-images/probe từ chối mediaId không hợp lệ", async (t) => {
+    const { port, cookie } = await startServer(t);
+
+    const response = await request(port, "POST", "/api/admin/help-images/probe", { mediaId: "abc" }, cookie);
+    assert.equal(response.status, 400);
+    assert.match(String(response.body?.error), /mediaId/);
+});
+
+test("help-images/probe trả trạng thái bản ghi/tệp/URL", async (t) => {
+    const mediaId = "a".repeat(32);
+    const { port, cookie } = await startServer(t, {
+        buildMediaPublicUrl: (id) => `https://zalobot.example.com/api/media/${id}`,
+        probeMediaUrl: async (targetUrl) => ({ ok: true, status: 200, contentType: "image/jpeg" })
+    });
+
+    const response = await request(port, "POST", "/api/admin/help-images/probe", { mediaId }, cookie);
+
+    assert.equal(response.status, 200);
+    assert.equal(response.body.mediaId, mediaId);
+    // Không có Firestore trong test ⇒ không có bản ghi, nhưng hình dạng phải đúng.
+    assert.equal(typeof response.body.recordExists, "boolean");
+    assert.equal(typeof response.body.fileExists, "boolean");
+    assert.equal(response.body.url, `https://zalobot.example.com/api/media/${mediaId}`);
+    assert.equal(response.body.probe.ok, true);
+});

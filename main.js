@@ -2999,7 +2999,10 @@ async function startRuntime() {
         sendChatFile: (input) => sendChatFileToChat(input),
 
         // Chẩn đoán gửi ảnh hướng dẫn, hiển thị trên tab Help Images.
-        getHelpMediaDiagnostics: () => getHelpMediaDiagnostics()
+        getHelpMediaDiagnostics: () => getHelpMediaDiagnostics(),
+        // Cho nút "Kiểm tra" trên dashboard: tải thử URL công khai của một ảnh.
+        probeMediaUrl: (targetUrl) => probeMediaUrl(targetUrl),
+        buildMediaPublicUrl: (mediaId) => buildMediaPublicUrl(mediaId)
     });
     await new Promise((resolve, reject) => {
         adminRuntime.server.once("error", reject);
