@@ -219,9 +219,9 @@ const HELP_COMMANDS = [
         group: HELP_GROUPS.PUBLIC,
         category: CATEGORY.HELP,
         permission: "user",
-        description: "Xem danh sách lệnh, hoặc chi tiết một lệnh kèm ảnh hướng dẫn.",
+        description: "Xem danh sách lệnh kèm ảnh minh hoạ, hoặc chi tiết một lệnh.",
         examples: ["/help", "/help nhanlich"],
-        note: "Gõ /help kèm tên lệnh để xem chi tiết; một số lệnh có ảnh minh hoạ."
+        note: "Gõ /help kèm tên lệnh để xem chi tiết của riêng lệnh đó."
     },
 
     // ---------------------------------------------------------------- quản trị

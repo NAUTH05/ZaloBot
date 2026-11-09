@@ -76,7 +76,7 @@ const {
     formatWarningMessage,
     formatWelcomeMessage
 } = require("./messageTemplates");
-const { resolveCommandName, findHelpCommand, renderCommand } = require("./helpContent");
+const { resolveCommandName, findHelpCommand, renderCommand, HELP_COMMANDS } = require("./helpContent");
 const {
     recordMessage: recordMessageHistory,
     ensureConversation,
@@ -1001,6 +1001,100 @@ function formatFileSize(bytes) {
     if (size < 1024) return `${size} B`;
     if (size < 1024 * 1024) return `${(size / 1024).toFixed(0)} KB`;
     return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+// ---------------------------------------------------------------------------
+// Ảnh minh hoạ cho /help
+//
+// /help trả danh sách lệnh; nếu có ảnh hướng dẫn thì gửi kèm luôn, mỗi nhóm đi
+// sau một dòng tên lệnh. Có trần số ảnh/số lệnh: một quản trị viên gắn 30 ảnh mà
+// người dùng chỉ gõ /help sẽ nhận 30 tin liên tiếp và bị Zalo giới hạn tốc độ.
+//
+// Tách phần LẬP KẾ HOẠCH thành hàm thuần để kiểm thử được mà không cần mạng.
+// ---------------------------------------------------------------------------
+const HELP_ILLUSTRATION_MAX_IMAGES = 8;
+const HELP_ILLUSTRATION_MAX_COMMANDS = 5;
+
+function planHelpIllustrations(images, options = {}) {
+    const maxImages = Number(options.maxImages) || HELP_ILLUSTRATION_MAX_IMAGES;
+    const maxCommands = Number(options.maxCommands) || HELP_ILLUSTRATION_MAX_COMMANDS;
+
+    const byCommand = new Map();
+    for (const item of Array.isArray(images) ? images : []) {
+        const command = String(item?.command || "").trim();
+        if (!command || !item?.mediaId) continue;
+        if (!byCommand.has(command)) byCommand.set(command, []);
+        byCommand.get(command).push(item);
+    }
+    if (byCommand.size === 0) {
+        return { groups: [], hasHeader: false, skippedCommands: 0, skippedImages: 0 };
+    }
+
+    // Thứ tự nhóm theo đúng thứ tự lệnh trong helpContent, để ảnh không nhảy
+    // lung tung so với danh sách người dùng vừa đọc.
+    const order = new Map(HELP_COMMANDS.map((entry, index) => [entry.command, index]));
+    const commands = [...byCommand.keys()].sort((left, right) => {
+        const leftIndex = order.has(left) ? order.get(left) : Number.MAX_SAFE_INTEGER;
+        const rightIndex = order.has(right) ? order.get(right) : Number.MAX_SAFE_INTEGER;
+        return leftIndex - rightIndex;
+    });
+
+    const groups = [];
+    let remaining = maxImages;
+    for (const command of commands) {
+        if (groups.length >= maxCommands || remaining <= 0) break;
+        // Trong một lệnh, gửi theo thứ tự cũ → mới cho dễ theo dõi.
+        const list = [...byCommand.get(command)]
+            .sort((left, right) => String(left.storedAt || "").localeCompare(String(right.storedAt || "")))
+            .slice(0, remaining);
+        if (list.length === 0) continue;
+        groups.push({ command, images: list });
+        remaining -= list.length;
+    }
+
+    const totalImages = [...byCommand.values()].reduce((sum, list) => sum + list.length, 0);
+    const plannedImages = groups.reduce((sum, group) => sum + group.images.length, 0);
+
+    return {
+        groups,
+        // Chỉ cần tiêu đề chung khi có từ hai lệnh trở lên; một lệnh thì dòng tên
+        // lệnh đã đủ rõ.
+        hasHeader: groups.length > 1,
+        skippedCommands: byCommand.size - groups.length,
+        skippedImages: totalImages - plannedImages
+    };
+}
+
+async function sendHelpIllustrations(chatId, images, options = {}) {
+    const plan = planHelpIllustrations(images, options);
+    if (plan.groups.length === 0) return 0;
+
+    if (plan.hasHeader) {
+        await sendMessage(chatId, "# {orange}[ẢNH MINH HOẠ]{/orange}\n\n> Ảnh đi kèm tên lệnh tương ứng.");
+    }
+
+    let sent = 0;
+    for (const group of plan.groups) {
+        try {
+            await sendMessage(chatId, `**/${group.command}**`);
+        } catch (error) {
+            // Không gửi được nhãn thì vẫn gửi ảnh: ảnh vẫn hữu ích.
+            console.warn(`[Help] không gửi được nhãn /${group.command}: ${error.message}`);
+        }
+        for (const image of group.images) {
+            try {
+                await sendPhoto(chatId, buildMediaPublicUrl(image.mediaId));
+                sent += 1;
+            } catch (error) {
+                console.warn(`[Help] ảnh ${image.mediaId} của /${group.command} không gửi được: ${error.message}`);
+            }
+        }
+    }
+
+    if (plan.skippedImages > 0) {
+        console.log(`[Help] còn ${plan.skippedImages} ảnh không gửi để tránh spam (trần ${options.maxImages || HELP_ILLUSTRATION_MAX_IMAGES} ảnh)`);
+    }
+    return sent;
 }
 
 // Thông báo cho ngữ cảnh cổng tiếp nhận (nếu có) rằng một lần gửi tới chatId vừa
@@ -2306,6 +2400,18 @@ async function handleCommand(msg, parsedCommand) {
             }
         } else {
             await sendMessage(chatId, formatGeneralHelp());
+
+            // Gửi kèm ảnh minh hoạ cho các lệnh đã được gắn ảnh.
+            //
+            // Trước đây ảnh chỉ đi kèm /help <lệnh>, nên người dùng gõ /help (đường
+            // phổ biến nhất) không bao giờ thấy ảnh dù quản trị viên đã gắn.
+            try {
+                const images = await listMediaByType(MEDIA_TYPES.HELP_IMAGE, { limit: 200 });
+                const sent = await sendHelpIllustrations(chatId, images);
+                if (sent > 0) console.log(`[Help] đã gửi ${sent} ảnh minh hoạ kèm danh sách lệnh`);
+            } catch (error) {
+                console.warn(`[Help] không gửi được ảnh minh hoạ: ${error.message}`);
+            }
         }
     } else if (command === "helpadmin") {
         if (!await requireOwner(context)) return;
@@ -3389,6 +3495,7 @@ module.exports = {
     sendFile,
     sendChatMessageToChat,
     sendChatFileToChat,
+    planHelpIllustrations,
     buildMediaPublicUrl,
     registerShutdownHandlers,
     stopZaloPolling,
