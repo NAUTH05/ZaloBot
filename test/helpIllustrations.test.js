@@ -103,15 +103,14 @@ test("trần ảnh áp dụng xuyên các lệnh, không phải mỗi lệnh", (
     assert.equal(plan.skippedImages, 1);
 });
 
-test("lệnh không có trong helpContent vẫn được gửi, xếp sau", () => {
+test("lệnh không có trong helpContent bị bỏ qua (người dùng không gõ được)", () => {
     const plan = planHelpIllustrations([
         { mediaId: "z1", command: "lenhla" },
         { mediaId: "a1", command: HELP_COMMANDS[0].command }
     ]);
 
-    assert.equal(plan.groups.length, 2);
+    assert.equal(plan.groups.length, 1, "chỉ lệnh có thật mới được gửi");
     assert.equal(plan.groups[0].command, HELP_COMMANDS[0].command);
-    assert.equal(plan.groups[1].command, "lenhla");
 });
 
 test("ảnh trùng mediaId trong cùng lệnh vẫn giữ nguyên (không tự lọc)", () => {

@@ -56,6 +56,9 @@ const { getSystemLogs } = require("./operationalLog");
 const { describeRegisteredBots, getBot, listBots, listEnabledBots, runWithBot } = require("./botContext");
 const { LEGACY_BOT_ID, normalizeBotId } = require("./bots");
 const { HELP_COMMANDS } = require("./helpContent");
+// Tên lệnh hợp lệ. Dùng để từ chối gắn ảnh vào một lệnh không tồn tại — kiểu dữ
+// liệu rác từng làm bot gửi một dòng "/he" vô nghĩa cho người dùng.
+const HELP_COMMAND_NAMES = new Set(HELP_COMMANDS.map((entry) => entry.command));
 const { getChatEventStats, onChatEvent } = require("./chatEvents");
 const { publicOriginFromRequest, rememberPublicOrigin } = require("./publicOrigin");
 const {
@@ -810,7 +813,11 @@ function parseMultipart(buffer, boundary) {
         if (headerEnd === -1) continue;
 
         const headerStr = part.slice(0, headerEnd).toString("utf8");
-        const body = part.slice(headerEnd + 4, part.length - 2);  // -2 for trailing \r\n
+        // KHÔNG cắt thêm \r\n ở đây: `part` đã được cắt bỏ \r\n phía trước
+        // delimiter khi tách phần (xem vòng lặp bên trên). Cắt lần nữa sẽ mất
+        // đúng 2 byte cuối của mọi field — "help" thành "he", và tệp bị cụt
+        // 2 byte. Đây chính là lỗi làm ảnh không được gắn lệnh.
+        const body = part.slice(headerEnd + 4);
 
         // Parse Content-Disposition.
         const nameMatch = headerStr.match(/name="([^"]*)"/);
@@ -1716,7 +1723,10 @@ async function handleApi(request, response, url, options = {}) {
             ? MEDIA_TYPES.CHAT_IMAGE
             : MEDIA_TYPES.HELP_IMAGE;
         // Ảnh chat không gắn với lệnh nào.
-        const command = mediaType === MEDIA_TYPES.HELP_IMAGE ? (upload.fields.command || null) : null;
+        const command = mediaType === MEDIA_TYPES.HELP_IMAGE ? (String(upload.fields.command || "").trim() || null) : null;
+        if (command && !HELP_COMMAND_NAMES.has(command)) {
+            return json(response, 400, { error: `Lệnh "/${command}" không tồn tại trong danh sách trợ giúp.` });
+        }
         try {
             const media = await storeMedia({
                 buffer: validation.buffer,
@@ -1740,9 +1750,13 @@ async function handleApi(request, response, url, options = {}) {
     if (url.pathname === `${API_PREFIX}/help-images/associate` && request.method === "POST") {
         let body;
         try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
-        const { mediaId, command } = body;
+        const { mediaId } = body;
+        const command = String(body?.command || "").trim();
         if (!mediaId || !command) {
             return json(response, 400, { error: "mediaId và command là bắt buộc." });
+        }
+        if (!HELP_COMMAND_NAMES.has(command)) {
+            return json(response, 400, { error: `Lệnh "/${command}" không tồn tại trong danh sách trợ giúp.` });
         }
         const ok = await associateHelpImage(mediaId, command);
         audit("help-image.associate", request, { mediaId, command, result: ok ? "success" : "error" });
@@ -1922,4 +1936,13 @@ function createAdminServer(options = {}) {
     return { server, port, basePath: BASE_PATH };
 }
 
-module.exports = { BASE_PATH, createAdminServer, dashboardSummary, detailForChat, recentAudit };
+module.exports = {
+    BASE_PATH,
+    createAdminServer,
+    dashboardSummary,
+    detailForChat,
+    // Xuất để kiểm thử trực tiếp bộ phân tích multipart: lỗi cắt 2 byte cuối
+    // từng làm field "help" thành "he" mà không có bài test nào chạm tới.
+    parseMultipart,
+    recentAudit
+};

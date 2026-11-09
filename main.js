@@ -1043,6 +1043,10 @@ function planHelpIllustrations(images, options = {}) {
     let remaining = maxImages;
     for (const command of commands) {
         if (groups.length >= maxCommands || remaining <= 0) break;
+        // Bỏ lệnh không tồn tại trong helpContent: gửi một dòng "/he" cho người
+        // dùng là vô nghĩa vì họ không gõ được lệnh đó. Trường hợp này chỉ xảy ra
+        // với dữ liệu cũ bị gắn sai.
+        if (!order.has(command)) continue;
         // Trong một lệnh, gửi theo thứ tự cũ → mới cho dễ theo dõi.
         const list = [...byCommand.get(command)]
             .sort((left, right) => String(left.storedAt || "").localeCompare(String(right.storedAt || "")))

@@ -1624,7 +1624,15 @@ async function loadHelpImages() {
 }
 
 function helpCommandOptions(selected) {
-  return '<option value="">-- Chưa gắn lệnh --</option>' +
+  const known = helpImageCommands.some((item) => item.command === selected);
+  // Nếu ảnh đang gắn một lệnh KHÔNG tồn tại (dữ liệu cũ), phải hiện đúng giá trị
+  // đó. Nếu không, select rơi về "-- Chưa gắn lệnh --" và người quản trị tưởng
+  // ảnh chưa gắn, trong khi thực tế nó gắn vào một lệnh rác.
+  const unknownOption = selected && !known
+    ? `<option value="${escapeHtml(selected)}" selected>/${escapeHtml(selected)} (không tồn tại)</option>`
+    : "";
+
+  return unknownOption + '<option value="">-- Chưa gắn lệnh --</option>' +
     helpImageCommands.map((c) =>
       `<option value="${escapeHtml(c.command)}"${c.command === selected ? " selected" : ""}>/${escapeHtml(c.command)}</option>`
     ).join("");
@@ -1640,14 +1648,16 @@ function renderHelpImages() {
 
   grid.innerHTML = helpImages.map((img) => {
     const unassigned = !img.command;
+    const unknownCommand = img.command && !helpImageCommands.some((c) => c.command === img.command);
     return `
-    <div class="help-image-card${unassigned ? " unassigned" : ""}">
+    <div class="help-image-card${unassigned || unknownCommand ? " unassigned" : ""}">
       <img src="${escapeHtml(img.url)}" alt="${escapeHtml(img.originalName || "")}" loading="lazy" />
       <div class="help-image-meta">
         <select class="help-image-command-select" data-media="${escapeHtml(img.mediaId)}" aria-label="Lệnh cho ảnh này">
           ${helpCommandOptions(img.command || "")}
         </select>
         ${unassigned ? '<small class="help-image-warn">Chưa gắn lệnh — ảnh này sẽ không được gửi kèm.</small>' : ""}
+        ${unknownCommand ? `<small class="help-image-warn">Lệnh "/${escapeHtml(img.command)}" không tồn tại — ảnh này sẽ không được gửi. Chọn lại lệnh bên trên.</small>` : ""}
         <small class="muted">${escapeHtml(img.originalName || "")} · ${formatDate(img.storedAt)}</small>
         <div class="help-image-actions">
           <button class="ghost small" data-delete-image="${escapeHtml(img.mediaId)}">Xoá</button>
