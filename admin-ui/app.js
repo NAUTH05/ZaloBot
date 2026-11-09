@@ -375,8 +375,24 @@ function switchTab(name) {
   $$(".tab-button").forEach((button) => button.classList.toggle("active", button.dataset.tab === name));
   $$(".tab-panel").forEach((panel) => panel.classList.toggle("active", panel.dataset.panel === name));
   localStorage.setItem("zalobot-admin-tab", name);
-  if (name === "helpimages") loadHelpImages();
-  if (name === "chatcenter") { loadChatConversations(); connectChatStream(); }
+
+  // Nạp dữ liệu của tab trong try/catch.
+  //
+  // Vì sao: switchTab() còn được gọi lúc KHÔI PHỤC tab đã lưu, và lần gọi đó có
+  // thể chạy trước khi các khối `let` của phần Chat Center được khởi tạo. Truy cập
+  // biến `let` lúc đó ném ReferenceError ("Cannot access before initialization"),
+  // và vì đây là lỗi đồng bộ trong lúc nạp script nên TOÀN BỘ dashboard trắng.
+  // Bọc lại để một tab lỗi không kéo sập cả trang.
+  const run = (loader) => {
+    try {
+      loader();
+    } catch (error) {
+      console.error(`switchTab(${name}) không nạp được dữ liệu:`, error.message);
+    }
+  };
+
+  if (name === "helpimages") run(loadHelpImages);
+  if (name === "chatcenter") run(() => { loadChatConversations(); connectChatStream(); });
 }
 
 function applyTheme(theme) {
@@ -1171,7 +1187,10 @@ $("#adminForm").addEventListener("submit", async (event) => { event.preventDefau
 // cần đọc danh sách người nhận đã chọn và đi qua bước xác nhận.
 $("#commandAdminIdentity")?.addEventListener("change", () => {});
 $$('.tab-button').forEach((button) => button.addEventListener("click", () => switchTab(button.dataset.tab)));
-applyTheme(localStorage.getItem("zalobot-admin-theme") || "dark"); switchTab(localStorage.getItem("zalobot-admin-tab") || "overview");
+applyTheme(localStorage.getItem("zalobot-admin-theme") || "dark");
+// Việc khôi phục tab đã lưu được làm ở CUỐI tệp (xem dưới): nó gọi switchTab(),
+// mà switchTab lại chạm tới các biến khai báo bằng `let` ở phần Chat Center.
+// Chạy tại đây thì những biến đó chưa được khởi tạo và cả dashboard trắng.
 loadData().then(() => showAuthenticated(true)).catch((error) => { showAuthenticated(false); if (error.status !== 401) $("#loginError").textContent = error.message; });
 
 /* ---------------------------------------------------------------------------
@@ -2776,3 +2795,12 @@ document.addEventListener("visibilitychange", () => {
   if (!chatStream) connectChatStream();
   refreshChatFromServer();
 });
+
+/* ---------------------------------------------------------------------------
+   Khôi phục tab đã lưu — PHẢI nằm ở cuối tệp.
+
+   switchTab() chạm tới biến `let` của phần Chat Center; nếu chạy trước khi tệp
+   nạp xong thì ném "Cannot access 'chatStream' before initialization" và toàn bộ
+   dashboard không khởi động được.
+   --------------------------------------------------------------------------- */
+switchTab(localStorage.getItem("zalobot-admin-tab") || "overview");
