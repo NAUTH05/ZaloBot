@@ -99,6 +99,26 @@ test("thông báo lỗi nêu nguyên văn lý do", () => {
     assert.match(text, /quá nhiều thao tác/);
 });
 
+test("thông báo 'chưa xác nhận' LUÔN nêu lý do, không chỉ nói gặp lỗi", () => {
+    const unconfirmed = { ...SAMPLE, status: "requires_verification", lastError: "Zalo nhận lệnh chấp nhận nhưng sau vài giây vẫn báo chưa phải bạn" };
+    const text = withBaseUrl("https://bot.example.org", () =>
+        main.friendRequestNotificationText(unconfirmed, ACCOUNT, { kind: "unconfirmed" }));
+
+    assert.match(text, /CHƯA XÁC NHẬN/);
+    assert.match(text, /Lý do:/, "thiếu lý do thì người nhận không biết phải làm gì");
+    assert.match(text, /chưa phải bạn/);
+    // Không được trình bày như đã kết bạn xong.
+    assert.doesNotMatch(text, /ĐÃ CHẤP NHẬN/);
+});
+
+test("thông báo 'chưa xác nhận' vẫn có lý do khi bản ghi thiếu lastError", () => {
+    const unconfirmed = { ...SAMPLE, status: "requires_verification" };
+    const text = withBaseUrl("https://bot.example.org", () =>
+        main.friendRequestNotificationText(unconfirmed, ACCOUNT, { kind: "unconfirmed" }));
+
+    assert.match(text, /Lý do:/);
+});
+
 test("không biết origin thì vẫn có hướng dẫn thay vì liên kết chết", () => {
     const text = withBaseUrl(undefined, () =>
         main.friendRequestNotificationText(SAMPLE, ACCOUNT, { kind: "new_request" }));

@@ -72,6 +72,48 @@ function pendingEvidence(status) {
     return !status.isFriend && Boolean(status.incomingRequest || status.outgoingRequest);
 }
 
+// Chờ ngắn giữa hai lần đọc lại trạng thái.
+//
+// KHÔNG `unref()` timer này: đó là một khoảng chờ NGẮN nằm trong một thao tác đang
+// chạy, nên nó phải giữ event loop sống. `unref()` khiến Node coi như không còn
+// việc gì và kết thúc vòng lặp trong lúc promise còn treo ("Promise resolution is
+// still pending but the event loop has already resolved") — thao tác chấp nhận
+// biến mất giữa chừng.
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Xác nhận hai bên đã là bạn, đọc lại NHIỀU LẦN.
+//
+// Vì sao không đọc một lần: `acceptFriendRequest()` trả về ngay khi Zalo nhận lệnh,
+// nhưng trạng thái quan hệ cần vài giây mới cập nhật. Đọc đúng một lần rồi kết
+// luận "thất bại" đã biến một lần chấp nhận THÀNH CÔNG thành lỗi — đúng sự cố
+// "tự động chấp nhận bị lỗi, phải accept bằng tay".
+//
+// Trả về:
+//   { state: "friend" }      — đã là bạn (xác nhận được)
+//   { state: "not_friend" }  — đọc được, và Zalo nói chưa phải bạn
+//   { state: "unknown" }     — không đọc được lần nào; KHÔNG phải bằng chứng thất bại
+async function confirmFriendship(account, userId, options = {}) {
+    const delays = Array.isArray(options.delays) ? options.delays : [1200, 2500];
+    let lastError = null;
+    let readOk = false;
+
+    for (let attempt = 0; attempt <= delays.length; attempt += 1) {
+        if (attempt > 0) await sleep(delays[attempt - 1]);
+        try {
+            const status = await account.friendApi.getStatus(userId);
+            readOk = true;
+            lastError = null;
+            if (status.isFriend) return { state: "friend" };
+        } catch (error) {
+            lastError = error?.message || String(error);
+        }
+    }
+
+    return { state: readOk ? "not_friend" : "unknown", error: lastError };
+}
+
 function createFriendRequestService(deps = {}) {
     const {
         // Danh sách nhà cung cấp ZCA đang đăng ký.
@@ -90,7 +132,10 @@ function createFriendRequestService(deps = {}) {
         log = () => {},
         // Đường dẫn tùy chọn cho kiểm thử.
         requestsPath = undefined,
-        settingsPath = undefined
+        settingsPath = undefined,
+        // Khoảng chờ giữa các lần đọc lại trạng thái kết bạn. Kiểm thử đặt [0, 0]
+        // để không phải chờ vài giây cho mỗi ca.
+        confirmDelays = [1200, 2500]
     } = deps;
 
     const paths = {
@@ -348,18 +393,19 @@ function createFriendRequestService(deps = {}) {
 
             // --- Bước 3: xác nhận kết quả ------------------------------------
             //
-            // API không ném lỗi là bằng chứng đủ để ghi nhận, nhưng nếu đọc lại
-            // được trạng thái thì phải đối chiếu. Đọc lại lỗi KHÔNG biến một lần
-            // chấp nhận thành công thành thất bại.
-            let confirmed = null;
-            try {
-                const after = await account.friendApi.getStatus(record.userId);
-                confirmed = after;
-            } catch (_) {
-                confirmed = null;
-            }
-
+            // Zalo nhận lệnh ngay nhưng trạng thái quan hệ cập nhật chậm, nên phải
+            // đọc lại nhiều lần. Đọc lại lỗi KHÔNG biến một lần chấp nhận thành
+            // công thành thất bại.
             if (action === "reject") {
+                // Chỉ nhánh từ chối mới cần đọc trạng thái ngay tại đây; nhánh chấp
+                // nhận dùng confirmFriendship() bên dưới. Đọc thêm một lần nữa chỉ
+                // tốn request mà không thêm thông tin.
+                let confirmed = null;
+                try {
+                    confirmed = await account.friendApi.getStatus(record.userId);
+                } catch (_) {
+                    confirmed = null;
+                }
                 const done = fr.applyTransition(requestId, REQUEST_STATUS.REJECTED, {
                     method,
                     processedBy: actor,
@@ -369,19 +415,39 @@ function createFriendRequestService(deps = {}) {
                 return { ok: true, status: REQUEST_STATUS.REJECTED, record: done.record };
             }
 
-            if (confirmed && confirmed.isFriend === false) {
-                // Zalo nhận lệnh nhưng quan hệ chưa thành. Không được báo "đã kết bạn".
+            let confirmation = await confirmFriendship(account, record.userId, { delays: confirmDelays });
+
+            if (confirmation.state === "not_friend") {
+                // Sự kiện kết bạn có thể tới TRƯỚC khi Zalo ghi nhận lời mời ở phía
+                // máy chủ, nên lần gọi accept đầu tiên có thể không có tác dụng.
+                // Gọi lại một lần là an toàn: chấp nhận một lời mời đã được chấp
+                // nhận không tạo thêm hệ quả nào.
+                log("warn", `chưa thấy ${record.userId} trở thành bạn sau lần chấp nhận đầu — gọi lại một lần`);
+                try {
+                    await account.friendApi.accept(record.userId);
+                } catch (error) {
+                    log("warn", `gọi lại chấp nhận thất bại: ${error.message}`);
+                }
+                confirmation = await confirmFriendship(account, record.userId, { delays: confirmDelays });
+            }
+
+            if (confirmation.state === "not_friend") {
+                // Đọc được trạng thái, và Zalo vẫn nói chưa phải bạn. Không được báo
+                // "đã kết bạn" — nhưng PHẢI ghi lý do, nếu không thông báo sẽ chỉ
+                // nói "gặp lỗi" mà không ai biết vì sao.
+                const reason = "Zalo nhận lệnh chấp nhận nhưng sau vài giây vẫn báo chưa phải bạn";
                 const done = fr.applyTransition(requestId, REQUEST_STATUS.REQUIRES_VERIFICATION, {
                     method,
                     processedBy: actor,
-                    note: "Zalo nhận lệnh nhưng chưa xác nhận đã là bạn"
+                    error: reason,
+                    note: reason
                 }, paths.requests);
-                await deliverNotifications(done.record || record, account, NOTIFICATION_KIND.FAILED);
-                audit("friend_request.requires_verification", { requestId, actor, method });
+                await deliverNotifications(done.record || record, account, NOTIFICATION_KIND.UNCONFIRMED);
+                audit("friend_request.requires_verification", { requestId, actor, method, error: reason });
                 return {
                     ok: false,
                     reason: "unconfirmed",
-                    error: "Zalo nhận lệnh nhưng chưa xác nhận hai bên đã là bạn.",
+                    error: reason,
                     record: done.record
                 };
             }
@@ -389,7 +455,9 @@ function createFriendRequestService(deps = {}) {
             const done = fr.applyTransition(requestId, REQUEST_STATUS.ACCEPTED, {
                 method,
                 processedBy: actor,
-                note: "đã chấp nhận"
+                note: confirmation.state === "friend"
+                    ? "đã chấp nhận (Zalo xác nhận đã là bạn)"
+                    : "đã chấp nhận; chưa đọc lại được trạng thái để xác nhận"
             }, paths.requests);
 
             autoState.consecutiveErrors = 0;

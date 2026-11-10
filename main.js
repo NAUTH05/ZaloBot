@@ -242,9 +242,11 @@ function friendRequestNotificationText(request, account, options = {}) {
 
     const header = kind === "accepted"
         ? "✅ ĐÃ CHẤP NHẬN LỜI MỜI KẾT BẠN"
-        : kind === "failed"
-            ? "⚠️ LỜI MỜI KẾT BẠN GẶP LỖI"
-            : "🔔 YÊU CẦU KẾT BẠN MỚI";
+        : kind === "unconfirmed"
+            ? "⚠️ CHƯA XÁC NHẬN ĐƯỢC LỜI MỜI KẾT BẠN"
+            : kind === "failed"
+                ? "⚠️ LỜI MỜI KẾT BẠN GẶP LỖI"
+                : "🔔 YÊU CẦU KẾT BẠN MỚI";
 
     const lines = [header, ""];
     lines.push(`👤 Người gửi: ${request?.displayName || "(không có tên)"}`);
@@ -257,6 +259,12 @@ function friendRequestNotificationText(request, account, options = {}) {
     if (kind === "accepted") {
         const how = request?.processedMethod === "auto" ? "tự động" : "thủ công";
         lines.push(`📌 Trạng thái: Đã chấp nhận (${how})`);
+    } else if (kind === "unconfirmed") {
+        lines.push("📌 Trạng thái: Chưa xác nhận được — cần kiểm tra");
+        // Luôn nêu lý do: một thông báo "gặp lỗi" không kèm nguyên nhân thì người
+        // nhận chỉ biết là có chuyện, không biết phải làm gì.
+        lines.push(`❗ Lý do: ${request?.lastError || "Zalo chưa báo hai bên đã là bạn"}`);
+        lines.push("👉 Mở Admin UI để bấm Chấp nhận lại, hoặc kiểm tra trực tiếp trong Zalo.");
     } else if (kind === "failed") {
         lines.push("📌 Trạng thái: Chưa xử lý được — cần kiểm tra");
         if (request?.lastError) lines.push(`❗ Lý do: ${request.lastError}`);

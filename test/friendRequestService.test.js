@@ -115,7 +115,9 @@ function makeService(account, paths, overrides = {}) {
         },
         describeRecipients: () => overrides.recipients || {},
         requestsPath: paths.requests,
-        settingsPath: paths.settings
+        settingsPath: paths.settings,
+        // Không chờ thật: mỗi ca "chưa xác nhận" sẽ phải chờ ~9 giây nếu dùng mặc định.
+        confirmDelays: overrides.confirmDelays || [0, 0]
     });
     return { service, notifications, welcomes };
 }
@@ -513,6 +515,105 @@ test("bản ghi cancelled vẫn chấp nhận lại được (đường thoát k
     const result = await service.accept(requestId, { actor: "admin" });
 
     assert.equal(result.ok, true);
+    assert.equal(fr.getRecord(requestId, paths.requests).status, REQUEST_STATUS.ACCEPTED);
+});
+
+// ---------------------------------------------------------------------------
+// 3c. Zalo cập nhật trạng thái CHẬM (lỗi đã gặp thật)
+//
+// Thực tế: acceptFriendRequest() trả về thành công, nhưng đọc lại ngay lập tức thì
+// is_friend vẫn 0, nên hệ thống báo "chưa xác nhận" và người dùng phải accept tay.
+// ---------------------------------------------------------------------------
+
+test("Zalo cập nhật chậm: lần đọc đầu chưa thấy bạn, lần sau thấy ⇒ ACCEPTED", async () => {
+    const paths = makePaths();
+    const account = makeAccount({ confirmOnAccept: false });
+    const { service } = makeService(account, paths);
+    await service.handleEvent(account.botId, { type: "request", userId: "555" });
+    const requestId = fr.buildRequestId(account.botId, "555");
+
+    let reads = 0;
+    account.friendApi.getStatus = async () => {
+        reads += 1;
+        if (reads === 1) return { isFriend: false, incomingRequest: true, outgoingRequest: false };
+        // Đọc lại ngay: Zalo chưa kịp cập nhật.
+        if (reads === 2) return { isFriend: false, incomingRequest: false, outgoingRequest: false };
+        // Đọc lại sau khoảng chờ: đã là bạn.
+        return { isFriend: true, incomingRequest: false, outgoingRequest: false };
+    };
+
+    const result = await service.accept(requestId, { actor: "admin" });
+
+    assert.equal(result.ok, true, "không được biến một lần chấp nhận THÀNH CÔNG thành lỗi");
+    assert.equal(fr.getRecord(requestId, paths.requests).status, REQUEST_STATUS.ACCEPTED);
+    assert.equal(account.calls.accept.length, 1, "chỉ cần gọi accept một lần");
+});
+
+test("đọc lại lỗi hoàn toàn: vẫn ghi accepted, không kết luận thất bại", async () => {
+    const paths = makePaths();
+    const account = makeAccount({ confirmOnAccept: false });
+    const { service } = makeService(account, paths);
+    await service.handleEvent(account.botId, { type: "request", userId: "555" });
+    const requestId = fr.buildRequestId(account.botId, "555");
+
+    let reads = 0;
+    account.friendApi.getStatus = async () => {
+        reads += 1;
+        if (reads === 1) return { isFriend: false, incomingRequest: true, outgoingRequest: false };
+        throw new Error("Zalo tạm lỗi");
+    };
+
+    const result = await service.accept(requestId, { actor: "admin" });
+
+    assert.equal(result.ok, true, "không đọc được thì không được kết luận là thất bại");
+    assert.equal(fr.getRecord(requestId, paths.requests).status, REQUEST_STATUS.ACCEPTED);
+});
+
+test("chưa xác nhận được: bản ghi PHẢI có lý do để thông báo nêu ra", async () => {
+    const paths = makePaths();
+    const account = makeAccount({ confirmOnAccept: false });
+    const { service, notifications } = makeService(account, paths);
+    await service.handleEvent(account.botId, { type: "request", userId: "555" });
+    const requestId = fr.buildRequestId(account.botId, "555");
+    notifications.length = 0;
+
+    const result = await service.accept(requestId, { actor: "admin" });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "unconfirmed");
+    const record = fr.getRecord(requestId, paths.requests);
+    assert.equal(record.status, REQUEST_STATUS.REQUIRES_VERIFICATION);
+    assert.ok(record.lastError, "thiếu lý do thì thông báo chỉ nói 'gặp lỗi' mà không ai biết vì sao");
+    assert.match(record.lastError, /chưa phải bạn/);
+
+    // Thông báo phải là loại riêng, không phải "gặp lỗi".
+    const kinds = notifications.map((item) => item.kind);
+    assert.ok(kinds.includes("unconfirmed"), `loại thông báo phải là unconfirmed, nhận được: ${kinds.join(",")}`);
+});
+
+test("gọi lại accept một lần khi lần đầu chưa có tác dụng", async () => {
+    const paths = makePaths();
+    const account = makeAccount({ confirmOnAccept: false });
+    const { service } = makeService(account, paths);
+    await service.handleEvent(account.botId, { type: "request", userId: "555" });
+    const requestId = fr.buildRequestId(account.botId, "555");
+
+    // Lần accept đầu không có tác dụng; lần thứ hai thì thành công.
+    let accepts = 0;
+    const originalAccept = account.friendApi.accept;
+    account.friendApi.accept = async (userId) => {
+        accepts += 1;
+        account.calls.accept.push(userId);
+        if (accepts === 1) return { ok: true, userId };
+        account.friendApi.getStatus = async () => ({ isFriend: true, incomingRequest: false, outgoingRequest: false });
+        return originalAccept(userId);
+    };
+    account.friendApi.getStatus = async () => ({ isFriend: false, incomingRequest: true, outgoingRequest: false });
+
+    const result = await service.accept(requestId, { actor: "admin" });
+
+    assert.equal(result.ok, true);
+    assert.equal(accepts, 2, "phải thử lại đúng một lần");
     assert.equal(fr.getRecord(requestId, paths.requests).status, REQUEST_STATUS.ACCEPTED);
 });
 

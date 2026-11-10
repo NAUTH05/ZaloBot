@@ -83,7 +83,10 @@ const NOTIFICATION_STATUS = Object.freeze({
 const NOTIFICATION_KIND = Object.freeze({
     NEW_REQUEST: "new_request",
     ACCEPTED: "accepted",
-    FAILED: "failed"
+    FAILED: "failed",
+    // Đã gọi API chấp nhận nhưng chưa xác nhận được kết quả. Khác `failed`: đây
+    // không phải lỗi của Zalo, mà là chưa đủ căn cứ để khẳng định đã kết bạn.
+    UNCONFIRMED: "unconfirmed"
 });
 
 // Zalo có độ trễ giữa lúc API chấp nhận và lúc trạng thái quan hệ cập nhật. Một

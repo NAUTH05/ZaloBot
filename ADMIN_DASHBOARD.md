@@ -323,8 +323,14 @@ sending a dead localhost link.
    pending request, re-read `getFriendRecommendations()`; only when the person is absent
    does it become `cancelled`. Unknown ⇒ proceed and let Zalo answer.
 5. `acceptFriendRequest()` / `rejectFriendRequest()`.
-6. Re-read the status; if Zalo still says not friends the record becomes
-   `requires_verification`, **not** `accepted`.
+6. Confirm by re-reading the relationship **several times** (immediately, then after
+   ~1.2s and ~2.5s). Zalo accepts the call instantly but publishes `is_friend` late, so a
+   single immediate read reported success as failure — the owner had to accept by hand.
+   If every read still says "not friends", the accept call is retried **once** (an event
+   can arrive before Zalo has registered the request server-side) and confirmed again.
+   Only then does the record become `requires_verification`, **not** `accepted` — and the
+   reason is stored so the notification can state it. If every read throws, that is
+   *unknown*, not failure: the record stays `accepted` with a note.
 7. Optional welcome message (default off, only after real acceptance, once per request).
 8. Audit entry.
 
