@@ -123,3 +123,23 @@ test("nhãn nút tin chào dựa trên trạng thái thông báo, không phải 
     assert.ok(!/welcomed\s*===\s*"sent"/.test(body), "không được so sánh bản ghi với chuỗi trạng thái");
     assert.ok(/welcomeStatus\s*===\s*"sent"/.test(body), "phải so sánh trạng thái thông báo");
 });
+
+test("hộp thoại chưa xác minh nguồn phải mở được đường xác minh, không chỉ báo lỗi", () => {
+    const body = functionBody("requireVerifiedSource");
+    assert.ok(body, "phải có hàm requireVerifiedSource");
+
+    // Bản trước chỉ nói "chạy npm run migrate:attribution" nên người dùng bị kẹt:
+    // nút "Xác minh nguồn" nằm ngay trên dòng nhưng hộp thoại không nhắc tới.
+    assert.match(body, /data-open-verify/, "phải có nút mở phần xác minh nguồn");
+    assert.match(body, /openVerifySource\(/, "nút phải thực sự gọi openVerifySource");
+    assert.match(body, /Xác minh nguồn/, "phải nói rõ nút nằm ở cột thao tác của dòng");
+});
+
+test("hai chỗ chặn thao tác đều truyền bản ghi để hộp thoại có bằng chứng", () => {
+    for (const [name, call] of [["openUser", "requireVerifiedSource(wantedBot, \"người dùng này\", user)"],
+                                ["openChat", "requireVerifiedSource(verifiedBotId, \"cuộc trò chuyện này\", chatRecord)"]]) {
+        const body = functionBody(name);
+        assert.ok(body, `thiếu ${name}`);
+        assert.ok(body.includes(call), `${name} phải truyền bản ghi vào cổng xác minh`);
+    }
+});

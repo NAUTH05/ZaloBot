@@ -138,6 +138,10 @@ if (!app.includes("friendRequestChannelResult")) {
     fail("Dashboard must show per-channel notification delivery, not one merged status");
 }
 if (!app.includes("friendRequestBanner")) fail("Dashboard must surface friend-request configuration problems");
+// Cổng "chưa xác minh nguồn" phải mở được đường xác minh trong giao diện.
+if (!app.includes("data-open-verify")) {
+    fail("The unverified-source dialog must offer an in-UI way to verify the record, not only a CLI hint");
+}
 if (!app.includes("friend-requests/send-welcome")) {
     fail("Dashboard must offer resending the welcome message to an already accepted friend");
 }

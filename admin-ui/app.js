@@ -1068,21 +1068,45 @@ function openCreateUser() {
 // Nút thao tác trên bản ghi chưa xác minh đã bị vô hiệu, nhưng đây là lớp thứ hai:
 // nếu vì lý do gì đó vẫn vào được, phải chặn thay vì gửi botId rỗng lên API — gửi
 // thiếu botId có thể khiến thao tác rơi vào một bot khác.
-function requireVerifiedSource(botId, what = "bản ghi này") {
+function requireVerifiedSource(botId, what = "bản ghi này", record = null) {
   if (botId) return true;
+
+  // Hộp thoại phải MỞ ĐƯỢC ĐƯỜNG RA, không chỉ báo lỗi.
+  //
+  // Bản trước chỉ nói "chạy npm run migrate:attribution" — người dùng bị kẹt vì
+  // không biết rằng ngay trên dòng đó có nút "Xác minh nguồn" để gán tay.
+  const store = record?.sourceStoreId || "";
+  const key = record?.sourceRecordKey || "";
+  const reason = record?.sourceReason
+    || "Bản ghi này không có trường botId và khóa lưu trữ cũng không có phạm vi, nên chưa xác định được nó thuộc tài khoản nào.";
+
+  const action = store && key
+    ? `<p class="muted">Cách xử lý: xem bằng chứng, chọn tài khoản cho bản ghi này, rồi thao tác lại.</p>` +
+      `<div class="row-actions"><button class="primary small" type="button" data-open-verify="1">Xác minh nguồn ngay</button></div>`
+    : `<p class="muted">Dòng này không gắn với bản ghi lưu trữ nào nên không xác minh trực tiếp được. ` +
+      `Chạy <code>npm run migrate:attribution</code> để xem báo cáo (chạy thử, không ghi), ` +
+      `rồi <code>npm run migrate:attribution-apply</code> nếu báo cáo chỉ ra bằng chứng.</p>`;
+
   showDialog("Chưa xác minh nguồn",
     `<div class="empty-state"><p><strong>Không thể thao tác trên ${escapeHtml(what)}.</strong></p>` +
-    `<p class="muted">Bản ghi này không có trường botId và khóa lưu trữ cũng không có phạm vi, nên chưa xác định được nó thuộc bot nào. ` +
-    `Thao tác lúc này có thể gửi tin cho nhầm người hoặc nhầm tài khoản.</p>` +
-    `<p class="muted">Cách xử lý: chạy <code>npm run migrate:attribution</code> để xem báo cáo, và chỉ gán nguồn khi có bằng chứng.</p></div>`);
+    `<p class="muted">${escapeHtml(reason)} Thao tác lúc này có thể gửi tin cho nhầm người hoặc nhầm tài khoản.</p>` +
+    action +
+    `<p class="muted">Nhiều dòng cùng lỗi: dùng nút <strong>Xác minh nguồn</strong> ở cột thao tác của từng dòng.</p></div>`);
+
+  if (store && key) {
+    $("#dialogBody").querySelector("[data-open-verify]")?.addEventListener("click", () => {
+      openVerifySource(store, key);
+    });
+  }
   return false;
 }
 
 function openUser(userId, botId) {
   // Cùng một User ID ở hai bot là hai danh tính khác nhau, nên phải khớp cả bot.
   const wantedBot = recordBotId({ botId });
-  if (!requireVerifiedSource(wantedBot, "người dùng này")) return;
+  // Tra bản ghi TRƯỚC khi chặn: hộp thoại cần store/key để mở thẳng phần xác minh.
   const user = workspace.users.find((item) => item.userId === userId && recordBotId(item) === wantedBot);
+  if (!requireVerifiedSource(wantedBot, "người dùng này", user)) return;
   if (!user) return;
   showDialog(user.displayName, `<div class="detail-grid"><div class="detail"><span>Bot</span><strong>${escapeHtml(botLabel(wantedBot))}</strong></div><div class="detail"><span>User ID</span><code>${escapeHtml(user.userId)}</code></div><div class="detail"><span>MSSV</span><strong>${escapeHtml(user.studentIds.join(", ") || "Chưa có MSSV")}</strong></div><div class="detail"><span>Tương tác đầu tiên</span><strong>${escapeHtml(formatDate(user.firstInteractionAt))}</strong></div><div class="detail"><span>Hoạt động gần nhất</span><strong>${escapeHtml(formatDate(user.lastInteractionAt))}</strong></div></div><h3>Ngữ cảnh chat</h3><div class="stack">${user.chats.map((chat) => `<article class="stack-item"><form class="userContextForm" data-user-chat="${escapeHtml(chat.chatId)}"><div class="form-grid"><label>Tên hiển thị<input name="displayName" value="${escapeHtml(user.displayName)}" /></label><label>Trạng thái thành viên<select name="status"><option value="active" ${chat.memberStatus === "active" ? "selected" : ""}>Đang hoạt động</option><option value="disabled" ${chat.memberStatus === "disabled" ? "selected" : ""}>Đã tắt</option><option value="removed" ${chat.memberStatus === "removed" ? "selected" : ""}>Đã xóa</option></select></label></div><p>${escapeHtml(chat.chatType)} · chat ${escapeHtml(chat.status)} · <code>${escapeHtml(chat.chatId)}</code></p><div class="row-actions"><button type="submit">Lưu người dùng</button><button type="button" data-open-chat="${escapeHtml(chat.chatId)}">Mở chat</button><button type="button" data-user-admin="${escapeHtml(chat.chatId)}">Cấp quyền admin</button><button type="button" class="danger-text" data-user-remove="${escapeHtml(chat.chatId)}">Xóa khỏi chat</button></div></form></article>`).join("")}</div><h3>Đăng ký nhận lịch</h3><div class="stack">${user.subscriptions.map((item) => `<article class="stack-item horizontal"><div><strong>${escapeHtml(item.studentId || "Chưa có MSSV")} · ${escapeHtml(item.chatName)}</strong><p>${escapeHtml(item.notificationsEnabled ? "Đang bật" : "Đang tắt")} · ${escapeHtml(item.notificationTimes.map((time) => `${time.time} ${targetDayLabel(time.targetDayOffset)}`).join(", ") || "Chưa có giờ nhận lịch")}</p></div><button data-open-sub="${escapeHtml(item.key)}">Quản lý</button></article>`).join("") || `<div class="empty-state">Không có đăng ký nhận lịch.</div>`}</div>`);
   $$('.userContextForm').forEach((form) => form.addEventListener("submit", async (event) => { event.preventDefault(); const values = new FormData(event.currentTarget); await runAction(async () => { await api(`/api/admin/users/${encodeURIComponent(userId)}`, { method: "PATCH", body: JSON.stringify({ botId: wantedBot, chatId: event.currentTarget.dataset.userChat, displayName: values.get("displayName"), status: values.get("status") }) }); $("#detailDialog").close(); await loadData(); }, "Không lưu được thông tin người dùng"); }));
@@ -1094,7 +1118,8 @@ function openUser(userId, botId) {
 
 async function openChat(chatId, botId) {
   const verifiedBotId = recordBotId({ botId });
-  if (!requireVerifiedSource(verifiedBotId, "cuộc trò chuyện này")) return;
+  const chatRecord = workspace.chats.find((item) => item.chatId === chatId && recordBotId(item) === verifiedBotId);
+  if (!requireVerifiedSource(verifiedBotId, "cuộc trò chuyện này", chatRecord)) return;
   const scoped = `botId=${encodeURIComponent(verifiedBotId)}`;
   const data = await api(`/api/admin/chats/${encodeURIComponent(chatId)}?${scoped}`); const chat = data.chat;
   showDialog(chat.displayName || chat.chatId, `<form id="chatMetadataForm"><div class="form-grid"><label>Chat ID<input value="${escapeHtml(chat.chatId)}" disabled /></label><label>User ID<input name="userId" value="${escapeHtml(chat.userId || "")}" /></label><label>Display name<input name="displayName" value="${escapeHtml(chat.displayName || "")}" /></label><label>Type<select name="chatType"><option value="private" ${chat.chatType === "private" ? "selected" : ""}>Private</option><option value="group" ${chat.chatType === "group" ? "selected" : ""}>Group</option><option value="unknown" ${chat.chatType === "unknown" ? "selected" : ""}>Unknown</option></select></label></div><button class="primary" type="submit">Lưu metadata</button></form><div class="action-bar"><button data-chat-status="active">Reactivate</button><button data-chat-status="disabled">Disable</button><button data-chat-status="removed">Soft remove</button><button data-chat-retry="1">Retry</button><button data-make-admin="1">Make admin</button><button class="danger-text" data-chat-hard-delete="1">Xóa vĩnh viễn</button></div><div class="detail-grid"><div class="detail"><span>Bot</span><strong>${escapeHtml(botLabel(recordBotId({ botId })))}</strong></div><div class="detail"><span>Last inbound</span><strong>${escapeHtml(formatDate(chat.lastInboundInteractionAt))}</strong></div><div class="detail"><span>Last success</span><strong>${escapeHtml(formatDate(chat.lastSuccessfulDeliveryAt))}</strong></div><div class="detail"><span>Last error</span><strong>${escapeHtml(chat.lastError?.message || "-")}</strong></div><div class="detail"><span>Error time</span><strong>${escapeHtml(formatDate(chat.lastError?.at))}</strong></div></div><h3>Members & MSSV</h3><div class="stack">${(data.members || []).map((user) => `<article class="stack-item"><strong>${escapeHtml(user.displayName)}</strong><p><code>${escapeHtml(user.userId)}</code> · ${escapeHtml(user.studentIds.join(", ") || "No MSSV")}</p></article>`).join("") || `<div class="empty-state">Không có member record.</div>`}</div><h3>Subscriptions</h3><div class="stack">${(data.subscriptions || []).map((item) => `<article class="stack-item horizontal"><div><strong>${escapeHtml(item.userDisplayName || item.userId || "Legacy")}</strong><p>${escapeHtml(item.studentId || "No MSSV")} · ${escapeHtml(item.notificationTimes.map((time) => `${time.time} ${targetDayLabel(time.targetDayOffset)}`).join(", ") || "No times")}</p></div><button data-open-sub="${escapeHtml(item.key)}">Quản lý</button></article>`).join("") || `<div class="empty-state">Không có subscription.</div>`}</div>`);
