@@ -2892,9 +2892,14 @@ function renderFriendRequestCard(record, options = {}) {
        </div>`
     : `<div class="row-actions">
          ${operable ? acceptReject : ""}
+         ${welcomed ? `<button class="ghost small" type="button" data-fr-action="welcome" data-fr-id="${escapeHtml(record.requestId)}" ${busy ? "disabled" : ""}>${welcomed === "sent" ? "Gửi lại tin chào" : "Gửi tin chào"}</button>` : ""}
          <button class="ghost small" type="button" data-fr-action="details" data-fr-id="${escapeHtml(record.requestId)}">Chi tiết</button>
          <button class="ghost small" type="button" data-fr-action="retry" data-fr-id="${escapeHtml(record.requestId)}" ${busy ? "disabled" : ""}>Gửi lại thông báo lỗi</button>
        </div>`;
+
+  // Tin chào chỉ gửi được cho người ĐÃ kết bạn. Nút này là đường thoát khi tin
+  // chào bị bỏ lỡ lúc chấp nhận (tính năng đang tắt, hoặc nội dung đặt sau).
+  const welcomed = ["accepted", "already_friends"].includes(record.status) ? record : null;
 
   // Phương thức chỉ có nghĩa khi một thao tác THẬT đã chạy. "Đã thu hồi · tự động"
   // là vô nghĩa: huỷ không phải là một lần xử lý.
@@ -3064,6 +3069,7 @@ async function saveFriendRequestSettings(patch, failureLabel) {
     renderFriendRequests();
     setDataState("success", "Đã lưu cài đặt lời mời kết bạn.");
   }
+  return outcome.ok;
 }
 
 async function handleFriendRequestAction(action, requestId) {
@@ -3098,6 +3104,13 @@ async function handleFriendRequestAction(action, requestId) {
         friendRequestState = result.state || friendRequestState;
         setDataState(result.ok ? "success" : "error", result.ok ? "Đã gửi lại thông báo." : (result.error || "Gửi lại thất bại."));
       }
+    } else if (action === "welcome") {
+      const result = await api("/api/admin/friend-requests/send-welcome", {
+        method: "POST",
+        body: JSON.stringify({ requestId })
+      });
+      friendRequestState = result.state || friendRequestState;
+      setDataState(result.ok ? "success" : "error", result.ok ? "Đã gửi tin chào." : (result.error || "Gửi tin chào thất bại."));
     } else if (action === "details") {
       const record = (friendRequestState?.pending || []).concat(friendRequestState?.history || [])
         .find((item) => item.requestId === requestId);
@@ -3197,12 +3210,15 @@ function bindFriendRequestControls() {
     }
 
     if (event.target.closest("#friendRequestSaveWelcome")) {
-      saveFriendRequestSettings({
-        welcome: {
-          enabled: $("#friendRequestWelcomeEnabled").checked,
-          message: $("#friendRequestWelcomeMessage").value
+      const enabled = $("#friendRequestWelcomeEnabled").checked;
+      const message = $("#friendRequestWelcomeMessage").value.trim();
+      saveFriendRequestSettings({ welcome: { enabled, message } }, "Không lưu được tin chào").then((ok) => {
+        // Bẫy dễ mắc: gõ nội dung rồi bấm Lưu nhưng quên bật công tắc. Nói thẳng
+        // ra thay vì để họ tưởng đã cấu hình xong.
+        if (ok && !enabled && message) {
+          setDataState("error", "Đã lưu nội dung nhưng tin chào đang TẮT — bật công tắc \"Gửi tin chào sau khi kết bạn xong\" để gửi.");
         }
-      }, "Không lưu được tin chào");
+      });
     }
   });
 

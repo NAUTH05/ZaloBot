@@ -346,6 +346,22 @@ Off by default. Sent only after a confirmed acceptance, only once per request, a
 send failure is recorded separately (`notifications.zca:welcome`) without touching the
 friendship status.
 
+The configured text **replaces the bot's built-in greeting** for that person. Without
+this, a newly accepted friend who then messaged the bot received
+`formatWelcomeMessage()` ("[LỊCH HỌC LHU] XIN CHÀO" plus the command list) and never saw
+what the administrator wrote. Two rules make the configured text win:
+
+- On a successful welcome the chat is marked admitted, so the generic greeting does not
+  fire on their first message.
+- If the welcome was already sent, the greeting is skipped entirely — otherwise they get
+  two different greetings.
+- If the welcome is off, the built-in greeting still applies, and the Admin UI warns when
+  a message is saved while the switch is off.
+
+Because the welcome only goes out at the moment of acceptance, a missed one can be sent
+later with **Gửi tin chào** on the history card (`POST .../send-welcome`). It refuses with
+a reason when the feature is off, the message is empty, or it was already delivered.
+
 ## Deploy and test with a real account
 
 ```bash

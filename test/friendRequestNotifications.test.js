@@ -52,9 +52,11 @@ test("liên kết quản lý dựng từ origin công khai và base path thật"
     assert.doesNotMatch(url, /token|cookie|imei|session/i);
 });
 
-test("không biết origin thì KHÔNG dựng liên kết rác", () => {
-    const url = withBaseUrl(undefined, () => main.buildFriendRequestManageUrl());
-    assert.equal(url, null);
+test("origin là localhost thì KHÔNG dựng liên kết (chỉ mở được trên chính VPS)", () => {
+    // Kiểm tra tất định: không phụ thuộc việc máy này có tệp data/public-origin.json
+    // hay không (bản trước dựa vào "chưa biết origin" nên lúc đỏ lúc xanh).
+    assert.equal(withBaseUrl("http://localhost:3000", () => main.buildFriendRequestManageUrl()), null);
+    assert.equal(withBaseUrl("http://127.0.0.1:6003", () => main.buildFriendRequestManageUrl()), null);
 });
 
 test("origin có dấu / thừa vẫn ghép đúng", () => {
@@ -119,12 +121,12 @@ test("thông báo 'chưa xác nhận' vẫn có lý do khi bản ghi thiếu las
     assert.match(text, /Lý do:/);
 });
 
-test("không biết origin thì vẫn có hướng dẫn thay vì liên kết chết", () => {
-    const text = withBaseUrl(undefined, () =>
+test("origin không dùng được thì vẫn có hướng dẫn thay vì liên kết chết", () => {
+    const text = withBaseUrl("http://localhost:3000", () =>
         main.friendRequestNotificationText(SAMPLE, ACCOUNT, { kind: "new_request" }));
 
     assert.match(text, /Admin UI/);
-    assert.doesNotMatch(text, /https?:\/\//, "không được gửi liên kết khi chưa biết tên miền");
+    assert.doesNotMatch(text, /localhost|127\.0\.0\.1/, "không bao giờ gửi liên kết chỉ mở được trên VPS");
 });
 
 test("tin thử nói rõ là tin thử, không tạo lời mời", () => {
@@ -197,6 +199,60 @@ test("kênh ZCA bỏ qua OWNER_USER_ID trùng với chính tài khoản", () => 
         if (previous === undefined) delete process.env.OWNER_USER_ID;
         else process.env.OWNER_USER_ID = previous;
     }
+});
+
+// ---------------------------------------------------------------------------
+// Lời chào thay cho tin nhắn chào mặc định của bot
+// ---------------------------------------------------------------------------
+
+test("người đã kết bạn nhận ĐÚNG nội dung quản trị viên viết, không phải lời chào mặc định", () => {
+    const record = { ...SAMPLE, status: "accepted", notifications: {} };
+    const settings = { welcome: { enabled: true, message: "Xin chào bạn, mình là Bot hỗ trợ theo dõi lịch học" } };
+
+    const decision = main.friendWelcomeDecision(record, settings);
+
+    assert.equal(decision.message, "Xin chào bạn, mình là Bot hỗ trợ theo dõi lịch học");
+    assert.equal(decision.alreadySent, false);
+});
+
+test("tin chào tắt: không có nội dung riêng (dùng lời chào mặc định)", () => {
+    const record = { ...SAMPLE, status: "accepted", notifications: {} };
+    const settings = { welcome: { enabled: false, message: "vẫn còn chữ nhưng đang tắt" } };
+
+    const decision = main.friendWelcomeDecision(record, settings);
+
+    assert.equal(decision.message, null);
+});
+
+test("tin chào bật nhưng nội dung rỗng: không gửi tin rỗng", () => {
+    const record = { ...SAMPLE, status: "accepted", notifications: {} };
+    const settings = { welcome: { enabled: true, message: "   " } };
+
+    assert.equal(main.friendWelcomeDecision(record, settings).message, null);
+});
+
+test("đã gửi tin chào lúc kết bạn: không chào lại khi họ nhắn lần đầu", () => {
+    const record = {
+        ...SAMPLE,
+        status: "accepted",
+        notifications: { "zca:welcome": { status: "sent" } }
+    };
+
+    const decision = main.friendWelcomeDecision(record, { welcome: { enabled: true, message: "Chào" } });
+
+    assert.equal(decision.alreadySent, true, "chào lại sẽ gửi trùng ngay sau khi vừa chào");
+});
+
+test("lời mời chưa được chấp nhận: không có lời chào riêng", () => {
+    assert.equal(main.friendWelcomeDecision({ ...SAMPLE, status: "pending" }, { welcome: { enabled: true, message: "x" } }), null);
+    assert.equal(main.friendWelcomeDecision({ ...SAMPLE, status: "cancelled" }, { welcome: { enabled: true, message: "x" } }), null);
+    assert.equal(main.friendWelcomeDecision(null, { welcome: { enabled: true, message: "x" } }), null);
+});
+
+test("resolveFriendWelcome chỉ áp dụng cho tài khoản ZCA", () => {
+    // Bot chính thức không có lời mời kết bạn nên không có lời chào riêng.
+    assert.equal(main.resolveFriendWelcome("bot1", "555"), null);
+    assert.equal(main.resolveFriendWelcome("zca:1001", ""), null);
 });
 
 test("tình trạng người nhận mô tả được cả hai kênh, không lộ bí mật phiên", () => {

@@ -482,13 +482,23 @@ function createFriendRequestService(deps = {}) {
     }
 
     // Tin chào chỉ gửi MỘT lần cho mỗi lời mời đã được chấp nhận.
-    async function maybeSendWelcome(record, account) {
+    //
+    // `force` dùng cho nút "Gửi tin chào" của quản trị viên: gửi lại theo yêu cầu
+    // là hành động có chủ ý, khác với việc tự động gửi trùng.
+    async function maybeSendWelcome(record, account, options = {}) {
         const settings = store.settings();
-        if (settings.welcome.enabled !== true) return { skipped: true };
+        if (settings.welcome.enabled !== true) {
+            return { skipped: true, reason: "welcome_disabled" };
+        }
         const message = String(settings.welcome.message || "").trim();
-        if (!message) return { skipped: true };
+        if (!message) return { skipped: true, reason: "welcome_empty" };
         // Đã gửi cho thế hệ lời mời này rồi thì thôi.
-        if (record?.notifications?.welcome?.status === NOTIFICATION_STATUS.SENT) return { skipped: true };
+        //
+        // Khóa ghi nhận là "zca:welcome" (kênh + loại), KHÔNG phải "welcome" —
+        // đọc sai khóa thì bước chống gửi trùng không bao giờ chạy.
+        if (!options.force && fr.hasNotified(record, NOTIFICATION_CHANNEL.ZCA, "welcome")) {
+            return { skipped: true, reason: "already_sent" };
+        }
 
         let outcome;
         try {
@@ -959,6 +969,39 @@ function createFriendRequestService(deps = {}) {
         return { ok: Boolean(result.ok), channel: name, chatId: result.chatId || null, error: result.ok ? null : (result.error || "gửi thất bại") };
     }
 
+    // Gửi tin chào cho một người ĐÃ được chấp nhận kết bạn.
+    //
+    // Cần thiết vì tin chào chỉ đi đúng lúc chấp nhận: nếu lúc đó tính năng đang
+    // tắt, hoặc nội dung được đặt sau, người đó sẽ không bao giờ nhận được — và
+    // nút "gửi lại" không được phép lặng lẽ không làm gì.
+    async function sendWelcomeFor(requestId, options = {}) {
+        const record = store.get(requestId);
+        if (!record) return { ok: false, error: "Không tìm thấy lời mời này." };
+        if (![REQUEST_STATUS.ACCEPTED, REQUEST_STATUS.ALREADY_FRIENDS].includes(record.status)) {
+            return { ok: false, error: "Chỉ gửi tin chào cho người đã được chấp nhận kết bạn." };
+        }
+        const account = getAccount(record.accountId);
+        if (!account || !account.friendApi) {
+            return { ok: false, error: "Tài khoản ZCA của người này không khả dụng." };
+        }
+        const result = await maybeSendWelcome(record, account, { force: options.force === true });
+        if (result?.skipped) {
+            const reasons = {
+                welcome_disabled: "Tin chào đang TẮT trong cài đặt.",
+                welcome_empty: "Chưa nhập nội dung tin chào.",
+                already_sent: "Tin chào đã được gửi cho người này rồi."
+            };
+            return { ok: false, skipped: true, reason: result.reason, error: reasons[result.reason] || "Không gửi được." };
+        }
+        audit("friend_request.welcome_sent", { requestId, actor: options.actor || null, result: result?.ok ? "success" : "failed" });
+        return {
+            ok: Boolean(result?.ok),
+            chatId: record.userId,
+            error: result?.ok ? null : (result?.error || "gửi tin chào thất bại"),
+            state: getState()
+        };
+    }
+
     // Gửi thử một kênh để quản trị viên biết cấu hình đúng chưa.
     async function testNotification(channel) {
         const name = String(channel || "").trim();
@@ -1002,6 +1045,7 @@ function createFriendRequestService(deps = {}) {
         accept: (requestId, options) => processRequest(requestId, "accept", options),
         reject: (requestId, options) => processRequest(requestId, "reject", options),
         retryNotification,
+        sendWelcomeFor,
         testNotification,
         // Cấu hình + trạng thái
         getSettings: () => store.settings(),

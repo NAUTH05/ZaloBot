@@ -906,6 +906,78 @@ test("tin chào lỗi không làm hỏng trạng thái kết bạn", async () =>
 });
 
 // ---------------------------------------------------------------------------
+// 7b. Tin chào: chống gửi trùng và đường gửi lại
+// ---------------------------------------------------------------------------
+
+test("tin chào chỉ gửi MỘT lần — khóa ghi nhận phải là zca:welcome", async () => {
+    const paths = makePaths();
+    fr.updateSettings({ welcome: { enabled: true, message: "Chào bạn!" } }, paths.settings);
+    const account = makeAccount();
+    const { service, welcomes } = makeService(account, paths);
+    await service.handleEvent(account.botId, { type: "request", userId: "555" });
+    const requestId = fr.buildRequestId(account.botId, "555");
+
+    await service.accept(requestId, { actor: "admin" });
+    assert.equal(welcomes.length, 1);
+    assert.equal(fr.getRecord(requestId, paths.requests).notifications["zca:welcome"].status, "sent");
+
+    // Gọi lại không kèm force ⇒ phải bị chặn. Nếu đọc sai khóa, tin chào sẽ đi lần hai.
+    const again = await service.sendWelcomeFor(requestId, {});
+    assert.equal(again.ok, false);
+    assert.equal(again.reason, "already_sent");
+    assert.equal(welcomes.length, 1, "không được gửi tin chào lần hai");
+});
+
+test("gửi tin chào cho người đã kết bạn khi lúc chấp nhận tính năng đang tắt", async () => {
+    const paths = makePaths();
+    const account = makeAccount();
+    const { service, welcomes } = makeService(account, paths);
+    await service.handleEvent(account.botId, { type: "request", userId: "555" });
+    const requestId = fr.buildRequestId(account.botId, "555");
+
+    // Chấp nhận trong lúc tin chào TẮT: không gửi gì.
+    await service.accept(requestId, { actor: "admin" });
+    assert.equal(welcomes.length, 0);
+
+    // Quản trị viên đặt nội dung sau đó rồi bấm "Gửi tin chào".
+    fr.updateSettings({ welcome: { enabled: true, message: "Xin chào bạn, mình là Bot hỗ trợ." } }, paths.settings);
+    const result = await service.sendWelcomeFor(requestId, { actor: "admin" });
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(welcomes, ["555"]);
+});
+
+test("chưa bật tin chào thì nút gửi báo lý do rõ, không im lặng", async () => {
+    const paths = makePaths();
+    const account = makeAccount();
+    const { service } = makeService(account, paths);
+    await service.handleEvent(account.botId, { type: "request", userId: "555" });
+    const requestId = fr.buildRequestId(account.botId, "555");
+    await service.accept(requestId, { actor: "admin" });
+
+    const result = await service.sendWelcomeFor(requestId, {});
+
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "welcome_disabled");
+    assert.match(result.error, /TẮT/);
+});
+
+test("không gửi tin chào cho lời mời chưa được chấp nhận", async () => {
+    const paths = makePaths();
+    fr.updateSettings({ welcome: { enabled: true, message: "Chào" } }, paths.settings);
+    const account = makeAccount();
+    const { service, welcomes } = makeService(account, paths);
+    await service.handleEvent(account.botId, { type: "request", userId: "555" });
+    const requestId = fr.buildRequestId(account.botId, "555");
+
+    const result = await service.sendWelcomeFor(requestId, {});
+
+    assert.equal(result.ok, false);
+    assert.match(result.error, /đã được chấp nhận/);
+    assert.equal(welcomes.length, 0);
+});
+
+// ---------------------------------------------------------------------------
 // 8. Sự kiện huỷ / kết bạn từ Zalo
 // ---------------------------------------------------------------------------
 

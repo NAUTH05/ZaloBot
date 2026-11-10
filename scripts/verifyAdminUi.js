@@ -138,6 +138,9 @@ if (!app.includes("friendRequestChannelResult")) {
     fail("Dashboard must show per-channel notification delivery, not one merged status");
 }
 if (!app.includes("friendRequestBanner")) fail("Dashboard must surface friend-request configuration problems");
+if (!app.includes("friend-requests/send-welcome")) {
+    fail("Dashboard must offer resending the welcome message to an already accepted friend");
+}
 // Hai kênh thông báo phải bật/tắt độc lập — không được gộp thành một công tắc.
 if (!app.includes("friendRequestOfficialEnabled") || !app.includes("friendRequestZcaEnabled")) {
     fail("Official bot and ZCA notification channels must be switchable independently");

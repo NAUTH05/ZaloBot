@@ -138,6 +138,7 @@ const { recordSystemLog } = require("./operationalLog");
 const { getAdminSettings, getConfiguredAdminIds, isConfiguredAdmin } = require("./adminSettings");
 const { LEGACY_BOT_ID, extractBotName, isZcaId, normalizeBotId, parseScopedKey, providerTypeOf, resolveBotConfigs, resolveBotDisplayName, scopeKey } = require("./bots");
 const { createFriendRequestService } = require("./friendRequestService");
+const friendRequestStore = require("./friendRequests");
 const { createOfficialProvider } = require("./providers/officialProvider");
 const { createZcaProvider } = require("./providers/zca/zcaProvider");
 const { createRuntimeMetrics } = require("./runtimeMetrics");
@@ -213,6 +214,9 @@ const FRIEND_REQUEST_TAB = "friendrequests";
 function buildFriendRequestManageUrl() {
     const origin = String(getPublicOrigin() || "").trim().replace(/\/+$/, "");
     if (!origin) return null;
+    // Origin là localhost thì liên kết chỉ mở được trên chính VPS — người nhận bấm
+    // vào sẽ thấy lỗi. Thà không gửi liên kết và in hướng dẫn.
+    if (isLoopbackUrl(origin)) return null;
     const base = BASE_PATH === "/" ? "" : BASE_PATH;
     return `${origin}${base}/#${FRIEND_REQUEST_TAB}`;
 }
@@ -429,10 +433,22 @@ async function deliverFriendRequestWelcome({ account, request, message } = {}) {
     if (String(account.ownUid || "") === target) return { skipped: true, reason: "self_recipient" };
     try {
         await runWithBot(account, () => sendMessage(target, message));
-        return { ok: true, chatId: target };
     } catch (error) {
         return { ok: false, error: error?.message || String(error) };
     }
+
+    // Tin chào này CHÍNH LÀ lời chào đầu tiên của người đó.
+    //
+    // Đánh dấu đã tiếp nhận để lời chào mặc định của bot không gửi thêm một tin
+    // nữa khi họ nhắn lần đầu — nếu không, họ nhận hai lời chào khác nhau và bản
+    // mặc định sẽ che mất nội dung quản trị viên vừa viết.
+    try {
+        admissionRegistry.admit(account.botId, target);
+        markChatAdmitted(target);
+    } catch (error) {
+        console.warn(`[FriendRequest] không đánh dấu được tiếp nhận cho ${target}: ${error.message}`);
+    }
+    return { ok: true, chatId: target };
 }
 
 // Dịch vụ lời mời kết bạn. Tạo TRƯỚC các nhà cung cấp để listener ZCA có chỗ
@@ -460,6 +476,40 @@ const friendRequestService = createFriendRequestService({
         else console.log(line);
     }
 });
+
+// Quyết định lời chào cho một người đã kết bạn. Hàm THUẦN để kiểm thử được mà
+// không phải ghi vào store thật.
+function friendWelcomeDecision(record, settings) {
+    if (!record) return null;
+    if (record.status !== "accepted" && record.status !== "already_friends") return null;
+
+    const alreadySent = friendRequestStore.hasNotified(record, "zca", "welcome");
+    const message = String(settings?.welcome?.message || "").trim();
+    const enabled = settings?.welcome?.enabled === true && Boolean(message);
+    return { message: enabled ? message : null, alreadySent };
+}
+
+// Lời chào dành riêng cho người ĐÃ KẾT BẠN qua lời mời.
+//
+// Vì sao cần: bot có sẵn một lời chào mặc định ("[LỊCH HỌC LHU] XIN CHÀO" + danh
+// sách lệnh) gửi khi chat chưa được tiếp nhận. Với người vừa kết bạn, lời chào đó
+// che mất nội dung mà quản trị viên viết trong tab Friend Requests — đúng sự cố
+// "tin chào không được gửi đi mà là tin nhắn chào mặc định".
+//
+// Trả null khi chat này không phải người đã kết bạn.
+// Trả { message, alreadySent }:
+//   message     — nội dung riêng, hoặc null nếu tính năng đang tắt/chưa có nội dung
+//   alreadySent — đã gửi lúc chấp nhận, nên KHÔNG chào lại
+function resolveFriendWelcome(botId, chatId) {
+    const accountId = normalizeBotId(botId);
+    if (!isZcaId(accountId)) return null;
+    const userId = String(chatId == null ? "" : chatId).trim();
+    if (!userId) return null;
+
+    const requestId = friendRequestStore.buildRequestId(accountId, userId);
+    if (!requestId) return null;
+    return friendWelcomeDecision(friendRequestStore.getRecord(requestId), friendRequestService.getSettings());
+}
 
 // Hành vi không đổi so với trước — vẫn là node-zalo-bot — nhưng nay được đặt sau
 // giao diện nhà cung cấp chung để ZCA chạy song song mà không phải sửa logic.
@@ -3606,7 +3656,17 @@ async function handleIncomingMessage(runtime, msg) {
             // nên khi nó gửi được thì chat được tiếp nhận luôn — không cần tin "probe".
             if (!parsed && !looksLikeCommand && !alreadyAdmitted) {
                 try {
-                    await sendWelcomeMessage(context.chatId, msg.from?.display_name);
+                    // Người vừa kết bạn đã nhận tin chào riêng lúc được chấp nhận.
+                    // Không chào lại bằng nội dung mặc định — nội dung đó sẽ che mất
+                    // thứ quản trị viên đã viết.
+                    const friendWelcome = resolveFriendWelcome(context.botId, context.chatId);
+                    if (friendWelcome?.alreadySent) {
+                        logDiscord("INFO", "bỏ qua lời chào: người này đã nhận tin chào kết bạn");
+                    } else if (friendWelcome?.message) {
+                        await sendMessage(context.chatId, friendWelcome.message);
+                    } else {
+                        await sendWelcomeMessage(context.chatId, msg.from?.display_name);
+                    }
                 } catch (error) {
                     logDiscord("ERROR", `welcome_message_failed: ${error.message}`);
                 }
@@ -3901,6 +3961,8 @@ module.exports = {
     describeFriendRequestRecipients,
     friendRequestNotificationText,
     friendRequestService,
+    friendWelcomeDecision,
+    resolveFriendWelcome,
     resolveOfficialRecipients,
     resolveZcaRecipient,
     // Dùng cho bài kiểm tra đường gửi trả lời hỗ trợ: chứng minh trả lời đi tới

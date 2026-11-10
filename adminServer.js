@@ -383,18 +383,36 @@ function parseTargetDayOffset(value) {
 }
 
 function audit(action, request, details = {}) {
-    const filePath = path.join(__dirname, "adminAudit.json");
-    const fallback = { events: [] };
-    const data = readJsonStore(filePath, filePath, fallback);
-    const events = Array.isArray(data?.events) ? data.events.slice(-499) : [];
-    events.push({
+    // Đường dẫn ghi đè được để kiểm thử không đụng vào tệp audit thật của dự án.
+    const filePath = String(process.env.ADMIN_AUDIT_FILE || "").trim() || path.join(__dirname, "adminAudit.json");
+    const event = {
         action,
         admin: String(request.admin?.username || "unknown"),
         ip: String(request.headers["x-forwarded-for"] || request.socket.remoteAddress || ""),
         at: new Date().toISOString(),
         ...details
-    });
-    writeJsonStore(filePath, filePath, { events });
+    };
+
+    // Ghi audit KHÔNG BAO GIỜ được làm hỏng thao tác nghiệp vụ.
+    //
+    // Đã xảy ra thật: tệp adminAudit.json bị hỏng (hai JSON nối nhau do hai tiến
+    // trình ghi cùng lúc) ⇒ readJsonStore ném lỗi ⇒ audit() ném ⇒ ĐĂNG NHẬP trả
+    // 500 và toàn bộ dashboard không dùng được, chỉ vì một tệp log.
+    try {
+        let data;
+        try {
+            data = readJsonStore(filePath, filePath, { events: [] });
+        } catch (error) {
+            // Tệp hỏng: bắt đầu lại thay vì để mọi endpoint chết theo.
+            console.warn(`[Audit] tệp audit không đọc được (${error.message}); bắt đầu lại từ đầu`);
+            data = { events: [] };
+        }
+        const events = Array.isArray(data?.events) ? data.events.slice(-499) : [];
+        events.push(event);
+        writeJsonStore(filePath, filePath, { events });
+    } catch (error) {
+        console.warn(`[Audit] không ghi được sự kiện ${action}: ${error.message}`);
+    }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1121,6 +1139,30 @@ async function handleApi(request, response, url, options = {}) {
             });
             return json(response, 200, { ...result, state: friendRequests.getState() });
         } catch (error) {
+            return json(response, 400, { error: error.message });
+        }
+    }
+
+    if (url.pathname === `${API_PREFIX}/friend-requests/send-welcome` && request.method === "POST") {
+        if (!friendRequests) return json(response, 503, { error: "Tính năng lời mời kết bạn chưa sẵn sàng." });
+        if (typeof friendRequests.sendWelcomeFor !== "function") {
+            return json(response, 503, { error: "Gửi tin chào chưa sẵn sàng." });
+        }
+        let body;
+        try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
+        const requestId = String(body?.requestId || "").trim();
+        if (!requestId) return json(response, 400, { error: "Thiếu requestId của lời mời." });
+        const actor = request.admin?.username ? String(request.admin.username) : "admin";
+        try {
+            const result = await friendRequests.sendWelcomeFor(requestId, { actor, force: body?.force === true });
+            audit("friend_request.send_welcome", request, {
+                requestId,
+                result: result?.ok ? "success" : (result?.reason || "failed"),
+                error: result?.ok ? undefined : result?.error
+            });
+            return json(response, result?.ok ? 200 : 400, result || { ok: false });
+        } catch (error) {
+            audit("friend_request.send_welcome", request, { requestId, result: "failed", error: error.message });
             return json(response, 400, { error: error.message });
         }
     }
