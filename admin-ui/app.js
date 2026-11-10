@@ -2882,8 +2882,28 @@ function renderFriendRequestCard(record, options = {}) {
     ? `<img class="fr-avatar" src="${escapeHtml(record.avatar)}" alt="" loading="lazy" referrerpolicy="no-referrer" />`
     : `<span class="fr-avatar fr-avatar-empty">${escapeHtml(String(record.displayName || record.userId || "?").slice(0, 1).toUpperCase())}</span>`;
 
+  // MỌI giá trị dẫn xuất phải khai báo TRƯỚC chuỗi HTML.
+  //
+  // `const` là vùng tạm thời chết (TDZ): dùng nó trong template literal ở phía trên
+  // khai báo sẽ ném "Cannot access 'welcomed' before initialization" ngay lúc vẽ,
+  // và vì lỗi ném trong .then() của lần đồng bộ nên giao diện báo "Đồng bộ thất bại".
+  // Đây đúng là lỗi đã xảy ra một lần với `chatStream`.
+  //
+  // Tin chào chỉ gửi được cho người ĐÃ kết bạn. Nút này là đường thoát khi tin chào
+  // bị bỏ lỡ lúc chấp nhận (tính năng đang tắt, hoặc nội dung đặt sau).
+  const canWelcome = ["accepted", "already_friends"].includes(record.status);
+  const welcomeStatus = record.notifications?.["zca:welcome"]?.status || null;
+
+  // Phương thức chỉ có nghĩa khi một thao tác THẬT đã chạy. "Đã thu hồi · tự động"
+  // là vô nghĩa: huỷ không phải là một lần xử lý.
+  const acted = ["accepted", "rejected", "already_friends"].includes(record.status);
+
   const acceptReject = `<button class="primary small" type="button" data-fr-action="accept" data-fr-id="${escapeHtml(record.requestId)}" ${busy || !operable ? "disabled" : ""}>${busy ? "Đang xử lý…" : "Chấp nhận"}</button>
          <button class="ghost small" type="button" data-fr-action="reject" data-fr-id="${escapeHtml(record.requestId)}" ${busy || !operable ? "disabled" : ""}>Từ chối</button>`;
+
+  const welcomeButton = canWelcome
+    ? `<button class="ghost small" type="button" data-fr-action="welcome" data-fr-id="${escapeHtml(record.requestId)}" ${busy ? "disabled" : ""}>${welcomeStatus === "sent" ? "Gửi lại tin chào" : "Gửi tin chào"}</button>`
+    : "";
 
   const actions = pending
     ? `<div class="row-actions">
@@ -2892,18 +2912,10 @@ function renderFriendRequestCard(record, options = {}) {
        </div>`
     : `<div class="row-actions">
          ${operable ? acceptReject : ""}
-         ${welcomed ? `<button class="ghost small" type="button" data-fr-action="welcome" data-fr-id="${escapeHtml(record.requestId)}" ${busy ? "disabled" : ""}>${welcomed === "sent" ? "Gửi lại tin chào" : "Gửi tin chào"}</button>` : ""}
+         ${welcomeButton}
          <button class="ghost small" type="button" data-fr-action="details" data-fr-id="${escapeHtml(record.requestId)}">Chi tiết</button>
          <button class="ghost small" type="button" data-fr-action="retry" data-fr-id="${escapeHtml(record.requestId)}" ${busy ? "disabled" : ""}>Gửi lại thông báo lỗi</button>
        </div>`;
-
-  // Tin chào chỉ gửi được cho người ĐÃ kết bạn. Nút này là đường thoát khi tin
-  // chào bị bỏ lỡ lúc chấp nhận (tính năng đang tắt, hoặc nội dung đặt sau).
-  const welcomed = ["accepted", "already_friends"].includes(record.status) ? record : null;
-
-  // Phương thức chỉ có nghĩa khi một thao tác THẬT đã chạy. "Đã thu hồi · tự động"
-  // là vô nghĩa: huỷ không phải là một lần xử lý.
-  const acted = ["accepted", "rejected", "already_friends"].includes(record.status);
   const method = acted && record.processedMethod
     ? (record.processedMethod === "auto" ? "tự động" : record.processedMethod === "system" ? "hệ thống" : "thủ công")
     : null;
