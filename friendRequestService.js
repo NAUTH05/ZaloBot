@@ -35,11 +35,42 @@ const {
 const MAX_SYNC_CANDIDATES = 30;
 
 // Trạng thái được phép bắt đầu một thao tác chấp nhận/từ chối.
+//
+// `cancelled` cũng nằm trong đây: nếu một lời mời bị đánh dấu huỷ OAN (cờ trạng
+// thái của Zalo không đáng tin), quản trị viên phải có đường thử lại thay vì bị
+// khoá vĩnh viễn ở một trạng thái sai.
 const OPERABLE_STATUSES = [
     REQUEST_STATUS.PENDING,
+    REQUEST_STATUS.CANCELLED,
     REQUEST_STATUS.FAILED,
     REQUEST_STATUS.REQUIRES_VERIFICATION
 ];
+
+// Người này còn nằm trong danh sách lời mời ĐẾN của Zalo hay không.
+//
+// Đây là bằng chứng dương duy nhất đủ để kết luận "lời mời đã biến mất". Trả
+// `null` khi không đọc được — và nơi gọi phải coi `null` là "chưa biết", không
+// phải "không còn".
+async function stillListedAsIncoming(account, userId) {
+    if (!account?.friendApi?.listReceivedRequests) return null;
+    try {
+        const list = await account.friendApi.listReceivedRequests();
+        return list.some((item) => String(item.userId) === String(userId));
+    } catch (_) {
+        return null;
+    }
+}
+
+// Trạng thái quan hệ có nói "còn lời mời đang chờ" hay không.
+//
+// Đọc cả `hasPendingRequest` (nhà cung cấp tính sẵn) lẫn hai cờ gốc, để nơi cung
+// cấp trạng thái không đầy đủ (ví dụ trong kiểm thử) vẫn cho kết quả đúng thay vì
+// âm thầm rơi vào nhánh "đã thu hồi".
+function pendingEvidence(status) {
+    if (!status) return false;
+    if (typeof status.hasPendingRequest === "boolean") return status.hasPendingRequest;
+    return !status.isFriend && Boolean(status.incomingRequest || status.outgoingRequest);
+}
 
 function createFriendRequestService(deps = {}) {
     const {
@@ -255,21 +286,32 @@ function createFriendRequestService(deps = {}) {
                 return { ok: true, status: REQUEST_STATUS.ALREADY_FRIENDS, record: done.record, alreadyFriends: true };
             }
 
-            if (action === "accept" && !status.incomingRequest) {
-                // Lời mời đã bị người gửi thu hồi, hoặc không còn chờ. Chấp nhận
-                // lúc này là chấp nhận một thứ không tồn tại.
-                const done = fr.applyTransition(requestId, REQUEST_STATUS.CANCELLED, {
-                    method,
-                    processedBy: actor,
-                    note: "lời mời không còn ở trạng thái chờ"
-                }, paths.requests);
-                audit("friend_request.cancelled", { requestId, actor, method });
-                return {
-                    ok: false,
-                    reason: "not_pending",
-                    error: "Lời mời không còn chờ nữa (người gửi có thể đã thu hồi).",
-                    record: done.record
-                };
+            // Chỉ kết luận "đã thu hồi" khi có BẰNG CHỨNG DƯƠNG.
+            //
+            // Cờ is_requested/is_requesting của Zalo đã từng trả 0 cho một lời mời
+            // vẫn còn sống, khiến lời mời thật bị đánh dấu "đã thu hồi" và không
+            // bao giờ chấp nhận được. Vì vậy cờ chỉ là gợi ý: cờ nói "không chờ"
+            // thì phải kiểm lại danh sách lời mời đến rồi mới dám huỷ.
+            if (action === "accept" && !pendingEvidence(status)) {
+                const listed = await stillListedAsIncoming(account, record.userId);
+                if (listed === false) {
+                    const done = fr.applyTransition(requestId, REQUEST_STATUS.CANCELLED, {
+                        method: PROCESSED_METHOD.SYSTEM,
+                        processedBy: actor,
+                        note: "lời mời không còn trong danh sách chờ của Zalo"
+                    }, paths.requests);
+                    audit("friend_request.cancelled", { requestId, actor, method });
+                    return {
+                        ok: false,
+                        reason: "not_pending",
+                        error: "Lời mời không còn chờ nữa (người gửi có thể đã thu hồi).",
+                        record: done.record
+                    };
+                }
+                // listed === true: cờ sai, lời mời vẫn còn ⇒ tiếp tục.
+                // listed === null: không đọc được ⇒ thà để Zalo từ chối (failed,
+                // thử lại được) còn hơn tự huỷ một lời mời thật.
+                log("warn", `cờ trạng thái nói lời mời ${record.userId} không còn chờ, nhưng danh sách Zalo nói khác — vẫn thử chấp nhận`);
             }
 
             // --- Bước 2: gọi API thật ----------------------------------------
@@ -321,7 +363,7 @@ function createFriendRequestService(deps = {}) {
                 const done = fr.applyTransition(requestId, REQUEST_STATUS.REJECTED, {
                     method,
                     processedBy: actor,
-                    note: confirmed && confirmed.incomingRequest ? "đã từ chối; Zalo chưa cập nhật trạng thái" : "đã từ chối"
+                    note: confirmed && pendingEvidence(confirmed) ? "đã từ chối; Zalo chưa cập nhật trạng thái" : "đã từ chối"
                 }, paths.requests);
                 audit("friend_request.rejected", { requestId, actor, method });
                 return { ok: true, status: REQUEST_STATUS.REJECTED, record: done.record };
@@ -614,9 +656,15 @@ function createFriendRequestService(deps = {}) {
                         continue;
                     }
 
-                    if (!status.incomingRequest) {
-                        // Gợi ý kết bạn, hoặc ta đã gửi lời mời cho họ. Không phải
-                        // lời mời đến.
+                    if (status.outgoingRequest && !status.incomingRequest) {
+                        // CHỈ trường hợp này mới đủ căn cứ để loại: ta đã gửi lời mời
+                        // cho họ, không phải họ gửi cho ta.
+                        //
+                        // KHÔNG loại khi cả hai cờ đều 0: đó chính là trường hợp cờ
+                        // trả sai đã gặp thật (lời mời còn sống mà cờ = 0). Danh sách
+                        // này đã được nhà cung cấp lọc theo recommType =
+                        // ReceivedFriendRequest, nên nó là bằng chứng về chiều mạnh
+                        // hơn cờ trạng thái.
                         skipped += 1;
                         continue;
                     }

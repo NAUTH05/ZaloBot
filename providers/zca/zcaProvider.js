@@ -149,14 +149,26 @@ function normalizeRecommendation(item) {
 //
 // Ý nghĩa các cờ (theo tài liệu zca-js): is_friend = đã là bạn; is_requested =
 // NGƯỜI KIA đã gửi lời mời cho ta; is_requesting = TA đã gửi lời mời cho họ.
-// Chỉ is_requested mới là lời mời đang chờ ĐẾN ta.
+//
+// CẢNH BÁO đã kiểm chứng bằng thực tế: hai cờ này KHÔNG đáng tin. Đã gặp trường
+// hợp lời mời vẫn còn trong Zalo (và vẫn nằm trong getFriendRecommendations với
+// recommType = ReceivedFriendRequest) mà cả is_requested lẫn is_requesting đều
+// bằng 0. Vì vậy:
+//   - `hasPendingRequest` chỉ là GỢI Ý, không phải bằng chứng "đã thu hồi".
+//   - Chiều của lời mời KHÔNG bao giờ được suy ra từ đây; nó do nguồn phát hiện
+//     quyết định (recommType = 2, hoặc friend_event.toUid === ownUid).
 function normalizeRequestStatus(raw) {
     const source = raw && typeof raw === "object" ? raw : {};
     const flag = (value) => Number(value) === 1;
+    const isFriend = flag(source.is_friend);
+    const incomingRequest = flag(source.is_requested);
+    const outgoingRequest = flag(source.is_requesting);
     return {
-        isFriend: flag(source.is_friend),
-        incomingRequest: flag(source.is_requested),
-        outgoingRequest: flag(source.is_requesting),
+        isFriend,
+        incomingRequest,
+        outgoingRequest,
+        // Còn một lời mời đang chờ (theo cờ). Sai âm tính là chuyện đã xảy ra.
+        hasPendingRequest: !isFriend && (incomingRequest || outgoingRequest),
         seen: Boolean(source.isSeenFriendReq),
         raw: source
     };

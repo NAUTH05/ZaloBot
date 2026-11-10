@@ -63,13 +63,19 @@ function makeAccount(options = {}) {
             async listReceivedRequests() {
                 calls.list += 1;
                 if (options.listError) throw new Error(options.listError);
-                return [...requests.values()];
+                // Nhà cung cấp THẬT đã lọc theo recommType = ReceivedFriendRequest;
+                // recommType 1 (gợi ý kết bạn) không bao giờ lọt ra tới đây.
+                return [...requests.values()].filter((item) => item.recommType !== 1);
             },
             async getStatus(userId) {
                 calls.status.push(userId);
                 if (options.statusError) throw new Error(options.statusError);
                 const value = statuses.get(userId) || { isFriend: false, incomingRequest: true, outgoingRequest: false };
-                return { seen: false, raw: {}, ...value };
+                const merged = { seen: false, raw: {}, ...value };
+                return {
+                    ...merged,
+                    hasPendingRequest: !merged.isFriend && Boolean(merged.incomingRequest || merged.outgoingRequest)
+                };
             },
             async accept(userId) {
                 calls.accept.push(userId);
@@ -187,15 +193,16 @@ test("khởi động lại không xử lý lại và không thông báo lại", 
 // 2. Gợi ý kết bạn không phải lời mời
 // ---------------------------------------------------------------------------
 
-test("gợi ý kết bạn (không phải lời mời đến) KHÔNG được ghi nhận", async () => {
+test("gợi ý kết bạn (recommType 1) KHÔNG bao giờ được coi là lời mời", async () => {
     const paths = makePaths();
     const account = makeAccount({
         requests: [
-            { userId: "suggested", displayName: "Gợi ý" },
+            // recommType 1 = RecommendedFriend: gợi ý, không phải lời mời.
+            { userId: "suggested", displayName: "Gợi ý", recommType: 1 },
             { userId: "real", displayName: "Thật" }
         ],
         statuses: {
-            suggested: { isFriend: false, incomingRequest: false, outgoingRequest: false },
+            suggested: { isFriend: false, incomingRequest: true, outgoingRequest: false },
             real: { isFriend: false, incomingRequest: true, outgoingRequest: false }
         }
     });
@@ -205,10 +212,24 @@ test("gợi ý kết bạn (không phải lời mời đến) KHÔNG được gh
 
     assert.equal(result.ok, true);
     assert.equal(result.added, 1);
-    assert.equal(result.skipped, 1);
     const pending = fr.listPending({}, paths.requests);
     assert.equal(pending.length, 1);
     assert.equal(pending[0].userId, "real");
+});
+
+test("cờ trạng thái toàn 0 nhưng người này nằm trong danh sách lời mời: vẫn ghi nhận", async () => {
+    const paths = makePaths();
+    const account = makeAccount({
+        requests: [{ userId: "555", displayName: "Nguyễn Thuận" }],
+        // Đúng dữ liệu thật: lời mời còn sống mà mọi cờ đều 0.
+        statuses: { 555: { isFriend: false, incomingRequest: false, outgoingRequest: false } }
+    });
+    const { service } = makeService(account, paths);
+
+    const result = await service.syncAccount(account.botId, { trigger: "test" });
+
+    assert.equal(result.added, 1, "không được bỏ sót lời mời chỉ vì cờ trạng thái sai");
+    assert.equal(fr.listPending({}, paths.requests).length, 1);
 });
 
 test("lời mời TA đã gửi đi (outgoing) không bị coi là lời mời đến", async () => {
@@ -381,6 +402,118 @@ test("tài khoản ZCA mất kết nối: KHÔNG gọi Zalo, KHÔNG đổi trạ
     account.authenticated = true;
     const retry = await service.accept(requestId, { actor: "admin" });
     assert.equal(retry.ok, true);
+});
+
+// ---------------------------------------------------------------------------
+// 3b. Cờ trạng thái của Zalo KHÔNG đáng tin (lỗi đã gặp thật)
+//
+// Thực tế: lời mời vẫn còn trong Zalo, vẫn nằm trong getFriendRecommendations với
+// recommType = ReceivedFriendRequest, mà getFriendRequestStatus trả cả
+// is_requested lẫn is_requesting bằng 0. Code cũ tin cờ đó nên đánh dấu "đã thu
+// hồi" và lời mời thật không bao giờ chấp nhận được.
+// ---------------------------------------------------------------------------
+
+test("cờ nói 'không còn chờ' nhưng lời mời VẪN CÒN: chấp nhận, không huỷ oan", async () => {
+    const paths = makePaths();
+    // Danh sách lời mời của Zalo vẫn có người này.
+    const account = makeAccount({ requests: [{ userId: "555", displayName: "Nguyễn Thuận" }] });
+    const { service } = makeService(account, paths);
+    await service.handleEvent(account.botId, { type: "request", userId: "555" });
+    const requestId = fr.buildRequestId(account.botId, "555");
+
+    let call = 0;
+    account.friendApi.getStatus = async () => {
+        call += 1;
+        if (call === 1) {
+            // Đúng dữ liệu thật: mọi cờ đều 0 dù lời mời còn sống.
+            return { isFriend: false, incomingRequest: false, outgoingRequest: false, hasPendingRequest: false };
+        }
+        return { isFriend: true, incomingRequest: false, outgoingRequest: false, hasPendingRequest: false };
+    };
+
+    const result = await service.accept(requestId, { actor: "admin" });
+
+    assert.equal(result.ok, true, "không được huỷ một lời mời còn tồn tại");
+    assert.deepEqual(account.calls.accept, ["555"]);
+    assert.equal(fr.getRecord(requestId, paths.requests).status, REQUEST_STATUS.ACCEPTED);
+});
+
+test("không đọc được danh sách lời mời: KHÔNG tự huỷ, để Zalo quyết định", async () => {
+    const paths = makePaths();
+    const account = makeAccount({ listError: "Zalo tạm lỗi" });
+    const { service } = makeService(account, paths);
+    await service.handleEvent(account.botId, { type: "request", userId: "555" });
+    const requestId = fr.buildRequestId(account.botId, "555");
+
+    let call = 0;
+    account.friendApi.getStatus = async () => {
+        call += 1;
+        if (call === 1) return { isFriend: false, incomingRequest: false, outgoingRequest: false, hasPendingRequest: false };
+        return { isFriend: true, incomingRequest: false, outgoingRequest: false, hasPendingRequest: false };
+    };
+
+    const result = await service.accept(requestId, { actor: "admin" });
+
+    assert.equal(result.ok, true, "không biết thì không được kết luận là đã huỷ");
+    assert.deepEqual(account.calls.accept, ["555"]);
+});
+
+test("lời mời biến mất khỏi danh sách Zalo: mới được chuyển cancelled", async () => {
+    const paths = makePaths();
+    // Danh sách rỗng ⇒ bằng chứng dương cho việc lời mời đã biến mất.
+    const account = makeAccount();
+    const { service } = makeService(account, paths);
+    await service.handleEvent(account.botId, { type: "request", userId: "555" });
+    const requestId = fr.buildRequestId(account.botId, "555");
+
+    account.friendApi.getStatus = async () => ({ isFriend: false, incomingRequest: false, outgoingRequest: false, hasPendingRequest: false });
+
+    const result = await service.accept(requestId, { actor: "admin" });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "not_pending");
+    assert.equal(account.calls.accept.length, 0);
+    assert.equal(fr.getRecord(requestId, paths.requests).status, REQUEST_STATUS.CANCELLED);
+});
+
+test("bản ghi cancelled được mở lại NGAY khi phát hiện lại (không có tác dụng phụ)", () => {
+    const paths = makePaths();
+    fr.upsertDetected({ accountId: "zca:1001", userId: "555" }, paths.requests);
+    const requestId = fr.buildRequestId("zca:1001", "555");
+    fr.applyTransition(requestId, REQUEST_STATUS.CANCELLED, { method: "system" }, paths.requests);
+
+    // Ngay lập tức, không chờ hết 10 phút.
+    const again = fr.upsertDetected({ accountId: "zca:1001", userId: "555" }, paths.requests);
+
+    assert.equal(again.isNew, true, "huỷ không phải thao tác thật nên phải mở lại được");
+    assert.equal(again.reopened, true);
+    assert.equal(fr.getRecord(requestId, paths.requests).status, REQUEST_STATUS.PENDING);
+});
+
+test("bản ghi đã CHẤP NHẬN vẫn bị chặn mở lại trong 10 phút", () => {
+    const paths = makePaths();
+    fr.upsertDetected({ accountId: "zca:1001", userId: "555" }, paths.requests);
+    const requestId = fr.buildRequestId("zca:1001", "555");
+    fr.applyTransition(requestId, REQUEST_STATUS.ACCEPTED, { method: "auto" }, paths.requests);
+
+    const again = fr.upsertDetected({ accountId: "zca:1001", userId: "555" }, paths.requests);
+
+    assert.equal(again.isNew, false, "mở lại bản ghi đã chấp nhận sẽ dẫn tới chấp nhận hai lần");
+    assert.equal(fr.getRecord(requestId, paths.requests).status, REQUEST_STATUS.ACCEPTED);
+});
+
+test("bản ghi cancelled vẫn chấp nhận lại được (đường thoát khi huỷ oan)", async () => {
+    const paths = makePaths();
+    const account = makeAccount();
+    const { service } = makeService(account, paths);
+    await service.handleEvent(account.botId, { type: "request", userId: "555" });
+    const requestId = fr.buildRequestId(account.botId, "555");
+    fr.applyTransition(requestId, REQUEST_STATUS.CANCELLED, { method: "system" }, paths.requests);
+
+    const result = await service.accept(requestId, { actor: "admin" });
+
+    assert.equal(result.ok, true);
+    assert.equal(fr.getRecord(requestId, paths.requests).status, REQUEST_STATUS.ACCEPTED);
 });
 
 // ---------------------------------------------------------------------------

@@ -223,10 +223,24 @@ Checked against `node_modules/zca-js/dist/**/*.d.ts`, not against the website:
 | `api.getReceivedFriendRequests()` | **not present** — that is an older API name |
 | `listener.on("friend_event")` | present, `FriendEventType.REQUEST / UNDO_REQUEST / REJECT_REQUEST / ADD` |
 
-`is_requested` means *they asked us*; `is_requesting` means *we asked them*. Only the
-first is an incoming request, and `getFriendRecommendations()` also returns plain
-suggestions — so every candidate is re-checked with `getFriendRequestStatus()` before
-it is stored. Suggestions and outgoing requests are dropped, never treated as pending.
+`getFriendRecommendations()` also returns plain suggestions, so the provider filters on
+`recommType === 2` (received request) — that is what establishes the *direction*.
+`getFriendRequestStatus()` is used for relationship state only.
+
+**The status flags are not trustworthy — measured, not assumed.** In production a request
+was still alive in Zalo, still listed as `ReceivedFriendRequest`, and
+`getFriendRequestStatus()` returned **both** `is_requested` and `is_requesting` as `0`.
+An earlier version treated that as "withdrawn" and marked a real request `cancelled`,
+where the accept button could never work. So:
+
+- Direction is never inferred from the flags; it comes from `recommType` or from
+  `friend_event.toUid === ownUid`.
+- `outgoingRequest && !incomingRequest` is the only flag pattern used to exclude someone
+  (we invited them).
+- All flags `0` means **unknown**, not "gone". It is kept as pending.
+- "Cancelled" requires positive evidence: the person is gone from
+  `getFriendRecommendations()`. If that list cannot be read, the request is kept and Zalo
+  gets to decide — a `failed` row is retryable, a wrongly cancelled row is not.
 
 ## Detection
 
@@ -305,8 +319,9 @@ sending a dead localhost link.
 1. Session-derived actor (never the request body).
 2. In-memory lock per `requestId` — a double click cannot reach Zalo twice.
 3. Claim the record as `processing` with a status precondition.
-4. `getFriendRequestStatus()` — `is_friend` ⇒ `already_friends`, `!is_requested` ⇒
-   `cancelled` (withdrawn). Neither path calls the accept API.
+4. `getFriendRequestStatus()` — `is_friend` ⇒ `already_friends`. If no flag suggests a
+   pending request, re-read `getFriendRecommendations()`; only when the person is absent
+   does it become `cancelled`. Unknown ⇒ proceed and let Zalo answer.
 5. `acceptFriendRequest()` / `rejectFriendRequest()`.
 6. Re-read the status; if Zalo still says not friends the record becomes
    `requires_verification`, **not** `accepted`.
@@ -315,6 +330,9 @@ sending a dead localhost link.
 
 `failed` and `requires_verification` stay retryable. A record stuck in `processing`
 because the process died is unlocked to `requires_verification` on the next start.
+`cancelled` is retryable too — cancelling means nothing was done, so accepting again
+cannot double up, and a wrongly cancelled row needs an escape hatch. History cards for
+those statuses therefore keep their Accept / Reject buttons.
 
 ## Welcome message
 

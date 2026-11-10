@@ -2828,7 +2828,10 @@ const FRIEND_REQUEST_STATUS_TONES = {
 
 // Trạng thái còn thao tác được. Khớp OPERABLE_STATUSES phía máy chủ — nhưng máy
 // chủ vẫn là nơi quyết định; đây chỉ để ẩn nút không dùng được.
-const FRIEND_REQUEST_OPERABLE = new Set(["pending", "failed", "requires_verification"]);
+//
+// `cancelled` nằm ở đây vì cờ trạng thái của Zalo từng trả sai và làm một lời mời
+// thật bị đánh dấu huỷ. Không có đường thử lại thì bản ghi đó kẹt vĩnh viễn.
+const FRIEND_REQUEST_OPERABLE = new Set(["pending", "cancelled", "failed", "requires_verification"]);
 
 let friendRequestState = null;
 const friendRequestBusy = new Set();
@@ -2872,22 +2875,31 @@ function friendRequestChannelResult(record, channel, label) {
 function renderFriendRequestCard(record, options = {}) {
   const pending = options.pending === true;
   const busy = friendRequestBusy.has(record.requestId);
+  // Bản ghi đã đóng vẫn có thể còn thao tác được (huỷ oan, lỗi tạm). Nếu không có
+  // nút ở đây thì quản trị viên chỉ còn cách sửa tay trong Firestore.
+  const operable = FRIEND_REQUEST_OPERABLE.has(record.status);
   const avatar = record.avatar
     ? `<img class="fr-avatar" src="${escapeHtml(record.avatar)}" alt="" loading="lazy" referrerpolicy="no-referrer" />`
     : `<span class="fr-avatar fr-avatar-empty">${escapeHtml(String(record.displayName || record.userId || "?").slice(0, 1).toUpperCase())}</span>`;
 
+  const acceptReject = `<button class="primary small" type="button" data-fr-action="accept" data-fr-id="${escapeHtml(record.requestId)}" ${busy || !operable ? "disabled" : ""}>${busy ? "Đang xử lý…" : "Chấp nhận"}</button>
+         <button class="ghost small" type="button" data-fr-action="reject" data-fr-id="${escapeHtml(record.requestId)}" ${busy || !operable ? "disabled" : ""}>Từ chối</button>`;
+
   const actions = pending
     ? `<div class="row-actions">
-         <button class="primary small" type="button" data-fr-action="accept" data-fr-id="${escapeHtml(record.requestId)}" ${busy || !FRIEND_REQUEST_OPERABLE.has(record.status) ? "disabled" : ""}>${busy ? "Đang xử lý…" : "Chấp nhận"}</button>
-         <button class="ghost small" type="button" data-fr-action="reject" data-fr-id="${escapeHtml(record.requestId)}" ${busy || !FRIEND_REQUEST_OPERABLE.has(record.status) ? "disabled" : ""}>Từ chối</button>
+         ${acceptReject}
          <button class="ghost small" type="button" data-fr-action="details" data-fr-id="${escapeHtml(record.requestId)}">Chi tiết</button>
        </div>`
     : `<div class="row-actions">
+         ${operable ? acceptReject : ""}
          <button class="ghost small" type="button" data-fr-action="details" data-fr-id="${escapeHtml(record.requestId)}">Chi tiết</button>
          <button class="ghost small" type="button" data-fr-action="retry" data-fr-id="${escapeHtml(record.requestId)}" ${busy ? "disabled" : ""}>Gửi lại thông báo lỗi</button>
        </div>`;
 
-  const method = record.processedMethod
+  // Phương thức chỉ có nghĩa khi một thao tác THẬT đã chạy. "Đã thu hồi · tự động"
+  // là vô nghĩa: huỷ không phải là một lần xử lý.
+  const acted = ["accepted", "rejected", "already_friends"].includes(record.status);
+  const method = acted && record.processedMethod
     ? (record.processedMethod === "auto" ? "tự động" : record.processedMethod === "system" ? "hệ thống" : "thủ công")
     : null;
 

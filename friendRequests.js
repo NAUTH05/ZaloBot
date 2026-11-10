@@ -42,6 +42,16 @@ const OPEN_STATUSES = new Set([REQUEST_STATUS.PENDING, REQUEST_STATUS.PROCESSING
 // lần xử lý bị gián đoạn không phải là quyết định cuối cùng.
 const RETRYABLE_STATUSES = new Set([REQUEST_STATUS.FAILED, REQUEST_STATUS.REQUIRES_VERIFICATION]);
 
+// Trạng thái mà một THAO TÁC THẬT đã xảy ra. Chỉ những trạng thái này mới cần
+// chặn việc mở lại: mở lại một lời mời đã chấp nhận sẽ dẫn tới chấp nhận hai lần.
+// `cancelled` không nằm ở đây vì hệ thống đã KHÔNG làm gì cả — nếu cờ trạng thái
+// của Zalo nói sai và lời mời vẫn còn, nó phải được mở lại ngay.
+const SIDE_EFFECT_STATUSES = new Set([
+    REQUEST_STATUS.ACCEPTED,
+    REQUEST_STATUS.REJECTED,
+    REQUEST_STATUS.ALREADY_FRIENDS
+]);
+
 // Chế độ xử lý lời mời.
 const HANDLING_MODE = Object.freeze({
     MANUAL: "manual",
@@ -248,10 +258,17 @@ function upsertDetected(input = {}, filePath = FILE_PATH) {
 
     // Đã đóng ⇒ chỉ mở lại khi thật sự là lời mời mới.
     //
-    // Vừa xử lý xong mà đồng bộ vẫn thấy "đang chờ" thì đó là độ trễ của Zalo,
-    // không phải lời mời mới. Mở lại sẽ khiến hệ thống chấp nhận hai lần.
+    // Vừa CHẤP NHẬN/TỪ CHỐI xong mà đồng bộ vẫn thấy "đang chờ" thì đó là độ trễ
+    // của Zalo, không phải lời mời mới. Mở lại sẽ khiến hệ thống chấp nhận hai lần.
+    //
+    // Chỉ áp dụng cho trạng thái có thao tác thật: một bản ghi `cancelled` nghĩa là
+    // hệ thống KHÔNG làm gì, nên mở lại không thể gây tác dụng phụ — và phải mở lại
+    // ngay, vì huỷ oan là lỗi đã gặp thật (cờ trạng thái của Zalo trả sai).
     const processedAtMs = existing.processedAt ? Date.parse(existing.processedAt) : NaN;
-    if (Number.isFinite(processedAtMs) && Date.now() - processedAtMs < REOPEN_GUARD_MS) {
+    const guarded = SIDE_EFFECT_STATUSES.has(existing.status)
+        && Number.isFinite(processedAtMs)
+        && Date.now() - processedAtMs < REOPEN_GUARD_MS;
+    if (guarded) {
         const record = { ...existing, ...profile };
         store.requests[requestId] = record;
         writeStore(store, filePath);
@@ -555,6 +572,7 @@ module.exports = {
     PROVIDER,
     REQUEST_STATUS,
     RETRYABLE_STATUSES,
+    SIDE_EFFECT_STATUSES,
     REOPEN_GUARD_MS,
     SCHEMA_VERSION,
     SETTINGS_FILE_PATH,

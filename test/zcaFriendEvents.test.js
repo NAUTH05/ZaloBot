@@ -166,6 +166,49 @@ test("sự kiện không liên quan bị bỏ qua", () => {
     assert.equal(mapFriendEvent(null, "1001"), null);
 });
 
+test("trạng thái quan hệ: cờ toàn 0 nghĩa là CHƯA BIẾT, không phải đã huỷ", async () => {
+    // getFriendRequestStatus đã trả cả is_requested lẫn is_requesting bằng 0 cho
+    // một lời mời còn sống. Nếu coi đó là "đã huỷ" thì lời mời thật không bao giờ
+    // chấp nhận được — lỗi này đã xảy ra thật.
+    const api = makeFakeApi({ statuses: { 555: { is_friend: 0, is_requested: 0, is_requesting: 0 } } });
+    installFakeZca(api);
+    const provider = createZcaProvider({ enabled: true, sessionDir: makeSessionDir() });
+    await provider.start();
+
+    const status = await provider.friendApi.getStatus("555");
+
+    assert.equal(status.isFriend, false);
+    assert.equal(status.incomingRequest, false);
+    assert.equal(status.hasPendingRequest, false, "cờ nói không có lời mời chờ");
+    // Nhưng đây chỉ là GỢI Ý — tầng nghiệp vụ phải xác minh lại bằng danh sách.
+    await provider.stop();
+});
+
+test("trạng thái quan hệ: một trong hai cờ bật nghĩa là có lời mời đang chờ", async () => {
+    const api = makeFakeApi({ statuses: { 555: { is_friend: 0, is_requested: 0, is_requesting: 1 } } });
+    installFakeZca(api);
+    const provider = createZcaProvider({ enabled: true, sessionDir: makeSessionDir() });
+    await provider.start();
+
+    const status = await provider.friendApi.getStatus("555");
+
+    assert.equal(status.hasPendingRequest, true, "không được bỏ qua chỉ vì cờ is_requested sai");
+    await provider.stop();
+});
+
+test("trạng thái quan hệ: đã là bạn thì hasPendingRequest luôn false", async () => {
+    const api = makeFakeApi({ statuses: { 555: { is_friend: 1, is_requested: 1, is_requesting: 1 } } });
+    installFakeZca(api);
+    const provider = createZcaProvider({ enabled: true, sessionDir: makeSessionDir() });
+    await provider.start();
+
+    const status = await provider.friendApi.getStatus("555");
+
+    assert.equal(status.isFriend, true);
+    assert.equal(status.hasPendingRequest, false);
+    await provider.stop();
+});
+
 // ---------------------------------------------------------------------------
 // Đăng ký listener thật
 // ---------------------------------------------------------------------------
