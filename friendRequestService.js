@@ -492,12 +492,18 @@ function createFriendRequestService(deps = {}) {
         }
         const message = String(settings.welcome.message || "").trim();
         if (!message) return { skipped: true, reason: "welcome_empty" };
-        // Đã gửi cho thế hệ lời mời này rồi thì thôi.
+
+        // GIÀNH QUYỀN GỬI trước, rồi mới gửi.
         //
         // Khóa ghi nhận là "zca:welcome" (kênh + loại), KHÔNG phải "welcome" —
         // đọc sai khóa thì bước chống gửi trùng không bao giờ chạy.
-        if (!options.force && fr.hasNotified(record, NOTIFICATION_CHANNEL.ZCA, "welcome")) {
-            return { skipped: true, reason: "already_sent" };
+        //
+        // Phải giành TRƯỚC khi gửi, không phải ghi dấu sau khi gửi: giữa hai thời
+        // điểm đó, đường lời chào (khi người kia nhắn tin ngay sau khi được chấp
+        // nhận) cũng thấy "chưa gửi" và gửi thêm một tin giống hệt.
+        if (!options.force) {
+            const claimed = fr.claimNotification(record.requestId, NOTIFICATION_CHANNEL.ZCA, "welcome", paths.requests);
+            if (!claimed) return { skipped: true, reason: "already_sent" };
         }
 
         let outcome;
@@ -507,7 +513,12 @@ function createFriendRequestService(deps = {}) {
             outcome = { ok: false, error: error?.message || String(error) };
         }
         const result = outcome || { ok: false, error: "không có phản hồi" };
-        if (result.skipped) return result;
+        if (result.skipped) {
+            // Kênh tự bỏ qua (chưa đăng nhập, không có người nhận...). Phải NHẢ
+            // quyền gửi, nếu không khóa "đang gửi" treo lại và lần gửi sau bị chặn.
+            fr.releaseNotificationClaim(record.requestId, NOTIFICATION_CHANNEL.ZCA, "welcome", paths.requests);
+            return result;
+        }
 
         // Ghi riêng, không đụng tới kết quả thông báo quản trị viên.
         fr.setNotificationResult(record.requestId, NOTIFICATION_CHANNEL.ZCA, {

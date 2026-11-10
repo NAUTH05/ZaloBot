@@ -483,7 +483,10 @@ function friendWelcomeDecision(record, settings) {
     if (!record) return null;
     if (record.status !== "accepted" && record.status !== "already_friends") return null;
 
-    const alreadySent = friendRequestStore.hasNotified(record, "zca", "welcome");
+    // Tính cả trạng thái "đang gửi": lúc accept vừa gửi tin chào xong nhưng mạng
+    // chưa trả về, người kia có thể đã nhắn tin — đường lời chào phải đứng ngoài,
+    // nếu không họ nhận hai tin giống hệt nhau.
+    const alreadySent = friendRequestStore.isNotificationHandled(record, "zca", "welcome");
     const message = String(settings?.welcome?.message || "").trim();
     const enabled = settings?.welcome?.enabled === true && Boolean(message);
     return { message: enabled ? message : null, alreadySent };

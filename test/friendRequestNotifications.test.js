@@ -243,6 +243,20 @@ test("đã gửi tin chào lúc kết bạn: không chào lại khi họ nhắn 
     assert.equal(decision.alreadySent, true, "chào lại sẽ gửi trùng ngay sau khi vừa chào");
 });
 
+test("đang gửi tin chào: lời chào mặc định cũng phải đứng ngoài", () => {
+    // Khoảnh khắc nguy hiểm: accept vừa gọi gửi tin chào, mạng chưa trả về, người
+    // kia đã nhắn tin. Nếu chỉ coi "đã gửi xong" là đã xử lý thì họ nhận hai tin.
+    const record = {
+        ...SAMPLE,
+        status: "accepted",
+        notifications: { "zca:welcome": { status: "sending" } }
+    };
+
+    const decision = main.friendWelcomeDecision(record, { welcome: { enabled: true, message: "Chào" } });
+
+    assert.equal(decision.alreadySent, true, "đang gửi cũng tính là đã xử lý");
+});
+
 test("lời mời chưa được chấp nhận: không có lời chào riêng", () => {
     assert.equal(main.friendWelcomeDecision({ ...SAMPLE, status: "pending" }, { welcome: { enabled: true, message: "x" } }), null);
     assert.equal(main.friendWelcomeDecision({ ...SAMPLE, status: "cancelled" }, { welcome: { enabled: true, message: "x" } }), null);

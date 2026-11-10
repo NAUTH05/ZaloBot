@@ -362,6 +362,12 @@ Because the welcome only goes out at the moment of acceptance, a missed one can 
 later with **Gửi tin chào** on the history card (`POST .../send-welcome`). It refuses with
 a reason when the feature is off, the message is empty, or it was already delivered.
 
+Sending is **claimed before the message goes out** (`claimNotification`), not recorded
+afterwards. The accept path and the greeting path can otherwise both observe "not sent
+yet" while the first send is still in flight — that produced two identical messages for
+one accepted friend. A claim left behind by a skipped send is released, so a later
+attempt is not blocked.
+
 ## Deploy and test with a real account
 
 ```bash

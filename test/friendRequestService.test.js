@@ -978,6 +978,73 @@ test("không gửi tin chào cho lời mời chưa được chấp nhận", asyn
 });
 
 // ---------------------------------------------------------------------------
+// 7c. Hai đường cùng gửi tin chào (race đã xảy ra thật)
+//
+// accept đang gửi tin chào (chưa ghi dấu vì mạng chưa trả về) thì tin nhắn đầu
+// tiên của người đó tới ⇒ đường lời chào cũng thấy "chưa gửi" và gửi thêm một tin
+// giống hệt. Người dùng nhận hai tin.
+// ---------------------------------------------------------------------------
+
+test("claimNotification: lời gọi thứ hai không giành được quyền gửi", () => {
+    const paths = makePaths();
+    fr.upsertDetected({ accountId: "zca:1001", userId: "555" }, paths.requests);
+    const requestId = fr.buildRequestId("zca:1001", "555");
+
+    assert.equal(fr.claimNotification(requestId, "zca", "welcome", paths.requests), true);
+    assert.equal(fr.claimNotification(requestId, "zca", "welcome", paths.requests), false, "hai đường không thể cùng giành");
+
+    const record = fr.getRecord(requestId, paths.requests);
+    assert.equal(record.notifications["zca:welcome"].status, "sending");
+    assert.equal(fr.isNotificationHandled(record, "zca", "welcome"), true, "đang gửi cũng tính là đã xử lý");
+    assert.equal(fr.hasNotified(record, "zca", "welcome"), false, "nhưng chưa phải đã gửi xong");
+});
+
+test("đang gửi tin chào: đường gửi thứ hai phải đứng ngoài", async () => {
+    const paths = makePaths();
+    fr.updateSettings({ welcome: { enabled: true, message: "Chào bạn" } }, paths.settings);
+    const account = makeAccount();
+    const { service, welcomes } = makeService(account, paths);
+    await service.handleEvent(account.botId, { type: "request", userId: "555" });
+    const requestId = fr.buildRequestId(account.botId, "555");
+    await service.accept(requestId, { actor: "admin" });
+    assert.equal(welcomes.length, 1);
+
+    // Giả lập một đường khác đang giữ quyền gửi (mạng chưa trả về).
+    fr.setNotificationResult(requestId, "zca", { kind: "welcome", status: "sending" }, paths.requests);
+    assert.equal(fr.getRecord(requestId, paths.requests).notifications["zca:welcome"].status, "sending");
+
+    const result = await service.sendWelcomeFor(requestId, {});
+
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "already_sent");
+    assert.equal(welcomes.length, 1, "không được gửi tin chào thứ hai");
+});
+
+test("gửi bị bỏ qua thì NHẢ quyền gửi, không treo khóa vĩnh viễn", async () => {
+    const paths = makePaths();
+    fr.updateSettings({ welcome: { enabled: true, message: "Chào bạn" } }, paths.settings);
+    const account = makeAccount();
+    // Kênh ZCA "bỏ qua" như khi chưa có người nhận hợp lệ.
+    const { service } = makeService(account, paths, {
+        sendWelcome: async () => ({ skipped: true, reason: "account_offline" })
+    });
+    await service.handleEvent(account.botId, { type: "request", userId: "555" });
+    const requestId = fr.buildRequestId(account.botId, "555");
+
+    await service.accept(requestId, { actor: "admin" });
+
+    const record = fr.getRecord(requestId, paths.requests);
+    assert.equal(record.notifications["zca:welcome"], undefined, "không được để lại khóa đang gửi");
+    assert.equal(fr.isNotificationHandled(record, "zca", "welcome"), false);
+
+    // Lần sau vẫn gửi được (không bị chặn oan).
+    const { service: retryService, welcomes } = makeService(account, paths);
+    const result = await retryService.sendWelcomeFor(requestId, {});
+    assert.equal(result.ok, true);
+    assert.deepEqual(welcomes, ["555"]);
+});
+
+// ---------------------------------------------------------------------------
 // 8. Sự kiện huỷ / kết bạn từ Zalo
 // ---------------------------------------------------------------------------
 

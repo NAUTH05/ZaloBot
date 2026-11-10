@@ -75,7 +75,10 @@ const NOTIFICATION_CHANNEL = Object.freeze({
 const NOTIFICATION_STATUS = Object.freeze({
     SENT: "sent",
     FAILED: "failed",
-    SKIPPED: "skipped"
+    SKIPPED: "skipped",
+    // Đã có đường khác GIÀNH quyền gửi và đang gửi. Không phải kết quả cuối cùng,
+    // nhưng đủ để mọi đường khác phải đứng ngoài.
+    SENDING: "sending"
 });
 
 // Loại thông báo. Khóa ghi nhận của mỗi loại là riêng, nên một lời mời có thể
@@ -384,6 +387,55 @@ function hasNotified(record, channel, kind = NOTIFICATION_KIND.NEW_REQUEST) {
     return record?.notifications?.[key]?.status === NOTIFICATION_STATUS.SENT;
 }
 
+function notificationKey(channel, kind) {
+    return kind && kind !== NOTIFICATION_KIND.NEW_REQUEST ? `${channel}:${kind}` : channel;
+}
+
+// Đã có ai đó giành quyền gửi (đang gửi) hoặc đã gửi xong chưa.
+//
+// Khác `hasNotified`: tính cả trạng thái "đang gửi". Nhờ vậy một đường thứ hai đi
+// vào ĐÚNG LÚC đường đầu đang chờ mạng cũng biết phải đứng ngoài.
+function isNotificationHandled(record, channel, kind = NOTIFICATION_KIND.NEW_REQUEST) {
+    const status = record?.notifications?.[notificationKey(channel, kind)]?.status;
+    return status === NOTIFICATION_STATUS.SENT || status === NOTIFICATION_STATUS.SENDING;
+}
+
+// Giành quyền gửi MỘT thông báo TRƯỚC khi gửi.
+//
+// Vì sao phải giành trước: bước "gửi xong mới ghi dấu" để hở một khoảng thời gian
+// mà hai đường cùng thấy "chưa gửi" và cùng gửi. Đã xảy ra thật: accept đang gửi
+// tin chào thì tin nhắn đầu tiên của người đó tới, đường lời chào cũng gửi ⇒ người
+// dùng nhận hai tin giống hệt nhau.
+//
+// Đọc và ghi nằm trong CÙNG một nhịp đồng bộ (không có await ở giữa) nên hai lời
+// gọi không thể cùng giành: lời thứ hai thấy khóa đã tồn tại và trả false.
+function claimNotification(requestId, channel, kind, filePath = FILE_PATH) {
+    const store = readStore(filePath);
+    const existing = store.requests[requestId];
+    if (!existing) return false;
+
+    const name = String(channel || "").trim();
+    if (!Object.values(NOTIFICATION_CHANNEL).includes(name)) return false;
+
+    const k = String(kind || "").trim();
+    const key = notificationKey(name, k);
+    if (existing.notifications?.[key]) return false;
+
+    const notifications = { ...(existing.notifications || {}) };
+    notifications[key] = {
+        kind: k || NOTIFICATION_KIND.NEW_REQUEST,
+        status: NOTIFICATION_STATUS.SENDING,
+        chatId: null,
+        botId: null,
+        at: nowIso(),
+        error: null,
+        attempts: 0
+    };
+    store.requests[requestId] = { ...existing, notifications };
+    writeStore(store, filePath);
+    return true;
+}
+
 // Bản ghi đang ở trạng thái "đang xử lý" quá lâu nghĩa là tiến trình đã chết giữa
 // chừng. Phải mở khóa, nếu không lời mời đó kẹt vĩnh viễn và không bao giờ xử lý
 // lại được. Trả về số bản ghi đã khôi phục.
@@ -415,6 +467,28 @@ function recoverStuckProcessing({ staleAfterMs = 2 * 60 * 1000, filePath = FILE_
     }
     if (recovered > 0) writeStore(store, filePath);
     return recovered;
+}
+
+// Nhả quyền gửi khi việc gửi không xảy ra (ví dụ kênh tự bỏ qua vì chưa cấu hình).
+//
+// Không nhả thì khóa "đang gửi" treo lại VĨNH VIỄN và lần gửi sau bị chặn oan.
+// Chỉ nhả khi vẫn đang ở trạng thái "đang gửi" — không được xoá kết quả đã có.
+function releaseNotificationClaim(requestId, channel, kind, filePath = FILE_PATH) {
+    const store = readStore(filePath);
+    const existing = store.requests[requestId];
+    if (!existing) return false;
+
+    const name = String(channel || "").trim();
+    if (!Object.values(NOTIFICATION_CHANNEL).includes(name)) return false;
+
+    const key = notificationKey(name, String(kind || "").trim());
+    if (existing.notifications?.[key]?.status !== NOTIFICATION_STATUS.SENDING) return false;
+
+    const notifications = { ...existing.notifications };
+    delete notifications[key];
+    store.requests[requestId] = { ...existing, notifications };
+    writeStore(store, filePath);
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -582,12 +656,14 @@ module.exports = {
     applyTransition,
     autoAcceptEnabled,
     buildRequestId,
+    claimNotification,
     countAutoAcceptsSince,
     emptyStore,
     getRecord,
     getSettings,
     hasNotified,
     isClosed,
+    isNotificationHandled,
     isOpen,
     lastAutoAcceptAt,
     listHistory,
@@ -597,6 +673,7 @@ module.exports = {
     normalizeSettings,
     readStore,
     recoverStuckProcessing,
+    releaseNotificationClaim,
     setNotificationResult,
     updateSettings,
     upsertDetected,
