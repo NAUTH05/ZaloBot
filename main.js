@@ -132,11 +132,12 @@ const { askScheduleAi } = require("./aiAssistant");
 const { groupReplyOptionsFromEnv, resolveGroupReplyDecision } = require("./groupMentions");
 const { flushPersistenceWrites, initializeFirestorePersistence } = require("./firestorePersistence");
 const { getCommandRegistry } = require("./commandRegistry");
-const { createAdminServer } = require("./adminServer");
+const { createAdminServer, BASE_PATH } = require("./adminServer");
 const { DEFAULT_SHUTDOWN_TIMEOUT_MS, createShutdownController } = require("./shutdown");
 const { recordSystemLog } = require("./operationalLog");
 const { getAdminSettings, getConfiguredAdminIds, isConfiguredAdmin } = require("./adminSettings");
-const { LEGACY_BOT_ID, extractBotName, isZcaId, normalizeBotId, parseScopedKey, resolveBotConfigs, resolveBotDisplayName, scopeKey } = require("./bots");
+const { LEGACY_BOT_ID, extractBotName, isZcaId, normalizeBotId, parseScopedKey, providerTypeOf, resolveBotConfigs, resolveBotDisplayName, scopeKey } = require("./bots");
+const { createFriendRequestService } = require("./friendRequestService");
 const { createOfficialProvider } = require("./providers/officialProvider");
 const { createZcaProvider } = require("./providers/zca/zcaProvider");
 const { createRuntimeMetrics } = require("./runtimeMetrics");
@@ -193,6 +194,265 @@ for (const warning of botConfigResult.warnings) console.log(`[Bots] ${warning}`)
 // Một nhà cung cấp cho mỗi bot chính thức đang bật: client riêng, con trỏ polling
 // riêng, handler riêng. Không bao giờ dùng chung một token cho hai bot.
 //
+// ============================================================================
+// Lời mời kết bạn ZCA — thông báo cho quản trị viên qua HAI kênh độc lập.
+//
+// Kênh "official" dùng lại ĐÚNG danh tính owner đã cấu hình: OWNER_CHAT_ID +
+// adminSettings (qua getAdminIdentities). Không có danh sách người nhận mới, và
+// không cần quản trị viên nhập lại ID.
+//
+// Kênh "zca" thì khác về bản chất: Chat ID của bot chính thức KHÔNG dùng được cho
+// tài khoản Zalo cá nhân. Với ZCA, thread của một chat riêng chính là User ID của
+// người đó, nên chỉ OWNER_USER_ID mới dùng được — và tuyệt đối không phải chính
+// tài khoản đang gửi.
+// ============================================================================
+const FRIEND_REQUEST_TAB = "friendrequests";
+
+// Liên kết mở đúng tab trên dashboard. Dựng từ origin công khai THẬT và base path
+// thật; không hard-code tên miền nào.
+function buildFriendRequestManageUrl() {
+    const origin = String(getPublicOrigin() || "").trim().replace(/\/+$/, "");
+    if (!origin) return null;
+    const base = BASE_PATH === "/" ? "" : BASE_PATH;
+    return `${origin}${base}/#${FRIEND_REQUEST_TAB}`;
+}
+
+function formatFriendRequestTime(value) {
+    const date = value ? new Date(value) : new Date();
+    if (Number.isNaN(date.getTime())) return "-";
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${pad(date.getDate())}/${pad(date.getMonth() + 1)}/${date.getFullYear()} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+// Nội dung thông báo. Tách riêng để kiểm thử được và để hai kênh luôn nói cùng
+// một sự thật — không có bản "đã chấp nhận" nào lại trình bày như đang chờ.
+function friendRequestNotificationText(request, account, options = {}) {
+    const kind = String(options.kind || "new_request");
+    const accountLabel = account?.displayName || account?.botId || request?.accountId || "ZCA";
+    const link = buildFriendRequestManageUrl();
+
+    if (options.test) {
+        return [
+            "🔔 THỬ THÔNG BÁO LỜI MỜI KẾT BẠN",
+            "",
+            "Cấu hình kênh này đang hoạt động.",
+            "Đây là tin thử — không có lời mời kết bạn nào được tạo."
+        ].join("\n");
+    }
+
+    const header = kind === "accepted"
+        ? "✅ ĐÃ CHẤP NHẬN LỜI MỜI KẾT BẠN"
+        : kind === "failed"
+            ? "⚠️ LỜI MỜI KẾT BẠN GẶP LỖI"
+            : "🔔 YÊU CẦU KẾT BẠN MỚI";
+
+    const lines = [header, ""];
+    lines.push(`👤 Người gửi: ${request?.displayName || "(không có tên)"}`);
+    lines.push(`🆔 User ID: ${request?.userId || "-"}`);
+    lines.push(`📱 Tài khoản nhận: ${accountLabel}`);
+    lines.push(`🕒 Thời gian: ${formatFriendRequestTime(request?.requestedAt || request?.detectedAt)}`);
+    if (request?.message) lines.push("", `💬 Lời nhắn: ${request.message}`);
+    lines.push("");
+
+    if (kind === "accepted") {
+        const how = request?.processedMethod === "auto" ? "tự động" : "thủ công";
+        lines.push(`📌 Trạng thái: Đã chấp nhận (${how})`);
+    } else if (kind === "failed") {
+        lines.push("📌 Trạng thái: Chưa xử lý được — cần kiểm tra");
+        if (request?.lastError) lines.push(`❗ Lý do: ${request.lastError}`);
+    } else {
+        lines.push("📌 Trạng thái: Chờ xác nhận");
+    }
+
+    lines.push("");
+    if (link) {
+        lines.push(`🌐 Vào Admin UI → Friend Requests:\n${link}`);
+    } else {
+        lines.push("🌐 Vào Admin UI → tab Friend Requests để xử lý.");
+    }
+    return lines.join("\n");
+}
+
+// Danh tính bot chính thức dùng được để báo tin. KHÔNG bao giờ trả về ZCA: hai
+// loại danh tính không thay thế nhau được.
+function resolveOfficialRecipients(config = {}) {
+    const wantedBot = normalizeBotId(config.botId);
+    const wantedChat = String(config.chatId || "").trim();
+    return getAdminIdentities()
+        .filter((item) => providerTypeOf(item.botId) !== "zca")
+        .filter((item) => (wantedBot ? item.botId === wantedBot : true))
+        .filter((item) => (wantedChat ? String(item.chatId) === wantedChat : true))
+        .map((item) => ({ botId: item.botId, chatId: String(item.chatId) }));
+}
+
+// Người nhận của kênh ZCA. Chỉ User ID mới là thread hợp lệ trong chat riêng.
+function resolveZcaRecipient(account, config = {}) {
+    const selfUid = String(account?.ownUid || "").trim();
+    const explicit = String(config.chatId || "").trim();
+    if (explicit) {
+        if (selfUid && explicit === selfUid) {
+            return { chatId: explicit, source: "manual", valid: false, reason: "Không thể gửi thông báo cho chính tài khoản ZCA này." };
+        }
+        return { chatId: explicit, source: "manual", valid: true, reason: null };
+    }
+    // OWNER_USER_ID là User ID của owner — dùng lại, không bắt nhập mới.
+    const ownerIds = getConfiguredAdminIds().userIds.map((id) => String(id).trim()).filter(Boolean);
+    const candidate = ownerIds.find((id) => id !== selfUid);
+    if (candidate) return { chatId: candidate, source: "owner_user_id", valid: true, reason: null };
+    return {
+        chatId: null,
+        source: null,
+        valid: false,
+        reason: "Chưa có User ID nào dùng được cho ZCA. Đặt OWNER_USER_ID hoặc chọn một hội thoại ZCA đã có."
+    };
+}
+
+// Hội thoại ZCA đã từng tương tác — nguồn để quản trị viên chọn tay nếu owner ID
+// không phù hợp.
+function listZcaConversationCandidates(account) {
+    if (!account) return [];
+    const botId = normalizeBotId(account.botId);
+    if (!botId) return [];
+    return getAllChats()
+        .filter((chat) => normalizeBotId(chat?.botId) === botId)
+        .filter((chat) => String(chat?.chatType || "private") !== "group")
+        .map((chat) => ({ chatId: String(chat.chatId), displayName: chat.displayName || chat.chatTitle || String(chat.chatId) }));
+}
+
+// Tình trạng người nhận của từng kênh, cho dashboard hiển thị thay vì để quản trị
+// viên đoán vì sao không nhận được tin.
+function describeFriendRequestRecipients() {
+    const settings = friendRequestService.getSettings();
+    const zcaAccounts = listBots().filter((bot) => bot && bot.friendApi);
+    const primaryZca = zcaAccounts[0] || null;
+
+    const officialConfig = settings.notifications.official || {};
+    const officialTargets = resolveOfficialRecipients(officialConfig);
+    const officialCandidates = getAdminIdentities()
+        .filter((item) => providerTypeOf(item.botId) !== "zca")
+        .map((item) => ({ botId: item.botId, chatId: String(item.chatId) }));
+
+    const zcaConfig = settings.notifications.zca || {};
+    const zcaTarget = resolveZcaRecipient(primaryZca, zcaConfig);
+    const zcaCandidates = [
+        ...getConfiguredAdminIds().userIds
+            .map((id) => String(id).trim())
+            .filter((id) => id && id !== String(primaryZca?.ownUid || ""))
+            .map((id) => ({ chatId: id, displayName: "OWNER_USER_ID", source: "owner_user_id" })),
+        ...listZcaConversationCandidates(primaryZca)
+            .filter((item) => item.chatId !== String(primaryZca?.ownUid || ""))
+            .map((item) => ({ ...item, source: "chat_directory" }))
+    ];
+
+    return {
+        official: {
+            enabled: officialConfig.enabled === true,
+            chatId: officialTargets[0]?.chatId || null,
+            botId: officialTargets[0]?.botId || null,
+            valid: officialTargets.length > 0,
+            reason: officialTargets.length > 0
+                ? null
+                : "Chưa có hội thoại owner nào cho bot chính thức. Đặt OWNER_CHAT_ID hoặc thêm admin trong Settings.",
+            candidates: officialCandidates
+        },
+        zca: {
+            enabled: zcaConfig.enabled === true,
+            chatId: zcaTarget.chatId,
+            source: zcaTarget.source,
+            valid: zcaTarget.valid,
+            reason: zcaTarget.reason,
+            accountId: primaryZca?.botId || null,
+            accountReady: Boolean(primaryZca && primaryZca.friendRequestHealth?.().authenticated),
+            candidates: zcaCandidates
+        }
+    };
+}
+
+// Gửi thông báo lời mời kết bạn qua MỘT kênh.
+//
+// Trả { ok, chatId, botId, error } hoặc { skipped, reason }. Không bao giờ ném:
+// lỗi thông báo không được làm mất lời mời.
+async function deliverFriendRequestNotification({ channel, kind, request, account, test } = {}) {
+    const settings = friendRequestService.getSettings();
+    const text = friendRequestNotificationText(request, account, { kind, test });
+
+    if (channel === "official") {
+        const targets = resolveOfficialRecipients(settings.notifications.official || {});
+        if (targets.length === 0) {
+            return { skipped: true, reason: "no_official_recipient", error: "Chưa có hội thoại owner cho bot chính thức." };
+        }
+        const target = targets[0];
+        const runtime = getBot(target.botId);
+        if (!runtime || runtime.enabled === false) {
+            return { ok: false, chatId: target.chatId, botId: target.botId, error: `Bot ${target.botId} đang tắt nên không gửi được thông báo.` };
+        }
+        try {
+            await runWithBot(runtime, () => sendMessage(target.chatId, text));
+            return { ok: true, chatId: target.chatId, botId: target.botId };
+        } catch (error) {
+            return { ok: false, chatId: target.chatId, botId: target.botId, error: error?.message || String(error) };
+        }
+    }
+
+    if (channel === "zca") {
+        const zcaAccount = account && account.friendApi ? account : (listBots().find((bot) => bot?.friendApi) || null);
+        if (!zcaAccount) return { skipped: true, reason: "no_zca_account", error: "Không có tài khoản ZCA nào đang chạy." };
+        const target = resolveZcaRecipient(zcaAccount, settings.notifications.zca || {});
+        if (!target.valid) {
+            return { skipped: true, reason: "no_zca_recipient", error: target.reason || "Chưa có người nhận hợp lệ cho ZCA." };
+        }
+        try {
+            await runWithBot(zcaAccount, () => sendMessage(target.chatId, text));
+            return { ok: true, chatId: target.chatId, botId: zcaAccount.botId };
+        } catch (error) {
+            return { ok: false, chatId: target.chatId, botId: zcaAccount.botId, error: error?.message || String(error) };
+        }
+    }
+
+    return { skipped: true, reason: "unknown_channel" };
+}
+
+// Tin chào gửi cho người VỪA được chấp nhận. Chỉ chạy sau khi chấp nhận thành
+// công, và không bao giờ gửi cho chính tài khoản đang gửi.
+async function deliverFriendRequestWelcome({ account, request, message } = {}) {
+    if (!account || !account.friendApi) return { skipped: true, reason: "account_offline" };
+    const target = String(request?.userId || "").trim();
+    if (!target) return { skipped: true, reason: "no_recipient" };
+    if (String(account.ownUid || "") === target) return { skipped: true, reason: "self_recipient" };
+    try {
+        await runWithBot(account, () => sendMessage(target, message));
+        return { ok: true, chatId: target };
+    } catch (error) {
+        return { ok: false, error: error?.message || String(error) };
+    }
+}
+
+// Dịch vụ lời mời kết bạn. Tạo TRƯỚC các nhà cung cấp để listener ZCA có chỗ
+// gọi vào, nhưng không chạm tới registry ngay lúc tạo — mọi thứ đọc muộn.
+const friendRequestService = createFriendRequestService({
+    listAccounts: () => listBots().filter((bot) => bot && bot.friendApi),
+    getAccount: (botId) => {
+        const bot = getBot(botId);
+        return bot && bot.friendApi ? bot : null;
+    },
+    notify: (input) => deliverFriendRequestNotification(input),
+    sendWelcome: (input) => deliverFriendRequestWelcome(input),
+    describeRecipients: () => describeFriendRequestRecipients(),
+    audit: (action, meta = {}) => {
+        try {
+            recordSystemLog("INFO", action, { feature: "friend_requests", ...meta });
+        } catch (_) {
+            // Ghi log không được làm hỏng thao tác.
+        }
+    },
+    log: (level, message) => {
+        const line = `[FriendRequest] ${message}`;
+        if (level === "warn") console.warn(line);
+        else if (level === "error") console.error(line);
+        else console.log(line);
+    }
+});
+
 // Hành vi không đổi so với trước — vẫn là node-zalo-bot — nhưng nay được đặt sau
 // giao diện nhà cung cấp chung để ZCA chạy song song mà không phải sửa logic.
 const officialProviders = botConfigResult.bots.map((config) => createOfficialProvider(config));
@@ -217,6 +477,16 @@ const zcaProvider = createZcaProvider({
     // Dùng runWithBot (chạy ngay) chứ KHÔNG phải bindBot (trả về hàm bọc dùng cho
     // event handler) — bindBot ở đây sẽ khiến handler không bao giờ được gọi.
     onMessage: (provider, message) => runWithBot(provider, () => handleIncomingMessage(provider, message)),
+    // Sự kiện kết bạn. Lỗi ở đây chỉ ảnh hưởng tính năng lời mời kết bạn, không
+    // được làm chết listener tin nhắn.
+    onFriendEvent: (provider, event) => friendRequestService.handleEvent(provider.botId, event).catch((error) => {
+        console.warn(`[ZCA] xử lý sự kiện kết bạn thất bại: ${error.message}`);
+    }),
+    // Kết nối lại xong thì đồng bộ ngay: lời mời đến trong lúc mất kết nối không
+    // có sự kiện nào để bắt.
+    onConnected: (provider) => friendRequestService.syncAccount(provider.botId, { trigger: "reconnect" }).catch((error) => {
+        console.warn(`[ZCA] đồng bộ lời mời kết bạn thất bại: ${error.message}`);
+    }),
     // UID chỉ biết được sau khi đăng nhập, nên danh tính đăng ký được đổi khóa
     // ngay tại đây. Mọi bản ghi về sau dùng khóa "zca:<uid>" thật.
     onIdentityChanged: (provider, newBotId, previousBotId) => {
@@ -2845,6 +3115,13 @@ function stopOneBotPolling(runtime) {
 // Dừng polling của MỌI bot. Một bot lỗi không được ngăn các bot còn lại dừng sạch.
 async function stopZaloPolling() {
     shuttingDown = true;
+    // Dừng nhịp đồng bộ lời mời kết bạn trước khi tắt nhà cung cấp: nó gọi API
+    // Zalo, và gọi vào một phiên đã đóng chỉ tạo ra lỗi vô nghĩa lúc tắt máy.
+    try {
+        friendRequestService.stop();
+    } catch (_) {
+        // Không có gì để dừng.
+    }
     const results = await Promise.allSettled(listBots().map((runtime) => stopOneBotPolling(runtime)));
     for (const [index, result] of results.entries()) {
         if (result.status === "rejected") {
@@ -2893,6 +3170,8 @@ async function startRuntime() {
                 "adminLogs",
                 "adminSettings",
                 "chatDirectory",
+                "friendRequestSettings",
+                "friendRequests",
                 "interactions",
                 "classStartNotifications",
                 "scheduleSnapshots",
@@ -3004,6 +3283,10 @@ async function startRuntime() {
         // Đã tách thành hàm riêng để kiểm thử trực tiếp đường gửi.
         replyToFeedback: (input) => deliverFeedbackReply(input),
 
+        // Lời mời kết bạn ZCA — toàn bộ logic nằm trong service, dashboard chỉ
+        // chuyển tiếp. Nhờ vậy route không thể vô tình gọi thẳng API Zalo.
+        friendRequestService,
+
         // Thông báo MỘT LẦN: chạy bên trong tiến trình này để dùng được phiên ZCA.
         // Không endpoint nào chạm Firestore — chỉ đọc file nguồn rồi gửi.
         previewAnnouncement: (input) => previewRecoveredAnnouncement(input),
@@ -3086,6 +3369,17 @@ async function startRuntime() {
         }
     });
     await Promise.allSettled(providerStartups);
+
+    // Bước 5b: dịch vụ lời mời kết bạn. Đặt SAU khi nhà cung cấp khởi động để
+    // lượt đồng bộ đầu tiên gặp phiên ZCA đã sẵn sàng, và để việc mở khóa các bản
+    // ghi kẹt ở "đang xử lý" xảy ra trước nhịp đồng bộ đầu tiên.
+    try {
+        friendRequestService.start();
+        metrics.mark("Friend request service");
+    } catch (error) {
+        // Tính năng này hỏng không được ngăn bot nhận tin.
+        console.warn(`[Runtime] dịch vụ lời mời kết bạn không khởi động được: ${error.message}`);
+    }
 
     // Chỉ coi là lỗi chí mạng khi KHÔNG nhà cung cấp CHÍNH THỨC nào lên được:
     // đó mới là hệ thống hỏng. ZCA hỏng một mình là trạng thái bình thường và
@@ -3593,6 +3887,14 @@ if (!isTestEnv) {
 module.exports = {
     cancelSchedulerJobs,
     closeDashboardServer,
+    // Lời mời kết bạn ZCA. Xuất để dashboard nối vào và để kiểm thử được phần
+    // dựng liên kết / chọn người nhận mà không cần dựng HTTP server.
+    buildFriendRequestManageUrl,
+    describeFriendRequestRecipients,
+    friendRequestNotificationText,
+    friendRequestService,
+    resolveOfficialRecipients,
+    resolveZcaRecipient,
     // Dùng cho bài kiểm tra đường gửi trả lời hỗ trợ: chứng minh trả lời đi tới
     // đúng bot của yêu cầu, không bao giờ chỉ dựa vào chatId.
     deliverFeedbackReply,

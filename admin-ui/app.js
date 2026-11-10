@@ -392,6 +392,7 @@ function switchTab(name) {
   };
 
   if (name === "helpimages") run(loadHelpImages);
+  if (name === "friendrequests") run(loadFriendRequests);
   if (name === "chatcenter") run(() => { loadChatConversations(); connectChatStream(); });
 }
 
@@ -2796,6 +2797,433 @@ document.addEventListener("visibilitychange", () => {
   refreshChatFromServer();
 });
 
+
+/* ===========================================================================
+   FRIEND REQUESTS (ZCA — tài khoản Zalo cá nhân)
+   =========================================================================== */
+
+const FRIEND_REQUEST_MODE_LABELS = { manual: "Thủ công", auto: "Tự động", disabled: "Tắt" };
+
+const FRIEND_REQUEST_STATUS_LABELS = {
+  pending: "Chờ xác nhận",
+  processing: "Đang xử lý",
+  accepted: "Đã chấp nhận",
+  rejected: "Đã từ chối",
+  already_friends: "Đã là bạn",
+  cancelled: "Đã thu hồi",
+  failed: "Lỗi",
+  requires_verification: "Cần kiểm tra"
+};
+
+const FRIEND_REQUEST_STATUS_TONES = {
+  pending: "warning",
+  processing: "neutral",
+  accepted: "success",
+  rejected: "neutral",
+  already_friends: "success",
+  cancelled: "neutral",
+  failed: "danger",
+  requires_verification: "danger"
+};
+
+// Trạng thái còn thao tác được. Khớp OPERABLE_STATUSES phía máy chủ — nhưng máy
+// chủ vẫn là nơi quyết định; đây chỉ để ẩn nút không dùng được.
+const FRIEND_REQUEST_OPERABLE = new Set(["pending", "failed", "requires_verification"]);
+
+let friendRequestState = null;
+const friendRequestBusy = new Set();
+let friendRequestSearch = "";
+
+async function loadFriendRequests() {
+  const accountId = $("#friendRequestAccount")?.value || "";
+  const query = new URLSearchParams();
+  if (accountId) query.set("botId", accountId);
+  if (friendRequestSearch) query.set("search", friendRequestSearch);
+  try {
+    const data = await api(`/api/admin/friend-requests${query.toString() ? `?${query}` : ""}`);
+    friendRequestState = data;
+    renderFriendRequests();
+  } catch (error) {
+    friendRequestState = null;
+    const target = $("#friendRequestPending");
+    if (target) target.innerHTML = `<div class="empty-state">Không tải được lời mời kết bạn: ${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function friendRequestStatusBadge(status) {
+  return badge(FRIEND_REQUEST_STATUS_LABELS[status] || status, FRIEND_REQUEST_STATUS_TONES[status] || "neutral");
+}
+
+// Một dòng kết quả thông báo của một kênh. Hiện NGUYÊN VĂN lỗi thay vì chỉ "lỗi":
+// quản trị viên cần biết kênh nào hỏng và vì sao.
+function friendRequestChannelResult(record, channel, label) {
+  const entry = record?.notifications?.[channel];
+  if (!entry) return "";
+  const when = entry.at ? formatDate(entry.at) : "";
+  if (entry.status === "sent") {
+    return `<span class="fr-channel ok">✓ ${escapeHtml(label)}${when ? ` · ${escapeHtml(when)}` : ""}</span>`;
+  }
+  if (entry.status === "failed") {
+    return `<span class="fr-channel failed">✕ ${escapeHtml(label)}: ${escapeHtml(entry.error || "gửi thất bại")}</span>`;
+  }
+  return "";
+}
+
+function renderFriendRequestCard(record, options = {}) {
+  const pending = options.pending === true;
+  const busy = friendRequestBusy.has(record.requestId);
+  const avatar = record.avatar
+    ? `<img class="fr-avatar" src="${escapeHtml(record.avatar)}" alt="" loading="lazy" referrerpolicy="no-referrer" />`
+    : `<span class="fr-avatar fr-avatar-empty">${escapeHtml(String(record.displayName || record.userId || "?").slice(0, 1).toUpperCase())}</span>`;
+
+  const actions = pending
+    ? `<div class="row-actions">
+         <button class="primary small" type="button" data-fr-action="accept" data-fr-id="${escapeHtml(record.requestId)}" ${busy || !FRIEND_REQUEST_OPERABLE.has(record.status) ? "disabled" : ""}>${busy ? "Đang xử lý…" : "Chấp nhận"}</button>
+         <button class="ghost small" type="button" data-fr-action="reject" data-fr-id="${escapeHtml(record.requestId)}" ${busy || !FRIEND_REQUEST_OPERABLE.has(record.status) ? "disabled" : ""}>Từ chối</button>
+         <button class="ghost small" type="button" data-fr-action="details" data-fr-id="${escapeHtml(record.requestId)}">Chi tiết</button>
+       </div>`
+    : `<div class="row-actions">
+         <button class="ghost small" type="button" data-fr-action="details" data-fr-id="${escapeHtml(record.requestId)}">Chi tiết</button>
+         <button class="ghost small" type="button" data-fr-action="retry" data-fr-id="${escapeHtml(record.requestId)}" ${busy ? "disabled" : ""}>Gửi lại thông báo lỗi</button>
+       </div>`;
+
+  const method = record.processedMethod
+    ? (record.processedMethod === "auto" ? "tự động" : record.processedMethod === "system" ? "hệ thống" : "thủ công")
+    : null;
+
+  return `<article class="fr-card${pending ? "" : " closed"}">
+    ${avatar}
+    <div class="fr-body">
+      <div class="fr-title">
+        <strong>${escapeHtml(record.displayName || "(không có tên)")}</strong>
+        ${friendRequestStatusBadge(record.status)}
+      </div>
+      <div class="fr-meta">
+        <span>User ID ${escapeHtml(record.userId || "-")}</span>
+        <span>${escapeHtml(record.accountId || "-")}</span>
+        <span>${escapeHtml(formatDate(record.requestedAt || record.detectedAt))}</span>
+      </div>
+      ${record.message ? `<p class="fr-message">“${escapeHtml(record.message)}”</p>` : ""}
+      ${record.lastError ? `<p class="fr-error">${escapeHtml(record.lastError)}</p>` : ""}
+      <div class="fr-channels">
+        ${friendRequestChannelResult(record, "official", "Bot chính thức")}
+        ${friendRequestChannelResult(record, "zca", "ZCA")}
+        ${record.notifications?.welcome ? `<span class="fr-channel ${record.notifications.welcome.status === "sent" ? "ok" : "failed"}">Tin chào: ${escapeHtml(record.notifications.welcome.status)}</span>` : ""}
+      </div>
+      ${pending ? "" : `<div class="fr-meta"><span>Xử lý lúc ${escapeHtml(formatDate(record.processedAt))}</span>${method ? `<span>${escapeHtml(method)}</span>` : ""}${record.processedBy ? `<span>${escapeHtml(record.processedBy)}</span>` : ""}</div>`}
+      ${actions}
+    </div>
+  </article>`;
+}
+
+function renderFriendRequestBanner(state) {
+  const banner = $("#friendRequestBanner");
+  if (!banner) return;
+  const problems = [];
+
+  if (!state.accounts || state.accounts.length === 0) {
+    problems.push("Không có tài khoản ZCA nào. Bật ZCA_ENABLED và đăng nhập QR ở tab Tổng quan trước.");
+  } else if (!state.accounts.some((account) => account.authenticated)) {
+    problems.push("Tài khoản ZCA chưa đăng nhập nên không đọc được lời mời kết bạn.");
+  }
+
+  const recipients = state.recipients || {};
+  const official = recipients.official || {};
+  const zca = recipients.zca || {};
+  if (official.enabled && !official.valid) problems.push(`Kênh bot chính thức: ${official.reason || "chưa có người nhận."}`);
+  if (zca.enabled && !zca.valid) problems.push(`Kênh ZCA: ${zca.reason || "chưa có người nhận."}`);
+
+  if (state.autoAccept?.suspended) {
+    problems.push(`Tự động chấp nhận đang TẠM DỪNG: ${state.autoAccept.suspendedReason || "có lỗi liên tiếp"}. Chuyển sang Thủ công rồi bật lại để tiếp tục.`);
+  }
+
+  banner.hidden = problems.length === 0;
+  banner.className = "app-status error";
+  banner.innerHTML = problems.map((line) => `<div>${escapeHtml(line)}</div>`).join("");
+}
+
+function renderFriendRequestSettings(state) {
+  const settings = state.settings || {};
+  const auto = settings.autoAccept || {};
+
+  $$("#friendRequestMode button").forEach((button) => {
+    button.classList.toggle("active", button.dataset.mode === settings.mode);
+  });
+
+  const autoState = state.autoAccept || {};
+  $("#friendRequestAutoState").textContent = settings.mode === "auto"
+    ? (autoState.allowed
+      ? "Đang bật — sẵn sàng chấp nhận lời mời tiếp theo."
+      : `Đang bật nhưng tạm chưa chạy: ${autoState.detail || autoState.reason || "chưa đủ điều kiện"}.`)
+    : (settings.mode === "disabled"
+      ? "Đang tắt: chỉ đồng bộ và xem, không tự chấp nhận."
+      : "Đang thủ công: mọi lời mời chờ quản trị viên duyệt.");
+
+  if (document.activeElement !== $("#friendRequestMaxPerHour")) $("#friendRequestMaxPerHour").value = auto.maxPerHour ?? 5;
+  if (document.activeElement !== $("#friendRequestMinInterval")) $("#friendRequestMinInterval").value = Math.round((auto.minIntervalMs ?? 60000) / 1000);
+  if (document.activeElement !== $("#friendRequestSyncInterval")) $("#friendRequestSyncInterval").value = Math.round((settings.syncIntervalMs ?? 60000) / 1000);
+  if (document.activeElement !== $("#friendRequestSuspendAfter")) $("#friendRequestSuspendAfter").value = auto.suspendAfterErrors ?? 3;
+
+  $("#friendRequestWelcomeEnabled").checked = settings.welcome?.enabled === true;
+  if (document.activeElement !== $("#friendRequestWelcomeMessage")) {
+    $("#friendRequestWelcomeMessage").value = settings.welcome?.message || "";
+  }
+}
+
+function renderFriendRequestChannels(state) {
+  const recipients = state.recipients || {};
+  const settings = state.settings?.notifications || {};
+
+  for (const channel of ["official", "zca"]) {
+    const config = settings[channel] || {};
+    const info = recipients[channel] || {};
+    const enabledInput = channel === "official" ? $("#friendRequestOfficialEnabled") : $("#friendRequestZcaEnabled");
+    const statusNode = channel === "official" ? $("#friendRequestOfficialStatus") : $("#friendRequestZcaStatus");
+    const select = channel === "official" ? $("#friendRequestOfficialTarget") : $("#friendRequestZcaTarget");
+
+    enabledInput.checked = config.enabled === true;
+
+    const candidates = Array.isArray(info.candidates) ? info.candidates : [];
+    const current = info.chatId || "";
+    const options = [`<option value="">${info.valid ? "Dùng người nhận mặc định" : "-- Chọn hội thoại --"}</option>`];
+    let matched = false;
+    for (const candidate of candidates) {
+      const value = String(candidate.chatId || "");
+      if (!value) continue;
+      if (value === current) matched = true;
+      const label = channel === "official"
+        ? `${candidate.chatId} · ${candidate.botId || "?"}`
+        : `${candidate.displayName || candidate.chatId}${candidate.source === "owner_user_id" ? " (OWNER_USER_ID)" : ""}`;
+      options.push(`<option value="${escapeHtml(value)}"${value === current ? " selected" : ""}>${escapeHtml(label)}</option>`);
+    }
+    // Giá trị đang dùng mà không nằm trong danh sách: vẫn phải hiện, nếu không
+    // quản trị viên sẽ tưởng chưa cấu hình và ghi đè mất.
+    if (current && !matched) {
+      options.push(`<option value="${escapeHtml(current)}" selected>${escapeHtml(current)} (đang dùng)</option>`);
+    }
+    select.innerHTML = options.join("");
+
+    if (info.valid) {
+      const source = info.source === "owner_user_id" ? "OWNER_USER_ID" : info.source === "manual" ? "chọn tay" : "owner";
+      statusNode.textContent = `Người nhận: ${info.chatId} · ${source}`;
+      statusNode.className = "field-hint";
+    } else {
+      statusNode.textContent = info.reason || "Chưa có người nhận hợp lệ.";
+      statusNode.className = "field-hint fr-warn";
+    }
+  }
+}
+
+function renderFriendRequests() {
+  const state = friendRequestState;
+  if (!state) return;
+
+  renderFriendRequestBanner(state);
+  renderFriendRequestSettings(state);
+  renderFriendRequestChannels(state);
+
+  const accountSelect = $("#friendRequestAccount");
+  const accounts = Array.isArray(state.accounts) ? state.accounts : [];
+  const selectedAccount = accountSelect.value;
+  accountSelect.innerHTML = ['<option value="">Tất cả tài khoản ZCA</option>']
+    .concat(accounts.map((account) => `<option value="${escapeHtml(account.accountId)}">${escapeHtml(account.label || account.accountId)}${account.authenticated ? "" : " (chưa đăng nhập)"}</option>`))
+    .join("");
+  accountSelect.value = selectedAccount;
+
+  const pending = Array.isArray(state.pending) ? state.pending : [];
+  $("#friendRequestPendingCount").textContent = String(pending.length);
+  $("#friendRequestPending").innerHTML = pending.length === 0
+    ? '<div class="empty-state">Không có lời mời nào đang chờ.</div>'
+    : pending.map((record) => renderFriendRequestCard(record, { pending: true })).join("");
+
+  const history = Array.isArray(state.history) ? state.history : [];
+  $("#friendRequestHistory").innerHTML = history.length === 0
+    ? '<div class="empty-state">Chưa có lịch sử.</div>'
+    : history.map((record) => renderFriendRequestCard(record, { pending: false })).join("");
+}
+
+async function saveFriendRequestSettings(patch, failureLabel) {
+  const outcome = await runAction(
+    () => api("/api/admin/friend-requests/settings", { method: "POST", body: JSON.stringify(patch) }),
+    failureLabel
+  );
+  if (outcome.ok) {
+    friendRequestState = outcome.result.state || friendRequestState;
+    renderFriendRequests();
+    setDataState("success", "Đã lưu cài đặt lời mời kết bạn.");
+  }
+}
+
+async function handleFriendRequestAction(action, requestId) {
+  if (friendRequestBusy.has(requestId)) return;
+  friendRequestBusy.add(requestId);
+  renderFriendRequests();
+
+  try {
+    if (action === "accept" || action === "reject") {
+      const result = await api(`/api/admin/friend-requests/${action}`, {
+        method: "POST",
+        body: JSON.stringify({ requestId })
+      });
+      friendRequestState = result.state || friendRequestState;
+      if (result.ok) {
+        setDataState("success", action === "accept" ? "Đã chấp nhận lời mời kết bạn." : "Đã từ chối lời mời kết bạn.");
+      } else {
+        // Không báo thành công khi nhà cung cấp chưa xác nhận. Nêu đúng lý do.
+        setDataState("error", result.error || `Không xử lý được lời mời (${result.reason || "không rõ"}).`);
+      }
+    } else if (action === "retry") {
+      const record = (friendRequestState?.pending || []).concat(friendRequestState?.history || [])
+        .find((item) => item.requestId === requestId);
+      const failedChannel = ["official", "zca"].find((channel) => record?.notifications?.[channel]?.status === "failed");
+      if (!failedChannel) {
+        setDataState("error", "Lời mời này không có kênh thông báo nào lỗi.");
+      } else {
+        const result = await api("/api/admin/friend-requests/retry-notification", {
+          method: "POST",
+          body: JSON.stringify({ requestId, channel: failedChannel })
+        });
+        friendRequestState = result.state || friendRequestState;
+        setDataState(result.ok ? "success" : "error", result.ok ? "Đã gửi lại thông báo." : (result.error || "Gửi lại thất bại."));
+      }
+    } else if (action === "details") {
+      const record = (friendRequestState?.pending || []).concat(friendRequestState?.history || [])
+        .find((item) => item.requestId === requestId);
+      if (record) {
+        const lines = [
+          `Tên: ${record.displayName || "(không có tên)"}`,
+          `User ID: ${record.userId}`,
+          `Tài khoản: ${record.accountId}`,
+          `Trạng thái: ${FRIEND_REQUEST_STATUS_LABELS[record.status] || record.status}`,
+          `Phát hiện: ${formatDate(record.detectedAt)}`,
+          `Yêu cầu lúc: ${formatDate(record.requestedAt)}`,
+          record.message ? `Lời nhắn: ${record.message}` : "",
+          record.processedAt ? `Xử lý: ${formatDate(record.processedAt)} · ${record.processedMethod || "-"} · ${record.processedBy || "-"}` : "",
+          record.lastError ? `Lỗi gần nhất: ${record.lastError}` : "",
+          `Số lần thử: ${record.attempts || 0}`,
+          `Thế hệ lời mời: ${record.generation || 1}`
+        ].filter(Boolean);
+        alert(lines.join("\n"));
+      }
+    }
+  } catch (error) {
+    setDataState("error", `Thao tác thất bại: ${error.message}`);
+  } finally {
+    friendRequestBusy.delete(requestId);
+    renderFriendRequests();
+  }
+}
+
+// Gắn sự kiện một lần. Dùng ủy nhiệm trên panel nên không phải gắn lại sau mỗi
+// lần vẽ lại danh sách.
+function bindFriendRequestControls() {
+  const panel = document.querySelector('[data-panel="friendrequests"]');
+  if (!panel || panel.dataset.bound === "1") return;
+  panel.dataset.bound = "1";
+
+  panel.addEventListener("click", (event) => {
+    const actionButton = event.target.closest("[data-fr-action]");
+    if (actionButton) {
+      handleFriendRequestAction(actionButton.dataset.frAction, actionButton.dataset.frId);
+      return;
+    }
+
+    const modeButton = event.target.closest("#friendRequestMode button");
+    if (modeButton) {
+      saveFriendRequestSettings({ mode: modeButton.dataset.mode }, "Không đổi được chế độ xử lý");
+      return;
+    }
+
+    const testButton = event.target.closest("[data-test-channel]");
+    if (testButton) {
+      const channel = testButton.dataset.testChannel;
+      const target = channel === "official" ? $("#friendRequestOfficialResult") : $("#friendRequestZcaResult");
+      target.textContent = "Đang gửi…";
+      api("/api/admin/friend-requests/test-notification", {
+        method: "POST",
+        body: JSON.stringify({ channel })
+      })
+        .then((result) => {
+          target.textContent = result.ok
+            ? `✓ Đã gửi thử tới ${result.chatId || "người nhận"}.`
+            : `✕ ${result.error || "gửi thử thất bại"}`;
+          target.className = `field-hint ${result.ok ? "" : "fr-warn"}`;
+        })
+        .catch((error) => {
+          target.textContent = `✕ ${error.message}`;
+          target.className = "field-hint fr-warn";
+        });
+      return;
+    }
+
+    if (event.target.closest("#friendRequestRefresh")) {
+      $("#friendRequestRefresh").disabled = true;
+      api("/api/admin/friend-requests/sync", { method: "POST", body: JSON.stringify({ botId: $("#friendRequestAccount").value || null }) })
+        .then((result) => {
+          friendRequestState = result.state || friendRequestState;
+          renderFriendRequests();
+          const summary = result.accounts
+            ? result.accounts.map((item) => `${item.accountId}: +${item.added || 0}`).join(", ")
+            : `+${result.added || 0} lời mời mới`;
+          setDataState(result.ok === false ? "error" : "success", result.ok === false ? (result.error || "Đồng bộ thất bại") : `Đã đồng bộ (${summary}).`);
+        })
+        .catch((error) => setDataState("error", `Đồng bộ thất bại: ${error.message}`))
+        .finally(() => { $("#friendRequestRefresh").disabled = false; });
+      return;
+    }
+
+    if (event.target.closest("#friendRequestSaveLimits")) {
+      saveFriendRequestSettings({
+        autoAccept: {
+          maxPerHour: Number($("#friendRequestMaxPerHour").value),
+          minIntervalMs: Number($("#friendRequestMinInterval").value) * 1000,
+          suspendAfterErrors: Number($("#friendRequestSuspendAfter").value)
+        },
+        syncIntervalMs: Number($("#friendRequestSyncInterval").value) * 1000
+      }, "Không lưu được giới hạn");
+      return;
+    }
+
+    if (event.target.closest("#friendRequestSaveWelcome")) {
+      saveFriendRequestSettings({
+        welcome: {
+          enabled: $("#friendRequestWelcomeEnabled").checked,
+          message: $("#friendRequestWelcomeMessage").value
+        }
+      }, "Không lưu được tin chào");
+    }
+  });
+
+  // Công tắc kênh: bật/tắt độc lập, mỗi kênh một lần gọi.
+  for (const [channel, selector] of [["official", "#friendRequestOfficialEnabled"], ["zca", "#friendRequestZcaEnabled"]]) {
+    $(selector)?.addEventListener("change", (event) => {
+      const patch = { notifications: {} };
+      patch.notifications[channel] = { enabled: event.target.checked };
+      saveFriendRequestSettings(patch, "Không đổi được kênh thông báo");
+    });
+  }
+
+  // Đổi người nhận: ghi đè tường minh, nên giá trị rỗng nghĩa là quay về mặc định.
+  for (const [channel, selector] of [["official", "#friendRequestOfficialTarget"], ["zca", "#friendRequestZcaTarget"]]) {
+    $(selector)?.addEventListener("change", (event) => {
+      const patch = { notifications: {} };
+      patch.notifications[channel] = { chatId: event.target.value || null };
+      saveFriendRequestSettings(patch, "Không đổi được người nhận");
+    });
+  }
+
+  $("#friendRequestAccount")?.addEventListener("change", () => loadFriendRequests());
+
+  let searchTimer = null;
+  $("#friendRequestSearch")?.addEventListener("input", (event) => {
+    const value = event.target.value.trim();
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => { friendRequestSearch = value; loadFriendRequests(); }, 300);
+  });
+}
+
+bindFriendRequestControls();
+
 /* ---------------------------------------------------------------------------
    Khôi phục tab đã lưu — PHẢI nằm ở cuối tệp.
 
@@ -2803,4 +3231,11 @@ document.addEventListener("visibilitychange", () => {
    nạp xong thì ném "Cannot access 'chatStream' before initialization" và toàn bộ
    dashboard không khởi động được.
    --------------------------------------------------------------------------- */
+
+// Liên kết sâu: thông báo lời mời kết bạn trỏ tới #friendrequests. Hash thắng tab
+// đã lưu để bấm vào thông báo là mở đúng chỗ, không phải tự tìm tab.
+const hashTab = String(location.hash || "").replace(/^#/, "");
+if (hashTab && $$(".tab-button").some((button) => button.dataset.tab === hashTab)) {
+  localStorage.setItem("zalobot-admin-tab", hashTab);
+}
 switchTab(localStorage.getItem("zalobot-admin-tab") || "overview");

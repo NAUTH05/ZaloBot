@@ -1003,6 +1003,129 @@ async function handleApi(request, response, url, options = {}) {
         }
     }
     // ---------------------------------------------------------------------
+    // Lời mời kết bạn ZCA.
+    //
+    // Chỉ tài khoản Zalo CÁ NHÂN mới có khái niệm này, nên mọi route đều đi qua
+    // friendRequestService — nơi từ chối danh tính không phải ZCA. Bot chính thức
+    // không bao giờ chấp nhận lời mời kết bạn, kể cả khi quản trị viên gửi sai id.
+    //
+    // Toàn bộ nằm sau requireAdmin ở trên. Không route nào trả cookie/imei/phiên.
+    // ---------------------------------------------------------------------
+    const friendRequests = options.friendRequestService || null;
+
+    if (url.pathname === `${API_PREFIX}/friend-requests` && request.method === "GET") {
+        if (!friendRequests) return json(response, 503, { error: "Tính năng lời mời kết bạn chưa sẵn sàng." });
+        const accountId = normalizeBotId(url.searchParams.get("botId")) || null;
+        return json(response, 200, friendRequests.getState({
+            accountId,
+            search: url.searchParams.get("search") || null,
+            limit: Number(url.searchParams.get("limit")) || undefined
+        }));
+    }
+
+    if (url.pathname === `${API_PREFIX}/friend-requests/sync` && request.method === "POST") {
+        if (!friendRequests) return json(response, 503, { error: "Tính năng lời mời kết bạn chưa sẵn sàng." });
+        let body;
+        try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
+        const botId = normalizeBotId(body?.botId) || null;
+        try {
+            // Không có botId ⇒ làm mới MỌI tài khoản ZCA. Có botId ⇒ chỉ tài khoản đó,
+            // và tài khoản không phải ZCA bị từ chối thay vì âm thầm bỏ qua.
+            const result = botId
+                ? await friendRequests.syncAccount(botId, { trigger: "manual" })
+                : await friendRequests.refresh();
+            audit("friend_request.sync", request, { botId: botId || "all", result: result?.ok === false ? "failed" : "success" });
+            return json(response, 200, { ...result, state: friendRequests.getState() });
+        } catch (error) {
+            audit("friend_request.sync", request, { botId: botId || "all", result: "failed", error: error.message });
+            return json(response, 400, { error: error.message });
+        }
+    }
+
+    for (const [suffix, action] of [["accept", "accept"], ["reject", "reject"]]) {
+        if (url.pathname === `${API_PREFIX}/friend-requests/${suffix}` && request.method === "POST") {
+            if (!friendRequests) return json(response, 503, { error: "Tính năng lời mời kết bạn chưa sẵn sàng." });
+            let body;
+            try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
+            const requestId = String(body?.requestId || "").trim();
+            if (!requestId || requestId.length > 200) {
+                return json(response, 400, { error: "Thiếu requestId của lời mời." });
+            }
+            // Danh tính người thao tác lấy từ PHIÊN đăng nhập, không từ body: client
+            // không được tự khai mình là ai trong lịch sử.
+            const actor = request.admin?.username ? String(request.admin.username) : "admin";
+            try {
+                const result = await friendRequests[action](requestId, { actor });
+                audit(`friend_request.${action}`, request, {
+                    requestId,
+                    result: result?.ok ? "success" : (result?.reason || "failed"),
+                    error: result?.ok ? undefined : result?.error
+                });
+                const status = result?.ok ? 200 : (result?.reason === "not_found" ? 404 : 409);
+                return json(response, status, { ...result, state: friendRequests.getState() });
+            } catch (error) {
+                audit(`friend_request.${action}`, request, { requestId, result: "failed", error: error.message });
+                return json(response, 400, { error: error.message });
+            }
+        }
+    }
+
+    if (url.pathname === `${API_PREFIX}/friend-requests/settings` && request.method === "POST") {
+        if (!friendRequests) return json(response, 503, { error: "Tính năng lời mời kết bạn chưa sẵn sàng." });
+        let body;
+        try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
+        const patch = body && typeof body === "object" ? body : {};
+        try {
+            // Giới hạn an toàn được ép trong friendRequests.normalizeSettings — route
+            // này chỉ chuyển tiếp, không tin giá trị client.
+            const settings = friendRequests.updateSettings(patch, {
+                actor: request.admin?.username ? String(request.admin.username) : "admin"
+            });
+            audit("friend_request.settings_updated", request, { result: "success" });
+            return json(response, 200, { ok: true, settings, state: friendRequests.getState() });
+        } catch (error) {
+            audit("friend_request.settings_updated", request, { result: "failed", error: error.message });
+            return json(response, 400, { error: error.message });
+        }
+    }
+
+    if (url.pathname === `${API_PREFIX}/friend-requests/test-notification` && request.method === "POST") {
+        if (!friendRequests) return json(response, 503, { error: "Tính năng lời mời kết bạn chưa sẵn sàng." });
+        let body;
+        try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
+        try {
+            const result = await friendRequests.testNotification(body?.channel);
+            audit("friend_request.test_notification", request, {
+                channel: String(body?.channel || ""),
+                result: result?.ok ? "success" : "failed",
+                error: result?.ok ? undefined : result?.error
+            });
+            return json(response, result?.ok ? 200 : 400, result || { ok: false });
+        } catch (error) {
+            return json(response, 400, { error: error.message });
+        }
+    }
+
+    if (url.pathname === `${API_PREFIX}/friend-requests/retry-notification` && request.method === "POST") {
+        if (!friendRequests) return json(response, 503, { error: "Tính năng lời mời kết bạn chưa sẵn sàng." });
+        let body;
+        try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
+        const requestId = String(body?.requestId || "").trim();
+        if (!requestId) return json(response, 400, { error: "Thiếu requestId của lời mời." });
+        try {
+            const result = await friendRequests.retryNotification(requestId, body?.channel, { kind: body?.kind });
+            audit("friend_request.retry_notification", request, {
+                requestId,
+                channel: String(body?.channel || ""),
+                result: result?.ok ? "success" : "failed"
+            });
+            return json(response, 200, { ...result, state: friendRequests.getState() });
+        } catch (error) {
+            return json(response, 400, { error: error.message });
+        }
+    }
+
+    // ---------------------------------------------------------------------
     // Hỗ trợ / góp ý.
     //
     // Mọi route nằm sau requireAdmin ở trên, nên chỉ quản trị viên đã đăng nhập

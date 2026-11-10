@@ -50,6 +50,13 @@ All endpoints below require the HttpOnly `zalobot_admin` session cookie except l
 | `POST /zalobot/api/admin/commands` | Execute a command for one recipient (legacy shape, still supported) |
 | `POST /zalobot/api/admin/commands/batch` | Start a multi-recipient run; returns `202` with a `jobId` |
 | `GET /zalobot/api/admin/commands/batch/:jobId` | Progress, per-recipient results, and summary for a run |
+| `GET /zalobot/api/admin/friend-requests` | ZCA friend requests: pending, history, settings, accounts, recipient status |
+| `POST /zalobot/api/admin/friend-requests/sync` | Re-read pending requests from Zalo (`botId` optional) |
+| `POST /zalobot/api/admin/friend-requests/accept` | Accept one request by `requestId`; `409` if already processed |
+| `POST /zalobot/api/admin/friend-requests/reject` | Reject one request by `requestId` |
+| `POST /zalobot/api/admin/friend-requests/settings` | Update handling mode, safety limits, notification channels, welcome message |
+| `POST /zalobot/api/admin/friend-requests/test-notification` | Send a test notification on one channel |
+| `POST /zalobot/api/admin/friend-requests/retry-notification` | Retry only the failed channel of one request |
 
 State-changing requests require same-origin `Origin` headers when a browser supplies one. The server also applies security headers, request-size limits, and a basic IP rate limit.
 
@@ -196,3 +203,160 @@ The `Target Chat ID` field was removed: it had no effect on execution, and a man
 `POST /zalobot/api/admin/commands` is unchanged for existing clients: it still accepts a single `targetUserId` and returns `deliveredToChatId`, `messages`, `executor`, and `target` in the old shape, plus the new `summary`/`results` fields.
 
 A Chat ID that belongs to a group is never treated as a User ID: the API rejects it with a clear error and the list never exposes it as a user entry. The list is capped at 50 rendered rows with a "type to narrow" note, and shows an explicit empty state when no user has interacted with the bot yet.
+
+# Friend requests (ZCA)
+
+Friend requests only exist for the **ZCA personal account** (`zca-js`). Official Bot
+Token identities have no friend list and are never allowed to accept anything: the
+service looks up the account and refuses anything that does not expose `friendApi`.
+
+## Verified zca-js surface (2.2.0)
+
+Checked against `node_modules/zca-js/dist/**/*.d.ts`, not against the website:
+
+| Capability | Installed 2.2.0 |
+| --- | --- |
+| `api.acceptFriendRequest(uid)` | present, resolves `""`, throws on failure |
+| `api.rejectFriendRequest(uid)` | present |
+| `api.getFriendRequestStatus(uid)` | present → `{ is_friend, is_requested, is_requesting, isSeenFriendReq }` |
+| `api.getFriendRecommendations()` | present → `recommItems[]`, `dataInfo.recommType === 2` = received request |
+| `api.getReceivedFriendRequests()` | **not present** — that is an older API name |
+| `listener.on("friend_event")` | present, `FriendEventType.REQUEST / UNDO_REQUEST / REJECT_REQUEST / ADD` |
+
+`is_requested` means *they asked us*; `is_requesting` means *we asked them*. Only the
+first is an incoming request, and `getFriendRecommendations()` also returns plain
+suggestions — so every candidate is re-checked with `getFriendRequestStatus()` before
+it is stored. Suggestions and outgoing requests are dropped, never treated as pending.
+
+## Detection
+
+Two independent paths, both feeding the same store:
+
+1. **Event** — `friend_event` → `REQUEST` (incoming only). `UNDO_REQUEST` and
+   `REJECT_REQUEST` close the record as `cancelled`; `ADD` closes it as `accepted`
+   (someone accepted on the phone).
+2. **Sync** — reads `getFriendRecommendations()`, verifies each candidate, caps at 30
+   candidates per pass. Runs after login, after every reconnect, on the configured
+   interval, and when the admin clicks Refresh. One worker per account, guarded by a
+   lock, so the listener and the interval cannot overlap.
+
+Records are keyed `zca::<accountId>::<userId>`, so a restart never creates a duplicate
+and never re-notifies. If a previously processed person sends a **new** request the
+`generation` counter increments and notifications are sent again — but a sync that
+merely arrives late (within 10 minutes of processing) cannot resurrect a handled
+request, because Zalo's relationship state lags behind its own API.
+
+## Handling modes
+
+| Mode | Behaviour |
+| --- | --- |
+| `manual` (default) | Detect, notify, wait for an administrator |
+| `auto` | Accept verified eligible requests within the safety limits below |
+| `disabled` | No automatic processing; sync and review still work |
+
+`mode` is the single source of truth. Mode changes apply immediately — the scheduler
+re-reads settings on every tick and reschedules itself.
+
+Safety limits, all enforced **server-side** (`friendRequests.normalizeSettings` clamps
+whatever the client sends):
+
+| Setting | Range | Default |
+| --- | --- | --- |
+| `maxPerHour` | 1–30 | 5 |
+| `minIntervalMs` | 5s–10min | 60s |
+| `suspendAfterErrors` | 1–10 | 3 |
+| `syncIntervalMs` | 30s–10min | 60s |
+
+Auto-accept is **suspended** after `suspendAfterErrors` consecutive provider errors.
+Suspension survives until an administrator changes the mode (which clears it) — this is
+deliberate: repeated Zalo refusals usually mean a rate limit or an account restriction,
+and continuing would make it worse. Hourly usage is counted from stored records, so a
+restart cannot bypass the cap.
+
+## Notifications
+
+Two independent channels, both able to be on at once. Recipients are **reused from the
+existing owner configuration** — no new ID list, no re-entering IDs.
+
+| Channel | Recipient resolution | Default |
+| --- | --- | --- |
+| `official` | `getAdminIdentities()` filtered to non-ZCA identities (so `OWNER_CHAT_ID` and `adminSettings` admins), optionally narrowed by `botId`/`chatId` | **on** |
+| `zca` | explicit `chatId`, else `OWNER_USER_ID`, else a private conversation from `chatDirectory` | off |
+
+For ZCA the thread id of a private chat *is* the user id, so `OWNER_USER_ID` is the
+natural reuse — but a bot-platform `chat_id` is **not** interchangeable with a ZCA user
+id, which is why the two channels resolve recipients separately. The account is never
+allowed to message itself; if the only candidate is the account's own uid the UI reports
+"no valid recipient" instead of trying.
+
+Delivery is recorded **per channel** (`notifications.official`, `notifications.zca`).
+A successful channel is never re-sent; only the failed one can be retried. Outcome
+notifications are stored under separate keys (`official:accepted`, `zca:failed`, …) so
+they cannot overwrite the "new request" result. A notification failure never removes the
+request and never blocks manual approval.
+
+The manage link is built from the live public origin (`publicOrigin.js`) plus the real
+base path — `https://<domain>/zalobot/#friendrequests` — and opens the tab directly.
+If the origin is not known yet the message falls back to instructions rather than
+sending a dead localhost link.
+
+## Accept / reject flow
+
+1. Session-derived actor (never the request body).
+2. In-memory lock per `requestId` — a double click cannot reach Zalo twice.
+3. Claim the record as `processing` with a status precondition.
+4. `getFriendRequestStatus()` — `is_friend` ⇒ `already_friends`, `!is_requested` ⇒
+   `cancelled` (withdrawn). Neither path calls the accept API.
+5. `acceptFriendRequest()` / `rejectFriendRequest()`.
+6. Re-read the status; if Zalo still says not friends the record becomes
+   `requires_verification`, **not** `accepted`.
+7. Optional welcome message (default off, only after real acceptance, once per request).
+8. Audit entry.
+
+`failed` and `requires_verification` stay retryable. A record stuck in `processing`
+because the process died is unlocked to `requires_verification` on the next start.
+
+## Welcome message
+
+Off by default. Sent only after a confirmed acceptance, only once per request, and a
+send failure is recorded separately (`notifications.zca:welcome`) without touching the
+friendship status.
+
+## Deploy and test with a real account
+
+```bash
+cd ~/htdocs/zalobot.mrnauthdev.dpdns.org/ZaloBot
+git pull origin dev
+pm2 restart zalobot
+```
+
+Prerequisites:
+
+- `ZCA_ENABLED=true` and a valid ZCA session (QR login in the overview tab).
+- `OWNER_CHAT_ID` for the official channel (already set if owner notifications work).
+- `OWNER_USER_ID` for the ZCA channel — this is the owner's Zalo **user id**, not a chat id.
+
+Then:
+
+1. Open **Friend Requests**. The banner lists anything misconfigured.
+2. Pick a mode. Leave `manual` first.
+3. Press **Send test** on each channel you enabled — this proves the recipient works
+   before a real request depends on it.
+4. From another Zalo account, send a friend request to the ZCA account.
+5. The card appears within seconds (event) or one sync interval; the owner gets the
+   notification with the request details.
+6. Press **Accept**. The card moves to Accepted; history records actor, method, and time.
+7. Switch to `auto`, send another request, and confirm it is accepted automatically and
+   still listed in history.
+
+## Known limitations
+
+- **Live acceptance has not been exercised against Zalo in this environment.** The API
+  names, argument order, and response shapes were verified from the installed typings and
+  the flows are covered by mocked-provider tests, but a real `acceptFriendRequest()` call
+  needs one live account to confirm end to end.
+- There is no Zalo API to *list* pending requests other than `getFriendRecommendations()`,
+  so a request that never appears there is only caught by the `friend_request` event.
+  Both paths are used for exactly this reason.
+- If the ZCA session is disconnected, actions return `account_offline` and the request
+  stays pending — nothing is marked failed and nothing is auto-accepted.

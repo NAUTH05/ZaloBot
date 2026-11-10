@@ -1607,3 +1607,158 @@ button[disabled] {
         grid-template-columns: 1fr;
     }
 }
+
+/* ---------------------------------------------------------------------------
+   Friend Requests (ZCA)
+   --------------------------------------------------------------------------- */
+
+/* Bộ chọn chế độ: ba nút liền nhau, cùng một khối. */
+.segmented {
+    display: inline-flex;
+    gap: 2px;
+    padding: 3px;
+    border: 1px solid var(--border);
+    border-radius: var(--r-full);
+    background: var(--bg);
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+}
+.segmented button {
+    border: none;
+    background: transparent;
+    color: var(--text-soft);
+    border-radius: var(--r-full);
+    padding: 6px 14px;
+    font: inherit;
+    font-size: var(--fs-sm);
+    cursor: pointer;
+}
+.segmented button:hover { color: var(--text); }
+.segmented button.active {
+    background: var(--accent);
+    color: var(--accent-contrast);
+    font-weight: 600;
+}
+
+.field-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+.switch-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: var(--fs-sm);
+    color: var(--text-soft);
+    cursor: pointer;
+    margin-bottom: 6px;
+}
+.switch-row input[type="checkbox"] { width: 16px; height: 16px; margin: 0; cursor: pointer; }
+
+.toggle-row {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+}
+
+.channel-card {
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    padding: 12px;
+    margin-bottom: 10px;
+    background: var(--bg);
+}
+.channel-card:last-child { margin-bottom: 0; }
+.channel-card select { width: 100%; margin: 4px 0 6px; }
+.channel-card .row-actions { margin-top: 4px; }
+
+.friend-request-list { display: flex; flex-direction: column; gap: 10px; }
+
+.fr-card {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    padding: 12px;
+    background: var(--surface);
+}
+.fr-card.closed { opacity: 0.92; }
+.fr-card .fr-body { flex: 1; min-width: 0; }
+
+.fr-avatar {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    object-fit: cover;
+    flex-shrink: 0;
+    background: var(--accent-soft);
+}
+.fr-avatar-empty {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    color: var(--accent);
+}
+
+.fr-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 4px;
+}
+
+.fr-meta {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    font-size: var(--fs-xs);
+    color: var(--muted);
+    margin-bottom: 4px;
+}
+
+.fr-message {
+    margin: 4px 0;
+    padding: 6px 10px;
+    border-left: 3px solid var(--border-strong);
+    color: var(--text-soft);
+    font-size: var(--fs-sm);
+    word-break: break-word;
+}
+
+.fr-error {
+    margin: 4px 0;
+    color: var(--danger);
+    font-size: var(--fs-xs);
+    word-break: break-word;
+}
+
+.fr-channels {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    font-size: var(--fs-xs);
+    margin: 6px 0;
+}
+.fr-channels:empty { display: none; }
+.fr-channel.ok { color: var(--success); }
+.fr-channel.failed { color: var(--danger); }
+
+.fr-warn { color: var(--warning); }
+
+/* [hidden] thua class display:flex — phải nói rõ. */
+#friendRequestBanner[hidden] { display: none; }
+
+@media (max-width: 768px) {
+    .fr-card { flex-direction: column; }
+    .segmented { width: 100%; }
+    .segmented button { flex: 1; text-align: center; }
+}

@@ -14,8 +14,15 @@
 // API dùng đúng theo zca-js 2.2.0 (đã đối chiếu dist/*.d.ts):
 //   new Zalo(options) / zalo.login(credentials) / zalo.loginQR(options, callback)
 //   api.getOwnId() / api.sendMessage(message, threadId, type) / api.listener.*
+//
+// Lời mời kết bạn (cũng đã đối chiếu dist/*.d.ts của 2.2.0):
+//   api.getFriendRecommendations() → recommItems[].dataInfo.recommType === 2
+//   api.getFriendRequestStatus(uid) → { is_friend, is_requested, is_requesting }
+//   api.acceptFriendRequest(uid) / api.rejectFriendRequest(uid)
+//   listener "friend_event" + FriendEventType.REQUEST / UNDO_REQUEST / REJECT_REQUEST
+// KHÔNG có getReceivedFriendRequests() trong bản này — đó là tên của bản cũ.
 // ============================================================================
-const { Zalo, ThreadType } = require("zca-js");
+const { Zalo, ThreadType, FriendEventType, FriendRecommendationsType } = require("zca-js");
 const { PROVIDER_TYPES, formatBotLabel, zcaId } = require("../../bots");
 const adapter = require("./zcaMessageAdapter");
 const { renderZcaRichText } = require("./zcaRichText");
@@ -48,6 +55,113 @@ function describeCloseReason(code, reason) {
     return `${code ?? "?"} (${hint})${reason ? ` — ${reason}` : ""}`;
 }
 
+// ---------------------------------------------------------------------------
+// Sự kiện kết bạn → dạng nội bộ
+//
+// Chuyển ngay tại biên giới nhà cung cấp, đúng như cách tin nhắn được chuyển qua
+// zcaMessageAdapter: tầng nghiệp vụ không bao giờ phải biết tới FriendEventType.
+//
+// Chỉ trả về sự kiện LIÊN QUAN TỚI CHÚNG TA. Lời mời do chính tài khoản này gửi
+// đi (fromUid === ownUid) không được coi là lời mời đến — nhầm chỗ này sẽ khiến
+// hệ thống tự chấp nhận lời mời của chính mình.
+// ---------------------------------------------------------------------------
+function mapFriendEvent(event, ownUid) {
+    if (!event || typeof event !== "object") return null;
+    const self = ownUid == null || ownUid === "" ? null : String(ownUid);
+    const data = event.data;
+
+    const uidOf = (value) => {
+        const text = value == null ? "" : String(value).trim();
+        return text || null;
+    };
+
+    switch (event.type) {
+        case FriendEventType.REQUEST: {
+            if (!data || typeof data !== "object") return null;
+            const fromUid = uidOf(data.fromUid);
+            const toUid = uidOf(data.toUid);
+            if (!fromUid) return null;
+            if (toUid && fromUid === toUid) return null;              // dữ liệu vô nghĩa
+            if (self && toUid && toUid !== self) return null;          // không phải gửi cho ta
+            return {
+                type: "request",
+                userId: fromUid,
+                message: typeof data.message === "string" ? data.message : null,
+                source: data.src ?? null
+            };
+        }
+        case FriendEventType.UNDO_REQUEST:
+        case FriendEventType.REJECT_REQUEST: {
+            if (!data || typeof data !== "object") return null;
+            const fromUid = uidOf(data.fromUid);
+            const toUid = uidOf(data.toUid);
+            if (!fromUid) return null;
+            if (self && toUid && toUid !== self) return null;
+            return {
+                type: event.type === FriendEventType.UNDO_REQUEST ? "withdrawn" : "rejected",
+                userId: fromUid
+            };
+        }
+        case FriendEventType.ADD:
+        case FriendEventType.REMOVE: {
+            // data là chính uid dạng chuỗi.
+            const userId = uidOf(data);
+            if (!userId) return null;
+            return { type: event.type === FriendEventType.ADD ? "friend_added" : "friend_removed", userId };
+        }
+        default:
+            // BLOCK/UNBLOCK/PIN/SEEN... không liên quan tới lời mời kết bạn.
+            return null;
+    }
+}
+
+// recommTime của Zalo có thể là giây hoặc mili giây tuỳ phiên bản; nhận cả hai
+// thay vì đoán, và trả null khi không đọc được.
+function toIsoFromEpoch(value) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed <= 0) return null;
+    const ms = parsed > 1e12 ? parsed : parsed * 1000;
+    const date = new Date(ms);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+// Một mục trong getFriendRecommendations → dạng nội bộ.
+//
+// Chỉ recommType === ReceivedFriendRequest mới là LỜI MỜI ĐẾN. Các mục còn lại
+// là gợi ý kết bạn — coi chúng là lời mời đang chờ sẽ khiến hệ thống chấp nhận
+// những người chưa hề gửi lời mời nào.
+function normalizeRecommendation(item) {
+    const info = item?.dataInfo || item;
+    const userId = info?.userId == null ? "" : String(info.userId).trim();
+    if (!userId) return null;
+    return {
+        userId,
+        displayName: info.displayName || info.zaloName || null,
+        avatar: info.avatar || null,
+        message: info.recommInfo?.message || info.recommInfo?.customText || null,
+        requestedAt: toIsoFromEpoch(info.recommTime),
+        // Giữ lại để nơi gọi có thể kiểm tra thêm nếu cần.
+        recommType: Number(info.recommType)
+    };
+}
+
+// Phản hồi getFriendRequestStatus → dạng đọc được.
+//
+// Ý nghĩa các cờ (theo tài liệu zca-js): is_friend = đã là bạn; is_requested =
+// NGƯỜI KIA đã gửi lời mời cho ta; is_requesting = TA đã gửi lời mời cho họ.
+// Chỉ is_requested mới là lời mời đang chờ ĐẾN ta.
+function normalizeRequestStatus(raw) {
+    const source = raw && typeof raw === "object" ? raw : {};
+    const flag = (value) => Number(value) === 1;
+    return {
+        isFriend: flag(source.is_friend),
+        incomingRequest: flag(source.is_requested),
+        outgoingRequest: flag(source.is_requesting),
+        seen: Boolean(source.isSeenFriendReq),
+        raw: source
+    };
+}
+
 function createZcaProvider(options = {}) {
     const {
         enabled = false,
@@ -55,6 +169,12 @@ function createZcaProvider(options = {}) {
         autoReconnect = true,
         language = "vi",
         onMessage = null,
+        // Sự kiện kết bạn (đã chuyển sang dạng nội bộ). Lỗi trong handler KHÔNG
+        // được làm chết listener — cùng nguyên tắc với onMessage.
+        onFriendEvent = null,
+        // Gọi sau mỗi lần kết nối lại thành công. Dùng để đồng bộ lời mời kết bạn
+        // ngay khi phiên sống lại, thay vì chờ nhịp đồng bộ định kỳ.
+        onConnected = null,
         maxReconnectAttempts = 10
     } = options;
 
@@ -86,6 +206,8 @@ function createZcaProvider(options = {}) {
         lastErrorAt: null,
         reconnectAttempts: 0,
         sessionPresent: false,
+        // Lần cuối nhận được sự kiện kết bạn. Chỉ để chẩn đoán trên dashboard.
+        lastFriendEventAt: null,
 
         // QR chỉ giữ trong bộ nhớ, không ghi ra đĩa.
         qr: null,
@@ -162,6 +284,17 @@ function createZcaProvider(options = {}) {
             provider.lastConnectedAt = new Date().toISOString();
             provider.reconnectAttempts = 0;
             setStatus(ZCA_STATUS.CONNECTED);
+            // Đồng bộ lời mời kết bạn sau khi kết nối lại: những lời mời đến trong
+            // lúc mất kết nối không có sự kiện nào để bắt, nên phải đọc lại.
+            if (typeof onConnected === "function") {
+                try {
+                    Promise.resolve(onConnected(provider)).catch((error) => {
+                        log("warn", `đồng bộ sau khi kết nối thất bại: ${error.message}`);
+                    });
+                } catch (error) {
+                    log("warn", `đồng bộ sau khi kết nối thất bại: ${error.message}`);
+                }
+            }
         });
 
         const onDisconnect = (code, reason) => {
@@ -214,6 +347,26 @@ function createZcaProvider(options = {}) {
                 log("error", `lỗi xử lý tin nhắn: ${error.message}`);
             }
         });
+
+        // Sự kiện kết bạn. Chỉ đăng ký khi listener hỗ trợ — bản zca-js cũ không
+        // có sự kiện này, và khi đó vòng đồng bộ định kỳ là đường duy nhất.
+        if (typeof listener.on === "function") {
+            listener.on("friend_event", (event) => {
+                try {
+                    const mapped = mapFriendEvent(event, provider.ownUid);
+                    if (!mapped) return;
+                    provider.lastFriendEventAt = new Date().toISOString();
+                    if (typeof onFriendEvent !== "function") return;
+                    Promise.resolve(onFriendEvent(provider, mapped)).catch((error) => {
+                        recordError(error);
+                        log("error", `lỗi xử lý sự kiện kết bạn: ${error.message}`);
+                    });
+                } catch (error) {
+                    recordError(error);
+                    log("error", `lỗi đọc sự kiện kết bạn: ${error.message}`);
+                }
+            });
+        }
 
         // retryOnClose là cơ chế thử lại CÓ SẴN của zca-js; dùng nó thay vì tự
         // phát minh vòng lặp kết nối.
@@ -521,6 +674,85 @@ function createZcaProvider(options = {}) {
     // Cho phép nơi khác (kiểm thử, chẩn đoán) xem trước payload mà không gửi.
     provider.renderMessage = (text) => renderZcaRichText(String(text));
 
+    // ------------------------------------------------------------------
+    // Lời mời kết bạn — chỉ có nghĩa với tài khoản Zalo CÁ NHÂN.
+    //
+    // Đây là đường DUY NHẤT gọi API kết bạn của zca-js. Tầng nghiệp vụ
+    // (friendRequestService.js) không giữ tham chiếu tới api, nhờ vậy không có
+    // đường thứ hai vô tình gọi thẳng vào phiên Zalo.
+    // ------------------------------------------------------------------
+    provider.supportsFriendRequests = true;
+
+    function assertApi(operation) {
+        if (!provider.api) {
+            const error = new Error(`ZCA chưa đăng nhập nên không ${operation} được`);
+            error.code = "zca_not_authenticated";
+            throw error;
+        }
+        return provider.api;
+    }
+
+    function apiMethod(name) {
+        const api = assertApi("gọi API kết bạn");
+        if (typeof api[name] !== "function") {
+            const error = new Error(`Bản zca-js đang cài không có api.${name}() nên không hỗ trợ thao tác này`);
+            error.code = "zca_api_unsupported";
+            throw error;
+        }
+        return api[name].bind(api);
+    }
+
+    provider.friendApi = {
+        // Danh sách lời mời ĐẾN đang chờ, theo getFriendRecommendations().
+        //
+        // Chỉ lọc recommType === ReceivedFriendRequest. Gợi ý kết bạn không phải
+        // lời mời và không bao giờ được đưa vào đây.
+        async listReceivedRequests() {
+            const response = await apiMethod("getFriendRecommendations")();
+            const items = Array.isArray(response?.recommItems) ? response.recommItems : [];
+            return items
+                .filter((item) => Number(item?.dataInfo?.recommType) === FriendRecommendationsType.ReceivedFriendRequest)
+                .map(normalizeRecommendation)
+                .filter((item) => item && item.userId !== provider.ownUid);
+        },
+
+        // Trạng thái quan hệ hiện tại. Đây là bước XÁC MINH bắt buộc trước khi
+        // chấp nhận: một lời mời có thể đã bị người kia huỷ trong lúc ta chờ.
+        async getStatus(userId) {
+            const target = String(userId == null ? "" : userId).trim();
+            if (!target) throw new Error("Thiếu userId để kiểm tra trạng thái kết bạn");
+            return normalizeRequestStatus(await apiMethod("getFriendRequestStatus")(target));
+        },
+
+        // Chấp nhận. zca-js trả chuỗi rỗng khi thành công và NÉM LỖI khi thất bại,
+        // nên "không ném" mới là bằng chứng thành công.
+        async accept(userId) {
+            const target = String(userId == null ? "" : userId).trim();
+            if (!target) throw new Error("Thiếu userId để chấp nhận lời mời");
+            await apiMethod("acceptFriendRequest")(target);
+            provider.lastActivityAt = new Date().toISOString();
+            return { ok: true, userId: target };
+        },
+
+        async reject(userId) {
+            const target = String(userId == null ? "" : userId).trim();
+            if (!target) throw new Error("Thiếu userId để từ chối lời mời");
+            await apiMethod("rejectFriendRequest")(target);
+            provider.lastActivityAt = new Date().toISOString();
+            return { ok: true, userId: target };
+        }
+    };
+
+    // Trạng thái sẵn sàng cho thao tác kết bạn — dashboard dùng để hiện cảnh báo
+    // thay vì để người dùng bấm nút rồi mới báo lỗi.
+    provider.friendRequestHealth = () => ({
+        supported: true,
+        authenticated: Boolean(provider.api) && provider.authenticated === true,
+        listenerConnected: provider.listenerConnected === true,
+        uid: provider.ownUid,
+        lastFriendEventAt: provider.lastFriendEventAt || null
+    });
+
     // Gửi tệp đính kèm qua tài khoản Zalo cá nhân.
     //
     // zca-js nhận tệp qua `attachments` của sendMessage, với nội dung là Buffer.
@@ -651,4 +883,13 @@ function createZcaProvider(options = {}) {
     return provider;
 }
 
-module.exports = { CLOSE_REASON_HINTS, ZCA_STATUS, createZcaProvider, describeCloseReason };
+module.exports = {
+    CLOSE_REASON_HINTS,
+    ZCA_STATUS,
+    createZcaProvider,
+    describeCloseReason,
+    mapFriendEvent,
+    normalizeRecommendation,
+    normalizeRequestStatus,
+    toIsoFromEpoch
+};

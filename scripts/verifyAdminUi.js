@@ -122,6 +122,26 @@ if (!app.includes('badge("Gửi lỗi"')) fail("Dashboard must show a delivery f
 if (!/feedbackSnippet[\s\S]{0,200}escapeHtml/.test(app)) fail("Feedback content must be escaped before rendering");
 if (!/escapeHtml\(item\.message\)/.test(app)) fail("Thread messages must be escaped before rendering");
 if (!app.includes("function renderBotGrid")) fail("Dashboard must show per-bot status");
+// Lời mời kết bạn ZCA: phải có tab, và quản trị viên KHÔNG bao giờ phải tự nhập
+// User ID để duyệt một lời mời đã có trong danh sách.
+if (!html.includes('data-tab="friendrequests"')) fail("Dashboard must expose a Friend Requests tab");
+if (!html.includes('data-panel="friendrequests"')) fail("Dashboard must render the friend request panel");
+if (!app.includes("function renderFriendRequests")) fail("Dashboard must render the friend request lists");
+if (!app.includes("data-fr-action")) fail("Each pending request must carry its own accept/reject action");
+if (!/friend-requests\/\$\{action\}/.test(app)) {
+    fail("Accept and reject must call the authenticated friend-request endpoints");
+}
+if (!/body: JSON\.stringify\(\{ requestId \}\)/.test(app)) {
+    fail("Accept/reject must send the requestId of the row that was clicked");
+}
+if (!app.includes("friendRequestChannelResult")) {
+    fail("Dashboard must show per-channel notification delivery, not one merged status");
+}
+if (!app.includes("friendRequestBanner")) fail("Dashboard must surface friend-request configuration problems");
+// Hai kênh thông báo phải bật/tắt độc lập — không được gộp thành một công tắc.
+if (!app.includes("friendRequestOfficialEnabled") || !app.includes("friendRequestZcaEnabled")) {
+    fail("Official bot and ZCA notification channels must be switchable independently");
+}
 // Chat/subscription vẫn phải gửi botId lên API khi thao tác; chỉ đổi cách gắn
 // trên HTML (data-record-bot) để mọi nút đi qua actionButton và bị chặn khi chưa
 // xác minh nguồn.
