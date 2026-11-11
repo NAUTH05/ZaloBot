@@ -1,42 +1,38 @@
 const crypto = require("crypto");
 const path = require("path");
-const { getApiDateTimeInfo, getVietnamDateInfo, getVietnamWeekdayForDateKey } = require("./timezone");
+const { getVietnamDateInfo, getVietnamWeekdayForDateKey } = require("./timezone");
 const { escapeMarkdown } = require("./richText");
+const { normalizeLesson: normalizeScheduleLesson } = require("./lhuSchedule");
 const { readJsonStore, writeJsonStore } = require("./firestorePersistence");
 
 const FILE_PATH = path.join(__dirname, "scheduleSnapshots.json");
-const SNAPSHOT_SCHEMA_VERSION = 2;
+const SNAPSHOT_SCHEMA_VERSION = 3;
 
 function text(value) {
     return value == null ? "" : String(value).trim();
 }
 
 function normalizeLesson(lesson) {
-    const start = getApiDateTimeInfo(lesson.ThoiGianBD);
-    const end = getApiDateTimeInfo(lesson.ThoiGianKT);
-    const groupId = text(lesson.NhomID);
-    const identity = groupId || [text(lesson.TenMonHoc), text(lesson.TenNhom)].join("|");
-    const startTime = start ? `${start.hour}:${start.minute}` : "";
-    const endTime = end ? `${end.hour}:${end.minute}` : "";
+    const normalized = normalizeScheduleLesson(lesson);
 
     return {
         // ID từ API chỉ là số thứ tự của kết quả và thay đổi khi lịch được sắp xếp lại.
         // NhomID + ngày/giờ mới là khóa ổn định cho từng buổi học.
-        key: [identity, start?.dateKey || "", startTime, endTime].join("|"),
-        identity,
-        groupId,
-        dateKey: start?.dateKey || "",
-        start: startTime,
-        end: endTime,
-        subject: text(lesson.TenMonHoc),
-        room: text(lesson.TenPhong),
-        campus: text(lesson.TenCoSo),
-        teacher: text(lesson.GiaoVien),
-        group: text(lesson.TenNhom),
-        status: Number(lesson.TinhTrang || 0),
-        calendarType: Number(lesson.CalenType || 1),
-        lessonType: Number(lesson.Type || 0),
-        onlineLink: text(lesson.OnlineLink)
+        key: [normalized.identity, normalized.dateKey, normalized.startTime, normalized.endTime].join("|"),
+        identity: normalized.identity,
+        groupId: normalized.groupId,
+        dateKey: normalized.dateKey,
+        start: normalized.startTime,
+        end: normalized.endTime,
+        subject: normalized.subject,
+        room: normalized.room,
+        campus: normalized.campus,
+        teacher: normalized.teacher,
+        group: normalized.group,
+        status: normalized.statusCode,
+        calendarType: normalized.calendarType,
+        lessonType: normalized.lessonTypeCode,
+        onlineLink: normalized.onlineLink
     };
 }
 
@@ -243,15 +239,16 @@ function confirmScheduleChange(scheduleData, date = new Date()) {
     return result;
 }
 
-function statusLabel(status) {
+function statusLabel(status, calendarType = 1) {
     if (status === 6) return "Nghỉ lễ";
     if (![0, 4, 5, 10].includes(status)) return "Báo nghỉ";
-    return "Đang học";
+    if (calendarType === 2) return "Lịch thi";
+    return "Theo lịch";
 }
 
 function formatDateKey(dateKey) {
     const [year, month, day] = text(dateKey).split("-");
-    return day ? `${day}/${month}/${year}` : "Chưa rõ ngày";
+    return day ? `${day}/${month}/${year}` : "Ngày chưa cập nhật";
 }
 
 function formatDateKeyWithWeekday(dateKey) {
@@ -261,23 +258,32 @@ function formatDateKeyWithWeekday(dateKey) {
 }
 
 function formatLocation(lesson) {
-    return [lesson.room, lesson.campus].filter(Boolean).join(" - ") || "Chưa xác định";
+    return [lesson.room, lesson.campus].filter(Boolean).join(" - ");
+}
+
+function formatTimeRange(start, end) {
+    if (start && end) return `${start} - ${end}`;
+    return start || end || "Chưa cập nhật";
 }
 
 function formatCompactLesson(lesson, index) {
     return [
-        `**${index + 1}. ${escapeMarkdown(lesson.subject || "Chưa rõ môn")}**`,
+        `**${index + 1}. ${escapeMarkdown(lesson.subject || "Buổi học")}**`,
         `> **Ngày:** ${formatDateKeyWithWeekday(lesson.dateKey)}`,
-        `> **Giờ:** ${escapeMarkdown(lesson.start || "?")} – ${escapeMarkdown(lesson.end || "?")}`,
-        `> **Phòng:** ${escapeMarkdown(formatLocation(lesson))}`,
+        `> **Thời gian:** ${escapeMarkdown(formatTimeRange(lesson.start, lesson.end))}`,
+        formatLocation(lesson) ? `> **Phòng:** ${escapeMarkdown(formatLocation(lesson))}` : "",
         lesson.teacher ? `> **Giảng viên:** ${escapeMarkdown(lesson.teacher)}` : "",
         lesson.group ? `> **Nhóm:** ${escapeMarkdown(lesson.group)}` : "",
-        `> **Trạng thái:** ${escapeMarkdown(statusLabel(lesson.status))}`
+        lesson.lessonType != null && lesson.calendarType !== 2
+            ? `> **Hình thức:** ${lesson.lessonType === 0 ? "Lý thuyết" : "Thực hành"}`
+            : "",
+        lesson.onlineLink ? `> **Trực tuyến:** ${escapeMarkdown(lesson.onlineLink)}` : "",
+        `> **Trạng thái:** ${escapeMarkdown(statusLabel(lesson.status, lesson.calendarType))}`
     ].filter(Boolean).join("\n");
 }
 
 function changedLine(label, before, after) {
-    return `> **${label}:** ~~${escapeMarkdown(before || "Chưa xác định")}~~ → **${escapeMarkdown(after || "Chưa xác định")}**`;
+    return `> **${label}:** ~~${escapeMarkdown(before || "Không có thông tin")}~~ → **${escapeMarkdown(after || "Không có thông tin")}**`;
 }
 
 function formatModifiedLesson(change, index) {
@@ -288,7 +294,7 @@ function formatModifiedLesson(change, index) {
         : "Thay đổi môn học";
     const currentSchedule = [
         formatDateKeyWithWeekday(after.dateKey),
-        after.start && after.end ? `${after.start} – ${after.end}` : after.start || after.end
+        formatTimeRange(after.start, after.end)
     ].filter(Boolean).join(" · ");
     const details = [
         `**${index + 1}. ${escapeMarkdown(title || "Buổi học")}**`,
@@ -301,8 +307,8 @@ function formatModifiedLesson(change, index) {
     if (before.start !== after.start || before.end !== after.end) {
         details.push(changedLine(
             "Giờ",
-            `${before.start || "?"} – ${before.end || "?"}`,
-            `${after.start || "?"} – ${after.end || "?"}`
+            formatTimeRange(before.start, before.end),
+            formatTimeRange(after.start, after.end)
         ));
     }
     if (before.room !== after.room || before.campus !== after.campus) {
@@ -310,8 +316,12 @@ function formatModifiedLesson(change, index) {
     }
     if (before.teacher !== after.teacher) details.push(changedLine("Giảng viên", before.teacher, after.teacher));
     if (before.group !== after.group) details.push(changedLine("Nhóm", before.group, after.group));
-    if (before.status !== after.status && statusLabel(before.status) !== statusLabel(after.status)) {
-        details.push(changedLine("Trạng thái", statusLabel(before.status), statusLabel(after.status)));
+    if (before.status !== after.status && statusLabel(before.status, before.calendarType) !== statusLabel(after.status, after.calendarType)) {
+        details.push(changedLine(
+            "Trạng thái",
+            statusLabel(before.status, before.calendarType),
+            statusLabel(after.status, after.calendarType)
+        ));
     }
     if (before.subject !== after.subject) details.push(changedLine("Môn", before.subject, after.subject));
     if (before.calendarType !== after.calendarType) {
@@ -329,7 +339,7 @@ function formatModifiedLesson(change, index) {
         ));
     }
     if (before.onlineLink !== after.onlineLink) {
-        details.push(changedLine("Link online", before.onlineLink, after.onlineLink));
+        details.push(changedLine("Trực tuyến", before.onlineLink, after.onlineLink));
     }
     return details.join("\n");
 }
@@ -338,31 +348,31 @@ function formatScheduleChangeMessage(scheduleData, changes, date = new Date()) {
     const now = getVietnamDateInfo(date);
     const totalChanges = changes.added.length + changes.removed.length + changes.modified.length;
     const sections = [
-        "# {orange}[!] LỊCH HỌC CÓ THAY ĐỔI{/orange}",
+        "# {orange}[LỊCH HỌC] CÓ THAY ĐỔI{/orange}",
         `**Sinh viên:** ${escapeMarkdown(scheduleData.studentName || "Sinh viên")}  •  **MSSV:** ${escapeMarkdown(scheduleData.studentId)}`,
         `**Xác nhận:** ${now.weekday}, ${now.formattedDate} lúc ${now.hour}:${now.minute}`,
-        `{orange}Tổng cộng ${totalChanges} thay đổi đã được xác nhận{/orange}`
+        `{orange}${totalChanges} thay đổi đã được xác nhận{/orange}`
     ];
 
     if (changes.added.length) {
         sections.push(
-            `## {green}[+] THÊM MỚI · ${changes.added.length}{/green}\n` +
+            `## {green}THÊM MỚI · ${changes.added.length}{/green}\n` +
             changes.added.map(formatCompactLesson).join("\n\n────────────\n\n")
         );
     }
     if (changes.removed.length) {
         sections.push(
-            `## {orange}[-] ĐÃ XÓA · ${changes.removed.length}{/orange}\n` +
+            `## {orange}ĐÃ XÓA · ${changes.removed.length}{/orange}\n` +
             changes.removed.map(formatCompactLesson).join("\n\n────────────\n\n")
         );
     }
     if (changes.modified.length) {
         sections.push(
-            `## {orange}[*] ĐIỀU CHỈNH · ${changes.modified.length}{/orange}\n` +
+            `## {orange}ĐIỀU CHỈNH · ${changes.modified.length}{/orange}\n` +
             changes.modified.map(formatModifiedLesson).join("\n\n────────────\n\n")
         );
     }
-    sections.push("> **[i]** Dùng **/lich** để xem hôm nay hoặc **/lichtuan** để xem cả tuần.");
+    sections.push("> Dùng **/lich** để xem hôm nay hoặc **/lichtuan** để xem cả tuần.");
     return sections.join("\n\n");
 }
 

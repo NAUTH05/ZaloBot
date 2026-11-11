@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { getAdminSettings, isConfiguredAdmin, removeAdmin, upsertAdmin } = require("../adminSettings");
+const { getAdminSettings, isConfiguredAdmin, removeAdmin, setDefaultPageSize, upsertAdmin } = require("../adminSettings");
 
 function temporaryFile(t) {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "zalobot-admin-settings-"));
@@ -19,4 +19,11 @@ test("admin settings support user/chat identity pairs and removal", (t) => {
     assert.equal(getAdminSettings(filePath).admins[0].displayName, "Owner");
     assert.equal(removeAdmin(record.userId, filePath).chatId, "c-1");
     assert.equal(getAdminSettings(filePath).admins.length, 0);
+});
+
+test("admin settings persist a validated default page size", (t) => {
+    const filePath = temporaryFile(t);
+    assert.equal(getAdminSettings(filePath).defaultPageSize, 25);
+    assert.equal(setDefaultPageSize(50, filePath).defaultPageSize, 50);
+    assert.throws(() => setDefaultPageSize(17, filePath));
 });

@@ -1,5 +1,8 @@
 const { getVietnamDateInfo } = require("./timezone");
 
+// Chính sách CŨ: chọn lịch hôm nay trước 20:00 và lịch hôm sau từ 20:00.
+// Từ khi mỗi mốc giờ tự chọn ngày đích, chính sách này chỉ còn dùng để suy ra
+// ngày đích cho những bản ghi CŨ chưa có trường targetDayOffset.
 const DAILY_CLASS_SCHEDULE_POLICY = Object.freeze({
     id: "daily-class",
     windows: Object.freeze([
@@ -7,6 +10,8 @@ const DAILY_CLASS_SCHEDULE_POLICY = Object.freeze({
         Object.freeze({ start: "20:00", end: "24:00", targetDayOffset: 1 })
     ])
 });
+
+const LEGACY_TARGET_DAY_CUTOFF = "20:00";
 
 function timeToMinutes(value) {
     const match = String(value || "").match(/^(\d{2}):(\d{2})$/);
@@ -16,6 +21,13 @@ function timeToMinutes(value) {
     if (hour === 24 && minute === 0) return 24 * 60;
     if (hour > 23 || minute > 59) return null;
     return hour * 60 + minute;
+}
+
+// Ngày đích mà chính sách cũ sẽ chọn cho một mốc giờ. Dùng cho di trú bản ghi cũ.
+function deriveLegacyTargetDayOffset(time) {
+    const minutes = timeToMinutes(time);
+    if (minutes == null) return 0;
+    return minutes >= timeToMinutes(LEGACY_TARGET_DAY_CUTOFF) ? 1 : 0;
 }
 
 function addCalendarDays(dateKey, days) {
@@ -52,8 +64,10 @@ function resolveScheduleTarget(deliveryAt = new Date(), policy = DAILY_CLASS_SCH
 
 module.exports = {
     DAILY_CLASS_SCHEDULE_POLICY,
+    LEGACY_TARGET_DAY_CUTOFF,
     addCalendarDays,
     dateFromVietnamDateKey,
+    deriveLegacyTargetDayOffset,
     resolveScheduleTarget,
     timeToMinutes
 };
