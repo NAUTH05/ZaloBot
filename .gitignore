@@ -31,6 +31,14 @@ recent_json/
 adminAudit.json
 adminLogs.json
 adminSettings.json
+# Lời mời kết bạn: chứa tên, User ID và lời nhắn thật của người dùng.
+friendRequests.json
+friendRequests.json.tmp
+friendRequestSettings.json
+friendRequestSettings.json.tmp
+# Chính sách nhận tin theo nhóm (chatId thật).
+groupPolicy.json
+groupPolicy.json.tmp
 
 # Sao lưu cục bộ do scripts/migrateNotificationTargetDays.js và
 # scripts/cleanupBirthdayData.js ghi ra trước khi thay đổi dữ liệu.

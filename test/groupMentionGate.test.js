@@ -246,16 +246,31 @@ test("NHÓM không tag: bot KHÔNG gửi gì cả", async (t) => {
     assert.equal(fake.writes.count, writesBefore, "tin bị bỏ qua không được ghi dữ liệu");
 });
 
-test("NHÓM có tag: bot trả lời đúng một lần", async (t) => {
+test("NHÓM có tag nhưng tin KHÔNG phải lệnh: KHÔNG gửi lời chào", async (t) => {
     clearBots();
     t.after(() => clearBots());
     const bot = officialWithRecorder("bot1", "Alessandra");
     registerBots([bot]);
 
+    // Bài này TRƯỚC ĐÂY kỳ vọng đúng 1 tin gửi đi — và tin đó chính là lời chào.
+    // Đó là hành vi sai: lời chào trong nhóm phát cho toàn bộ thành viên, và vì
+    // cổng tiếp nhận chỉ nằm trong bộ nhớ nên nó lặp lại sau mỗi lần khởi động.
+    // Lời chào chỉ có nghĩa trong cuộc trò chuyện riêng.
     await runWithBot(bot, () => main.handleIncomingMessage(bot, groupMessage("@Alessandra lịch mai thế nào")));
 
-    assert.equal(bot.sent.length, 1, "được tag thì phải trả lời");
-    assert.equal(bot.sent[0].chatId, "group-1", "trả lời trong NHÓM, không phải người gửi");
+    assert.equal(bot.sent.length, 0, "không được chào tự động trong nhóm");
+});
+
+test("NHÓM có tag + LỆNH: vẫn trả lời trong nhóm", async (t) => {
+    clearBots();
+    t.after(() => clearBots());
+    const bot = officialWithRecorder("bot1", "Alessandra");
+    registerBots([bot]);
+
+    await runWithBot(bot, () => main.handleIncomingMessage(bot, groupMessage("@Alessandra /help")));
+
+    assert.ok(bot.sent.length >= 1, "lệnh phải được đáp");
+    assert.ok(bot.sent.every((item) => item.chatId === "group-1"), "trả lời trong NHÓM, không phải người gửi");
 });
 
 test("NHÓM tag người khác: bot vẫn im lặng", async (t) => {

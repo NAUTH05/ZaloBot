@@ -428,11 +428,54 @@ function renderUsers() {
   $$('[data-user]').forEach((button) => button.addEventListener("click", () => openUser(button.dataset.user, button.dataset.userBot)));
 }
 
+// Bộ chọn chế độ nhận tin của MỘT nhóm.
+//
+// Vì sao cần: nhóm lớp phải giữ "chỉ khi được gọi" (nếu không bot trả lời mọi tin),
+// còn nhóm hỗ trợ cần "nhận mọi tin" để quản trị viên đọc và trả lời tay trong Chat
+// Center. Một công tắc toàn cục (GROUP_MENTION_ONLY) không diễn đạt được sự khác
+// nhau đó — nó biến MỌI nhóm thành nhóm hỗ trợ.
+function groupReplyModeControl(group) {
+  const mode = group.replyMode === "ingest" ? "ingest" : "mention";
+  const botId = recordBotId(group) || "";
+  return `<label class="group-reply-mode">Nhận tin
+      <select data-group-chat="${escapeHtml(group.chatId)}" data-group-bot="${escapeHtml(botId)}" data-group-previous="${mode}">
+        <option value="mention"${mode === "mention" ? " selected" : ""}>Chỉ khi được gọi</option>
+        <option value="ingest"${mode === "ingest" ? " selected" : ""}>Mọi tin (để hỗ trợ)</option>
+      </select>
+    </label>`;
+}
+
+async function setGroupReplyMode(botId, chatId, mode) {
+  const outcome = await runAction(
+    () => api("/api/admin/group-policy", { method: "POST", body: JSON.stringify({ botId, chatId, mode }) }),
+    "Không đổi được chế độ nhận tin của nhóm"
+  );
+  if (!outcome.ok) return outcome;
+  await loadData();
+  setDataState(
+    "success",
+    mode === "ingest"
+      ? "Đã bật nhận mọi tin cho nhóm này. Bot KHÔNG tự trả lời tin thường và KHÔNG gửi lời chào — tin chỉ được ghi vào Chat Center để bạn trả lời tay."
+      : "Nhóm này chỉ phản hồi khi được gọi (tag) hoặc khi có lệnh /..."
+  );
+  return outcome;
+}
+
 function renderGroups() {
   const query = $("#groupSearch").value.trim().toLowerCase();
   const groups = filterByBot(workspace.groups).filter((group) => JSON.stringify(group).toLowerCase().includes(query));
-  $("#groupCards").innerHTML = groups.map((group) => `<article class="group-card"><div class="card-heading"><div><span class="eyebrow">${escapeHtml(group.typeSource)}</span><h2>${escapeHtml(group.displayName)}</h2><code>${escapeHtml(group.chatId)}</code> <span class="bot-chip">${escapeHtml(botLabel(recordBotId(group)))}</span></div>${badge(group.status, statusTone(group.status))}</div><div class="group-stats"><span><strong>${group.memberCount}</strong> thành viên</span><span><strong>${group.studentIds.length}</strong> MSSV</span><span><strong>${group.enabledSubscriptionCount}</strong> đang nhận lịch</span></div><div class="member-preview">${group.members.slice(0, 6).map((member) => `<div><strong>${escapeHtml(member.displayName)}</strong><small>${escapeHtml(member.studentIds.join(", ") || "Chưa có MSSV")}</small></div>`).join("") || `<span class="muted">Chưa có dữ liệu thành viên</span>`}</div>${actionButton("data-chat-detail", group.chatId, recordBotId(group), group, "Xem toàn bộ nhóm", "secondary full")}</article>`).join("") || `<div class="empty-state panel">Không có nhóm phù hợp.</div>`;
+  $("#groupCards").innerHTML = groups.map((group) => `<article class="group-card"><div class="card-heading"><div><span class="eyebrow">${escapeHtml(group.typeSource)}</span><h2>${escapeHtml(group.displayName)}</h2><code>${escapeHtml(group.chatId)}</code> <span class="bot-chip">${escapeHtml(botLabel(recordBotId(group)))}</span></div>${badge(group.status, statusTone(group.status))}</div><div class="group-stats"><span><strong>${group.memberCount}</strong> thành viên</span><span><strong>${group.studentIds.length}</strong> MSSV</span><span><strong>${group.enabledSubscriptionCount}</strong> đang nhận lịch</span></div><div class="member-preview">${group.members.slice(0, 6).map((member) => `<div><strong>${escapeHtml(member.displayName)}</strong><small>${escapeHtml(member.studentIds.join(", ") || "Chưa có MSSV")}</small></div>`).join("") || `<span class="muted">Chưa có dữ liệu thành viên</span>`}</div>${groupReplyModeControl(group)}${actionButton("data-chat-detail", group.chatId, recordBotId(group), group, "Xem toàn bộ nhóm", "secondary full")}</article>`).join("") || `<div class="empty-state panel">Không có nhóm phù hợp.</div>`;
   $$('#groupCards [data-chat-detail]').forEach((button) => button.addEventListener("click", () => openChat(button.dataset.chatDetail, button.dataset.chatBot)));
+  $$('#groupCards [data-group-chat]').forEach((select) => select.addEventListener("change", async (event) => {
+    // Giữ nguyên lựa chọn cũ khi lưu thất bại: ô chọn không được hiển thị một
+    // trạng thái mà máy chủ chưa chấp nhận.
+    const previous = event.target.dataset.groupPrevious || "mention";
+    event.target.disabled = true;
+    const outcome = await setGroupReplyMode(event.target.dataset.groupBot, event.target.dataset.groupChat, event.target.value);
+    event.target.disabled = false;
+    if (!outcome.ok) event.target.value = previous;
+    else event.target.dataset.groupPrevious = event.target.value;
+  }));
 }
 
 function renderDirectory() {
@@ -1202,6 +1245,18 @@ $("#loginForm").addEventListener("submit", async (event) => { event.preventDefau
 $("#logoutButton").addEventListener("click", async () => { await api("/api/admin/auth/logout", { method: "POST" }); showAuthenticated(false); });
 $("#refreshButton").addEventListener("click", loadData);
 // Đổi bộ lọc bot: vẽ lại danh sách theo bot đã chọn.
+$("#groupPolicySave")?.addEventListener("click", async () => {
+  const chatId = ($("#groupPolicyChatId")?.value || "").trim();
+  const mode = $("#groupPolicyMode")?.value || "ingest";
+  // Phải biết áp dụng cho BOT nào: cùng một chatId ở hai bot là hai nhóm khác nhau.
+  const botId = activeBotFilter();
+  if (!chatId) return setDataState("error", "Nhập Chat ID của nhóm cần áp dụng.");
+  if (botId === "all" || botId === UNVERIFIED_BOT_ID) {
+    return setDataState("error", "Chọn một bot cụ thể ở bộ lọc phía trên trước khi áp dụng cho Chat ID nhập tay.");
+  }
+  await setGroupReplyMode(botId, chatId, mode);
+});
+
 $("#botFilter").addEventListener("change", () => { if (workspace) renderAll(); }); $("#themeToggle").addEventListener("click", () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
 $("#closeDialog").addEventListener("click", () => $("#detailDialog").close());
 const rerender = (fn, key) => { pageState[key] = { ...(pageState[key] || {}), page: 1 }; fn(); applyPaginationViews(); };

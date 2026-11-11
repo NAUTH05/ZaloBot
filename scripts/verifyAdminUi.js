@@ -138,6 +138,19 @@ if (!app.includes("friendRequestChannelResult")) {
     fail("Dashboard must show per-channel notification delivery, not one merged status");
 }
 if (!app.includes("friendRequestBanner")) fail("Dashboard must surface friend-request configuration problems");
+// Nhóm hỗ trợ: phải chọn được chế độ nhận tin theo TỪNG nhóm, nếu không chỉ còn
+// cách mở cổng toàn cục (GROUP_MENTION_ONLY=0) — cách đó biến mọi nhóm thành nhóm
+// hỗ trợ và kéo theo lời chào tự động.
+if (!app.includes("/api/admin/group-policy")) {
+    fail("Groups panel must be able to set the per-group reply mode");
+}
+if (!app.includes("data-group-chat")) {
+    fail("Each group card must expose its own reply-mode control");
+}
+if (!html.includes("groupPolicyChatId")) {
+    fail("Groups panel must allow setting the mode for a chat id that is not listed yet");
+}
+
 // Cổng "chưa xác minh nguồn" phải mở được đường xác minh trong giao diện.
 if (!app.includes("data-open-verify")) {
     fail("The unverified-source dialog must offer an in-UI way to verify the record, not only a CLI hint");

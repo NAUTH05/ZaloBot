@@ -57,6 +57,7 @@ All endpoints below require the HttpOnly `zalobot_admin` session cookie except l
 | `POST /zalobot/api/admin/friend-requests/settings` | Update handling mode, safety limits, notification channels, welcome message |
 | `POST /zalobot/api/admin/friend-requests/test-notification` | Send a test notification on one channel |
 | `POST /zalobot/api/admin/friend-requests/retry-notification` | Retry only the failed channel of one request |
+| `POST /zalobot/api/admin/group-policy` | Per-group reply mode: `{ botId, chatId, mode }` where `mode` is `mention` or `ingest`; `null` clears the override |
 
 State-changing requests require same-origin `Origin` headers when a browser supplies one. The server also applies security headers, request-size limits, and a basic IP rate limit.
 
@@ -406,3 +407,50 @@ Then:
   Both paths are used for exactly this reason.
 - If the ZCA session is disconnected, actions return `account_offline` and the request
   stays pending — nothing is marked failed and nothing is auto-accepted.
+
+
+# Group replies (support groups)
+
+By default the bot **ignores untagged group messages**. That is correct for a class
+group — otherwise every casual message triggers a reply — but wrong for a **support
+group**, where the administrator needs to see what members wrote in order to help.
+
+The reply mode is therefore set **per group**, not per bot:
+
+| Mode | Behaviour |
+| --- | --- |
+| `mention` (default) | Only tagged messages and `/...` commands are processed. Everything else is dropped before it is recorded. |
+| `ingest` | Every message is recorded into Chat Center so an administrator can read it and answer manually. The bot still does **not** answer plain text — only commands. |
+
+Set it on the **Groups** tab (each card has a *Nhận tin* selector), or paste a chat id
+into the field next to the search box when the group is not listed yet. Stored in
+`groupPolicy.json`, keyed `botId::chatId` — the same chat id on two bots is two
+different groups.
+
+`POST /zalobot/api/admin/group-policy` accepts `{ botId, chatId, mode }`; `mode: null`
+removes the override. Unknown modes are rejected rather than silently coerced, and the
+scope is validated so an incomplete payload cannot write a meaningless key.
+
+## The bot never sends a greeting in a group
+
+This is a hard rule, not a setting. Two reasons:
+
+- A greeting in a group is broadcast to **every** member, not to the person who spoke.
+- The admission gate that decides "already greeted?" lives in memory and is lost on
+  restart, so the greeting would repeat after every deploy.
+
+The greeting branch is therefore skipped for every group chat, in every mode. Direct
+chats keep the existing behaviour.
+
+Two related automatic replies are also suppressed for untagged group messages in
+`ingest` mode: the "no permission" warning and the invalid-command hint. Without that,
+each ordinary message from a member would emit a notice to the whole group.
+
+If you ever want the bot to actually **answer** plain text in a group, that is a
+different feature (an AI reply path) and is deliberately not part of this: `ingest`
+only makes the bot a listener.
+
+## Why not `GROUP_MENTION_ONLY=0`
+
+That switch turns the gate off for **all** groups at once, which is why it also
+produces the greeting storm. Keep it at `1` and use the per-group selector.

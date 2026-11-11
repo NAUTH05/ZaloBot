@@ -38,6 +38,8 @@ const {
     upsertAdmin
 } = require("./adminSettings");
 const { findCommand, getCommandRegistry } = require("./commandRegistry");
+// Chính sách phản hồi theo từng nhóm (nhóm hỗ trợ cần nhận mọi tin).
+const groupPolicy = require("./groupPolicy");
 const { TARGETING, normalizeCommandName, resolveCommandTargeting } = require("./commandTargeting");
 const {
     deleteSubscription,
@@ -1601,6 +1603,28 @@ async function handleApi(request, response, url, options = {}) {
         const users = buildTargetUserOptions(buildAdminData())
             .filter((user) => botId === "all" || recordBotId(user) === botId);
         return json(response, 200, { users, botId });
+    }
+    if (url.pathname === `${API_PREFIX}/group-policy` && request.method === "POST") {
+        let body;
+        try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
+        try {
+            const result = groupPolicy.setChatMode({
+                botId: body?.botId,
+                chatId: body?.chatId,
+                // mode rỗng/null = bỏ ghi đè, quay về mặc định.
+                mode: body?.mode == null ? null : body.mode
+            });
+            audit("group_policy.set", request, {
+                result: "success",
+                botId: String(body?.botId || ""),
+                chatId: String(body?.chatId || ""),
+                mode: result.mode,
+                override: result.override
+            });
+            return json(response, 200, { ok: true, ...result });
+        } catch (error) {
+            return json(response, 400, { error: error.message });
+        }
     }
     if (url.pathname === `${API_PREFIX}/settings/admins` && ["POST", "PATCH"].includes(request.method)) {
         let body;

@@ -1762,3 +1762,28 @@ button[disabled] {
     .segmented { width: 100%; }
     .segmented button { flex: 1; text-align: center; }
 }
+
+/* ---------------------------------------------------------------------------
+   Chế độ nhận tin theo từng nhóm
+   --------------------------------------------------------------------------- */
+
+.group-reply-mode {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: var(--fs-sm);
+    color: var(--text-soft);
+    margin: 10px 0 8px;
+}
+
+.group-reply-mode select {
+    flex: 1;
+    min-width: 0;
+}
+
+/* Cảnh báo cấu hình trong trang Groups: chữ nhỏ, không chiếm chỗ của danh sách. */
+.tab-panel[data-panel="groups"] > p.muted.small {
+    margin: 0 0 12px;
+    font-size: var(--fs-xs);
+    line-height: 1.5;
+}

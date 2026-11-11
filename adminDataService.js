@@ -7,6 +7,8 @@ const { parseScopedKey, normalizeBotId, storageKeyPrefix, LEGACY_BOT_ID } = requ
 const { readJsonStore } = require("./firestorePersistence");
 const { SOURCE_CONFIDENCE, isVerifiedConfidence, resolveRecordSource, scopedIdentityKey } = require("./sourceAttribution");
 const { getActiveVerifications } = require("./sourceVerifications");
+// Chính sách phản hồi theo nhóm: dashboard cần biết nhóm nào đang "nhận mọi tin".
+const groupPolicy = require("./groupPolicy");
 
 // Dấu hiệu nhóm chưa xác minh trong khóa gộp. Phải trùng với sourceAttribution.
 const UNVERIFIED_KEY_MARKER = "__unverified__";
@@ -465,8 +467,19 @@ function buildAdminData() {
         user.status = user.chats.some((item) => item.memberStatus === "active") ? "active" : (user.chats.some((item) => item.memberStatus === "disabled") ? "disabled" : "removed");
     }
 
+    // Chế độ nhận tin của từng nhóm. Đọc policy MỘT lần cho cả lượt dựng dữ liệu
+    // thay vì đọc lại cho từng nhóm.
+    const policy = groupPolicy.readPolicy();
+    const replyModeOf = (botId, chatId) => {
+        const key = groupPolicy.scopeChatKey(botId, chatId);
+        return (key && policy.chats[key]?.mode) || policy.defaultMode;
+    };
+
     const groups = chats.filter((chat) => chat.chatType === "group").map((chat) => ({
         ...chat,
+        // "mention" = chỉ khi được gọi; "ingest" = nhận mọi tin để quản trị viên
+        // đọc và trả lời tay trong Chat Center.
+        replyMode: replyModeOf(chat.botId, chat.chatId),
         members: [...users.values()]
             .filter((user) => user.botId === chat.botId && user.chats.some((item) => item.chatId === chat.chatId))
             .map((user) => ({

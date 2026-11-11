@@ -129,7 +129,9 @@ const {
 } = require("./accessControl");
 const { askScheduleAi } = require("./aiAssistant");
 // Cổng nhóm: trong nhóm chỉ phản hồi khi được nhắc tới (hoặc khi có lệnh "/...").
-const { groupReplyOptionsFromEnv, resolveGroupReplyDecision } = require("./groupMentions");
+const { groupReplyOptionsFromEnv, isGroupChat, resolveGroupReplyDecision } = require("./groupMentions");
+// Chính sách theo TỪNG nhóm: nhóm hỗ trợ có thể bật chế độ nhận mọi tin.
+const groupPolicy = require("./groupPolicy");
 const { flushPersistenceWrites, initializeFirestorePersistence } = require("./firestorePersistence");
 const { getCommandRegistry } = require("./commandRegistry");
 const { createAdminServer, BASE_PATH } = require("./adminServer");
@@ -3233,6 +3235,7 @@ async function startRuntime() {
                 "chatDirectory",
                 "friendRequestSettings",
                 "friendRequests",
+                "groupPolicy",
                 "interactions",
                 "classStartNotifications",
                 "scheduleSnapshots",
@@ -3477,22 +3480,44 @@ async function handleIncomingMessage(runtime, msg) {
     // CỔNG NHÓM.
     //
     // Bot nhận được MỌI tin nhắn của nhóm mà nó tham gia, kể cả khi không ai gọi
-    // nó. Trước đây mỗi tin như vậy lại đi tiếp vào nhánh chào mừng, nên bot phản
-    // hồi cả nhóm. Nay tin nhắn không nhắc tới bot bị bỏ qua tại đây: không trả
-    // lời, không chào, không ghi sổ tương tác.
+    // nó. Với nhóm lớp, mỗi tin như vậy trước đây lại đi tiếp vào nhánh chào mừng
+    // nên bot phản hồi cả nhóm — vì thế mặc định vẫn bỏ qua tin không nhắc tới bot.
+    //
+    // Nhưng nhóm HỖ TRỢ cần điều ngược lại: quản trị viên phải thấy tin của thành
+    // viên trong Chat Center mới hỗ trợ được. Chính sách theo TỪNG nhóm
+    // (groupPolicy) cho phép bật "nhận mọi tin" cho đúng nhóm đó — thay vì mở cổng
+    // cho toàn bộ bot bằng GROUP_MENTION_ONLY=0, cách đó biến mọi nhóm thành nhóm
+    // hỗ trợ.
     //
     // Chạy TRƯỚC cổng tiếp nhận để tin bị bỏ qua không để lại dấu vết nào.
+    const isGroup = isGroupChat(msg);
+    const groupMode = isGroup ? groupPolicy.getChatMode({ botId, chatId: context.chatId }) : null;
     const groupDecision = resolveGroupReplyDecision({
         msg,
         runtime,
         text: msg.text || "",
-        options: GROUP_REPLY_OPTIONS
+        options: {
+            ...GROUP_REPLY_OPTIONS,
+            // Chỉ hạ yêu cầu tag khi CHÍNH nhóm này được bật "nhận mọi tin".
+            requireMention: GROUP_REPLY_OPTIONS.requireMention && !groupPolicy.allowsUntagged(groupMode)
+        }
     });
     if (!groupDecision.respond) {
         // Một dòng ngắn thay cho hai dòng log của tin được xử lý: nhóm lớp có thể
         // rất nhiều tin, và tin bị bỏ qua thì không có gì để chẩn đoán thêm.
         console.log(`[Nhóm] bỏ qua tin không nhắc tới bot (${groupDecision.reason}) · ${botId}/${context.chatId}`);
         return;
+    }
+
+    // Tin này có thực sự NHẮM tới bot không (được tag, hoặc là lệnh "/...").
+    //
+    // Cần thiết vì ở chế độ "nhận mọi tin", mỗi câu nói bình thường của thành viên
+    // cũng đi tiếp. Nếu không phân biệt, các câu trả lời tự động (từ chối quyền,
+    // lời chào) sẽ phát cho CẢ NHÓM ở mọi tin — đúng kiểu spam mà cổng nhóm sinh
+    // ra để chặn.
+    const addressedToBot = !groupDecision.isGroup || groupDecision.mentioned || groupDecision.isCommand;
+    if (groupDecision.isGroup && !addressedToBot) {
+        console.log(`[Nhóm] nhận tin để hỗ trợ (${groupMode}) · ${botId}/${context.chatId}`);
     }
     // Nội dung đã bỏ phần tag, để "@Tên /help" vẫn phân tích thành lệnh /help.
     const effectiveText = groupDecision.text;
@@ -3518,8 +3543,12 @@ async function handleIncomingMessage(runtime, msg) {
             text: historyText,
             attachments: hasAttachments ? pendingDescriptors(inboundAttachments) : [],
             status: MSG_STATUS.DELIVERED,
-            source: context.chatType === "group" ? MSG_SOURCE.INBOUND_GROUP : MSG_SOURCE.INBOUND_USER,
-            chatType: context.chatType || null,
+            // `context` KHÔNG mang chatType (getMessageContext không trả trường này),
+            // nên trước đây MỌI tin nhóm đều được ghi là "inbound_user" và chatType
+            // null — Chat Center hiển thị nhóm như hội thoại riêng. Dùng kết quả cổng
+            // nhóm, thứ đã xác định loại chat một cách tường minh.
+            source: groupDecision.isGroup ? MSG_SOURCE.INBOUND_GROUP : MSG_SOURCE.INBOUND_USER,
+            chatType: groupDecision.isGroup ? "group" : null,
             displayName: from || null,
             providerMsgId: msg?.message_id || msg?.msgId || null,
             timestamp: msg?.date ? new Date(msg.date * 1000).toISOString() : null
@@ -3634,16 +3663,23 @@ async function handleIncomingMessage(runtime, msg) {
                     // Gửi lời từ chối. Nếu gửi được (hiếm) thì chat vẫn được tiếp
                     // nhận; nếu bị chặn thì không ghi gì. Không ném lỗi ra ngoài —
                     // handler tin nhắn không được làm chết vòng lặp polling.
-                    try {
-                        await sendMessage(
-                            context.chatId,
-                            formatWarningMessage(
-                                "KHÔNG CÓ QUYỀN TRUY CẬP",
-                                "> Tài khoản hoặc nhóm này hiện không có quyền sử dụng trợ lý."
-                            )
-                        );
-                    } catch (error) {
-                        logDiscord("ERROR", `access_denied_reply_failed: ${error.message}`);
+                    //
+                    // Chỉ gửi khi tin thật sự nhắm tới bot. Ở chế độ "nhận mọi tin"
+                    // của nhóm hỗ trợ, tin thường của thành viên cũng đi tới đây;
+                    // trả lời từng tin sẽ phát "KHÔNG CÓ QUYỀN TRUY CẬP" cho cả
+                    // nhóm ở mọi câu nói.
+                    if (addressedToBot) {
+                        try {
+                            await sendMessage(
+                                context.chatId,
+                                formatWarningMessage(
+                                    "KHÔNG CÓ QUYỀN TRUY CẬP",
+                                    "> Tài khoản hoặc nhóm này hiện không có quyền sử dụng trợ lý."
+                                )
+                            );
+                        } catch (error) {
+                            logDiscord("ERROR", `access_denied_reply_failed: ${error.message}`);
+                        }
                     }
                     await flushPersistenceWrites();
                     return;
@@ -3657,7 +3693,13 @@ async function handleIncomingMessage(runtime, msg) {
             //
             // Đây là "bằng chứng" rẻ nhất: lời chào cũng là một câu trả lời thật,
             // nên khi nó gửi được thì chat được tiếp nhận luôn — không cần tin "probe".
-            if (!parsed && !looksLikeCommand && !alreadyAdmitted) {
+            //
+            // TUYỆT ĐỐI KHÔNG chào trong nhóm. Lời chào là nghi thức mở đầu một
+            // cuộc trò chuyện riêng; trong nhóm nó phát cho toàn bộ thành viên, và
+            // vì cổng tiếp nhận là bộ nhớ tạm (mất khi restart) nên nó sẽ lặp lại
+            // sau mỗi lần khởi động. Đây chính là "bot gửi lời chào tự động" mà ta
+            // phải tránh — nên là quy tắc cứng, không phải tuỳ chọn.
+            if (!groupDecision.isGroup && !parsed && !looksLikeCommand && !alreadyAdmitted) {
                 try {
                     // Người vừa kết bạn đã nhận tin chào riêng lúc được chấp nhận.
                     // Không chào lại bằng nội dung mặc định — nội dung đó sẽ che mất
