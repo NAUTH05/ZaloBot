@@ -61,3 +61,8 @@ session.lock
 # Bộ nhớ cục bộ của trợ lý AI (nhật ký công việc, ghi chú dự án).
 # Không phải mã nguồn: không commit.
 .workbuddy-ai/
+
+# Sổ theo dõi chi phí/hạn mức và trạng thái thông báo của trợ lý AI.
+# Chứa khóa người dùng (botId::chatId::userId) nên không commit.
+aiAssistantState.json
+aiAssistantState.json.tmp

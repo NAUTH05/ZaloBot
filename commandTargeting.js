@@ -36,6 +36,7 @@ const PER_USER_COMMANDS = new Set([
     "xoagionhanlich",
     "tatnhanlich",
     "batnhaclich",
+    "nhactruoc",
     "tatnhaclich",
     "trangthainhaclich",
     "ai",

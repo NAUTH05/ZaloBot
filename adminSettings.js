@@ -11,6 +11,41 @@ const DEFAULT_BATCH_DELAY_MS = 350;
 const MAX_BATCH_SIZE_LIMIT = 100;
 const MAX_BATCH_DELAY_MS = 5000;
 
+// Hạn mức trợ lý AI do quản trị viên đặt từ dashboard.
+//
+// `null` = "theo .env". Nhờ vậy dashboard chỉ cần ghi cái người vận hành THẬT SỰ
+// muốn đổi; các giá trị còn lại vẫn đi theo biến môi trường và không bị đóng băng
+// vào dữ liệu. 0 = không giới hạn.
+const AI_LIMIT_RULES = Object.freeze({
+    perUserDailyLimit: { min: 0, max: 10000 },
+    globalDailyLimit: { min: 0, max: 1000000 },
+    monthlyBudgetUsd: { min: 0, max: 100000 }
+});
+
+function emptyAiSettings() {
+    return {
+        perUserDailyLimit: null,
+        globalDailyLimit: null,
+        monthlyBudgetUsd: null,
+        groupAssistant: null
+    };
+}
+
+// Đọc lại từ dữ liệu đã lưu. Giá trị hỏng/rác ⇒ null (theo .env), không đoán.
+function normalizeAiSettings(raw) {
+    const source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+    const ai = emptyAiSettings();
+    for (const [key, rule] of Object.entries(AI_LIMIT_RULES)) {
+        const value = source[key];
+        if (value === null || value === undefined || value === "") continue;
+        const number = Number(value);
+        if (!Number.isFinite(number) || number < rule.min || number > rule.max) continue;
+        ai[key] = key === "monthlyBudgetUsd" ? number : Math.trunc(number);
+    }
+    if (typeof source.groupAssistant === "boolean") ai.groupAssistant = source.groupAssistant;
+    return ai;
+}
+
 function nowIso() { return new Date().toISOString(); }
 
 function normalizeId(value) {
@@ -39,7 +74,7 @@ function normalizeAdmin(input = {}, existing = {}) {
 }
 
 function readSettings(filePath = FILE_PATH) {
-    const fallback = { schemaVersion: SCHEMA_VERSION, admins: [], defaultPageSize: DEFAULT_PAGE_SIZE, maxBatchSize: DEFAULT_MAX_BATCH_SIZE, batchDelayMs: DEFAULT_BATCH_DELAY_MS };
+    const fallback = { schemaVersion: SCHEMA_VERSION, admins: [], defaultPageSize: DEFAULT_PAGE_SIZE, maxBatchSize: DEFAULT_MAX_BATCH_SIZE, batchDelayMs: DEFAULT_BATCH_DELAY_MS, ai: emptyAiSettings() };
     const data = readJsonStore(filePath, FILE_PATH, fallback);
     const admins = Array.isArray(data?.admins) ? data.admins.map((item) => normalizeAdmin(item)).filter(Boolean) : [];
     const parsedPageSize = Number(data?.defaultPageSize);
@@ -52,7 +87,7 @@ function readSettings(filePath = FILE_PATH) {
     const batchDelayMs = Number.isInteger(parsedDelay) && parsedDelay >= 0 && parsedDelay <= MAX_BATCH_DELAY_MS
         ? parsedDelay
         : DEFAULT_BATCH_DELAY_MS;
-    return { schemaVersion: SCHEMA_VERSION, admins, defaultPageSize, maxBatchSize, batchDelayMs };
+    return { schemaVersion: SCHEMA_VERSION, admins, defaultPageSize, maxBatchSize, batchDelayMs, ai: normalizeAiSettings(data?.ai) };
 }
 
 function writeSettings(settings, filePath = FILE_PATH) {
@@ -61,7 +96,8 @@ function writeSettings(settings, filePath = FILE_PATH) {
         admins: settings.admins || [],
         defaultPageSize: settings.defaultPageSize || DEFAULT_PAGE_SIZE,
         maxBatchSize: settings.maxBatchSize || DEFAULT_MAX_BATCH_SIZE,
-        batchDelayMs: Number.isInteger(settings.batchDelayMs) ? settings.batchDelayMs : DEFAULT_BATCH_DELAY_MS
+        batchDelayMs: Number.isInteger(settings.batchDelayMs) ? settings.batchDelayMs : DEFAULT_BATCH_DELAY_MS,
+        ai: normalizeAiSettings(settings.ai)
     });
 }
 
@@ -150,17 +186,58 @@ function setBatchDelayMs(value, filePath = FILE_PATH) {
     return settings;
 }
 
+// Cập nhật hạn mức trợ lý AI. Chỉ ghi những trường có trong `patch`; trường còn
+// lại giữ nguyên. `null` = xoá thiết lập, quay về giá trị trong .env.
+//
+// Giá trị sai bị TỪ CHỐI (ném lỗi ⇒ 400) chứ không âm thầm bỏ qua: người vận hành
+// vừa bấm Lưu và cần biết nó có hiệu lực hay không.
+function setAiSettings(patch = {}, filePath = FILE_PATH) {
+    if (!patch || typeof patch !== "object" || Array.isArray(patch)) {
+        throw new Error("ai must be an object");
+    }
+    const settings = readSettings(filePath);
+    const next = { ...settings.ai };
+
+    for (const [key, rule] of Object.entries(AI_LIMIT_RULES)) {
+        if (patch[key] === undefined) continue;
+        if (patch[key] === null || patch[key] === "") {
+            next[key] = null;
+            continue;
+        }
+        const value = Number(patch[key]);
+        if (!Number.isFinite(value) || value < rule.min || value > rule.max) {
+            throw new Error(`${key} must be between ${rule.min} and ${rule.max}`);
+        }
+        next[key] = key === "monthlyBudgetUsd" ? value : Math.trunc(value);
+    }
+
+    if (patch.groupAssistant !== undefined) {
+        if (patch.groupAssistant !== null && typeof patch.groupAssistant !== "boolean") {
+            throw new Error("groupAssistant must be true, false, or null");
+        }
+        next.groupAssistant = patch.groupAssistant;
+    }
+
+    settings.ai = next;
+    writeSettings(settings, filePath);
+    return settings;
+}
+
 module.exports = {
+    AI_LIMIT_RULES,
     DEFAULT_BATCH_DELAY_MS,
     DEFAULT_MAX_BATCH_SIZE,
     DEFAULT_PAGE_SIZE,
     FILE_PATH,
     MAX_BATCH_DELAY_MS,
     MAX_BATCH_SIZE_LIMIT,
+    emptyAiSettings,
     getAdminSettings,
     getConfiguredAdminIds,
     isConfiguredAdmin,
+    normalizeAiSettings,
     removeAdmin,
+    setAiSettings,
     setBatchDelayMs,
     setDefaultPageSize,
     setMaxBatchSize,

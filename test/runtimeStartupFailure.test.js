@@ -26,6 +26,10 @@ test("thiếu file cấu hình Firebase thì dừng với mã lỗi và không c
         env: {
             ...process.env,
             NODE_ENV: "production",
+            // Ghim token để bài kiểm tra không phụ thuộc nội dung .env của máy
+            // đang chạy: nếu thiếu, lỗi cấu hình bot sẽ ném TRƯỚC khi tới bước
+            // Firebase và bài này sẽ báo sai nguyên nhân.
+            BOT_TOKEN: "test-token-startup-failure",
             FIREBASE_SERVICE_ACCOUNT_FILE: "./khong-ton-tai-firebase.json"
         }
     });
@@ -47,9 +51,66 @@ test("thiếu file cấu hình Firebase thì dừng với mã lỗi và không c
     assert.ok(!output.includes("[Runtime] Zalo polling started"), "polling không được khởi động");
 });
 
+// Không có danh tính nào chạy được (không token bot, ZCA tắt) ⇒ vẫn phải dừng.
+// Chạy tiếp chỉ tạo ra một tiến trình "đang chạy" mà không nhận được tin nào.
+test("không có token bot và ZCA tắt thì dừng với thông điệp rõ ràng", (t) => {
+    const result = spawnSync(process.execPath, ["main.js"], {
+        cwd: ROOT,
+        encoding: "utf8",
+        timeout: 60000,
+        env: {
+            ...process.env,
+            // Chuỗi toàn khoảng trắng: có mặt trong env nên dotenv KHÔNG ghi đè,
+            // nhưng resolveBotConfigs trim thành rỗng ⇒ coi như không có token.
+            BOT_TOKEN: "   ",
+            BOT_1_TOKEN: "   ",
+            ZCA_ENABLED: "false",
+            NODE_ENV: "production"
+        }
+    });
+
+    if (spawnBlocked(result)) {
+        t.skip(`Không spawn được tiến trình con trong môi trường này (${result.error.code}).`);
+        return;
+    }
+
+    const output = `${result.stdout || ""}${result.stderr || ""}`;
+    assert.equal(result.status, 1, `mã thoát phải là 1, nhận được ${result.status}\n${output}`);
+    assert.match(output, /Không có danh tính nào hoạt động/);
+    assert.ok(!output.includes("[Dashboard] Listening on"), "dashboard không được khởi động");
+});
+
+// Thiếu token bot 1 KHÔNG còn chặn khởi động khi ZCA bật: tiến trình phải đi tiếp
+// tới bước Firebase (và chỉ hỏng vì file Firebase cố tình sai trong bài này).
+test("thiếu token bot 1 nhưng ZCA bật thì không bị chặn ở cổng danh tính", (t) => {
+    const result = spawnSync(process.execPath, ["main.js"], {
+        cwd: ROOT,
+        encoding: "utf8",
+        timeout: 60000,
+        env: {
+            ...process.env,
+            BOT_TOKEN: "   ",
+            BOT_1_TOKEN: "   ",
+            ZCA_ENABLED: "true",
+            NODE_ENV: "production",
+            FIREBASE_SERVICE_ACCOUNT_FILE: "./khong-ton-tai-firebase.json"
+        }
+    });
+
+    if (spawnBlocked(result)) {
+        t.skip(`Không spawn được tiến trình con trong môi trường này (${result.error.code}).`);
+        return;
+    }
+
+    const output = `${result.stdout || ""}${result.stderr || ""}`;
+    assert.ok(!/Không có danh tính nào hoạt động/.test(output), "không được chặn khi ZCA đang bật");
+    assert.ok(!/Thiếu token cho bot 1/.test(output), "thiếu token bot 1 chỉ là cảnh báo");
+    assert.match(output, /\[Bots\] bot1 đang tắt/, "phải cảnh báo rõ bot 1 đang tắt");
+    assert.match(output, /Không tìm thấy file cấu hình Firebase/, "phải đi tiếp tới bước Firebase");
+});
+
 // Cùng hành vi, kiểm tra TRONG TIẾN TRÌNH — chạy được cả khi sandbox chặn spawn.
-test("cấu hình Firebase thiếu thì khởi tạo persistence thất bại rõ ràng", async () => {
-    const persistence = require("../firestorePersistence");
+test("cấu hình Firebase thiếu thì khởi tạo persistence thất bại rõ ràng", async () => {    const persistence = require("../firestorePersistence");
     const previous = process.env.FIREBASE_SERVICE_ACCOUNT_FILE;
     process.env.FIREBASE_SERVICE_ACCOUNT_FILE = "./khong-ton-tai-firebase.json";
     try {

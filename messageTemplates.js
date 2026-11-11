@@ -74,26 +74,40 @@ function formatDailyNotificationEnabled(scheduleData, notificationTimes) {
     );
 }
 
+// "Nhắc trước N phút" đọc trực tiếp từ bản ghi, không require subscriptions.js:
+// tệp này được dùng ở cả đường gửi tin lẫn bộ kiểm tra, kéo lớp lưu trữ vào đây
+// sẽ làm hỏng thứ tự nạp của những bài có Firestore giả.
+function leadMinutesOf(subscription) {
+    const minutes = Number(subscription?.classStartLeadMinutes);
+    return Number.isFinite(minutes) && minutes > 0 ? Math.trunc(minutes) : 0;
+}
+
 function formatClassStartEnabled(subscription) {
+    const lead = leadMinutesOf(subscription);
     return formatSuccessMessage(
-        "ĐÃ BẬT NHẮC GIỜ HỌC",
+        lead > 0 ? "ĐÃ BẬT NHẮC TRƯỚC GIỜ HỌC" : "ĐÃ BẬT NHẮC GIỜ HỌC",
         `> **Sinh viên:** ${escapeMarkdown(subscription.studentName || "Sinh viên")}\n` +
-        `> **MSSV:** ${escapeMarkdown(subscription.studentId)}\n\n` +
-        "Bạn sẽ nhận thông báo kèm thông tin buổi học khi mỗi tiết học bắt đầu."
+        `> **MSSV:** ${escapeMarkdown(subscription.studentId)}\n` +
+        `> **Nhắc trước:** ${lead > 0 ? `${lead} phút` : "đúng lúc vào học"}\n\n` +
+        (lead > 0
+            ? `Bạn sẽ nhận thông báo trước khi mỗi tiết học bắt đầu **${lead} phút**.\n> Đổi bằng **/nhactruoc [số phút]** · tắt bằng **/tatnhaclich**.`
+            : "Bạn sẽ nhận thông báo khi mỗi tiết học bắt đầu.\n> Muốn báo trước? Dùng **/nhactruoc 10** (hoặc 60) — xem **/trangthainhaclich**.")
     );
 }
 
 function formatClassStartStatus(subscription) {
     const enabled = subscription.classStartNotificationsEnabled === true;
+    const lead = leadMinutesOf(subscription);
     return `# {${enabled ? "green" : "orange"}}[NHẮC GIỜ HỌC]{/${enabled ? "green" : "orange"}}
 
 **Trạng thái:** ${enabled ? "Đang bật" : "Đang tắt"}
+**Nhắc trước:** ${lead > 0 ? `${lead} phút` : "đúng lúc vào học"}
 
 **Sinh viên:** ${escapeMarkdown(subscription.studentName || "Sinh viên")}
 **MSSV:** ${escapeMarkdown(subscription.studentId)}
 
 > ${enabled
-            ? "Bạn sẽ nhận thông báo khi mỗi tiết học bắt đầu."
+            ? `Bạn sẽ nhận thông báo ${lead > 0 ? `trước ${lead} phút` : "khi mỗi tiết học bắt đầu"}. Đổi bằng **/nhactruoc [số phút]**.`
             : "Dùng **/batnhaclich** để bật tính năng này."}`;
 }
 

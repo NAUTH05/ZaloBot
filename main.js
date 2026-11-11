@@ -42,6 +42,7 @@ const {
     normalizeTargetDayOffset,
     removeNotificationTime,
     saveStudent,
+    setClassStartLead,
     updateNotificationTime
 } = require("./subscriptions");
 const {
@@ -57,6 +58,7 @@ const {
     initializeScheduleSnapshot
 } = require("./scheduleChanges");
 const { TIME_ZONE, getVietnamDateInfo } = require("./timezone");
+const { resolveScheduleDate } = require("./scheduleDate");
 const { addCalendarDays, dateFromVietnamDateKey } = require("./scheduleDatePolicy");
 const { escapeMarkdown, escapeMarkdownMultiline, sanitizeExternalRichText } = require("./richText");
 const {
@@ -128,6 +130,13 @@ const {
     unblockTarget
 } = require("./accessControl");
 const { askScheduleAi } = require("./aiAssistant");
+// Trợ lý AI hội thoại (DeepSeek) + bộ phân tích lệnh tất định.
+//
+// Phân tích lệnh KHÔNG phụ thuộc AI: người dùng gõ "nhanlich 6:00 homnay" hay
+// "luumssv 123, nhanlich 6:00 homnay" được xử lý ngay, không tốn token.
+const { createAssistant } = require("./ai/assistantService");
+const { loadAiConfig } = require("./ai/aiConfig");
+const { normalizeTimeToken, parseCommandHint, parseMultiCommandPlan, parseSingleCommand } = require("./ai/commandNormalizer");
 // Cổng nhóm: trong nhóm chỉ phản hồi khi được nhắc tới (hoặc khi có lệnh "/...").
 const { groupReplyOptionsFromEnv, isGroupChat, resolveGroupReplyDecision } = require("./groupMentions");
 // Chính sách theo TỪNG nhóm: nhóm hỗ trợ có thể bật chế độ nhận mọi tin.
@@ -181,16 +190,28 @@ function isTruthyEnv(value) {
 }
 
 const botConfigResult = resolveBotConfigs(process.env);
+const zcaRequested = isTruthyEnv(process.env.ZCA_ENABLED);
 
-// Bot 1 là danh tính gốc: nó sở hữu không gian khóa cũ và là đường tương thích
-// của bản triển khai hiện tại. Thiếu token bot 1 là lỗi cấu hình, không phải
-// trạng thái chạy được — kể cả khi bot 2 hoặc bot 3 có token.
-const hasLegacyBot = botConfigResult.bots.some((config) => config.botId === LEGACY_BOT_ID);
-if (botConfigResult.bots.length === 0 || !hasLegacyBot) {
-    const reasons = botConfigResult.errors.length
-        ? botConfigResult.errors
-        : ["Không có bot 1 đang bật. Đặt BOT_TOKEN hoặc BOT_1_TOKEN trong .env."];
-    throw new Error(`Không thể khởi động bot:\n- ${reasons.join("\n- ")}`);
+// Lỗi cấu hình THẬT vẫn chặn khởi động: hai token khác nhau cho cùng một bot,
+// hoặc hai bot dùng chung một token. Đó là cấu hình mơ hồ — chạy tiếp nghĩa là
+// âm thầm chọn bừa một danh tính.
+if (botConfigResult.errors.length > 0) {
+    throw new Error(`Không thể khởi động bot:\n- ${botConfigResult.errors.join("\n- ")}`);
+}
+
+// Bot 1 KHÔNG còn bắt buộc: thiếu token chỉ là bot đó tắt (xem bots.js). Nhưng
+// phải có ÍT NHẤT một danh tính chạy được — bot chính thức nào đó, hoặc ZCA.
+//
+// Vì sao vẫn chặn khi không có gì: tiến trình sẽ khởi động, kết nối Firestore,
+// mở dashboard rồi ngồi im vì không nhận được tin nào. Người vận hành thấy "đã
+// chạy" trong khi thực tế không có kênh nào hoạt động — đúng kiểu hỏng im lặng
+// mà cổng khởi động này tồn tại để chặn.
+if (botConfigResult.bots.length === 0 && !zcaRequested) {
+    throw new Error(
+        "Không thể khởi động bot:\n- " +
+        "Không có danh tính nào hoạt động: thiếu BOT_TOKEN/BOT_1_TOKEN và ZCA đang tắt.\n- " +
+        "Đặt BOT_TOKEN (hoặc BOT_1_TOKEN) trong .env, hoặc bật ZCA_ENABLED=true để dùng tài khoản Zalo cá nhân."
+    );
 }
 for (const warning of botConfigResult.warnings) console.log(`[Bots] ${warning}`);
 
@@ -1572,8 +1593,25 @@ function parseCommand(rawText) {
 
     // Bí danh được quy về tên chính tắc ngay tại đây, nên toàn bộ phần xử lý
     // phía sau chỉ cần so sánh với một tên duy nhất cho mỗi lệnh.
-    const command = resolveCommandName(match[1]);
-    const argument = (match[2] || "").trim();
+    let command = resolveCommandName(match[1]);
+    // Ngoặc vuông quanh đối số là cách viết hay gặp khi người dùng dán cú pháp
+    // từ /help ("/luumssv [123456789]"). Bỏ đúng hai ký tự này, giữ nguyên phần
+    // còn lại — không đụng tới nội dung văn bản của /thongbao hay /feedback.
+    let argument = (match[2] || "").trim().replace(/[[\]]/g, "").trim();
+
+    // Gõ dính: "/lichngaymai", "/lichthu5". Người dùng thật gõ như vậy, và hệ
+    // thống trước đây trả "LỆNH KHÔNG HỢP LỆ" rồi gợi ý "/lich ngaymai" — tức là
+    // bắt họ sửa lại đúng cái họ vừa gõ. Tách ra chỉ khi phần đuôi THẬT SỰ là một
+    // ngày hiểu được, nên không có nguy cơ cắt sai một lệnh khác.
+    if (!findHelpCommand(command)) {
+        const glued = /^lich(.+)$/i.exec(match[1]);
+        if (glued && resolveScheduleDate(glued[1])) {
+            command = "lich";
+            // Ngày đi CUỐI câu vì cú pháp là /lich [MSSV] [ngày]: "/lichngaymai 123456789"
+            // phải thành "/lich 123456789 ngaymai", không phải ngược lại.
+            argument = `${argument} ${glued[1]}`.trim();
+        }
+    }
 
     return { command, argument };
 }
@@ -2031,7 +2069,9 @@ function parseNhanLichArgument(argument, savedStudentId) {
     const studentTokens = parts.slice(0, timeIndex);
     if (studentTokens.length > 1) return { error: "syntax" };
 
-    const notificationTime = normalizeNotificationTime(parts[timeIndex], null);
+    // "6:00", "6h", "600" → "06:00" trước khi vào kiểm tra nghiêm ngặt bên dưới.
+    // Việc chuẩn hoá chỉ đổi ĐỊNH DẠNG; giờ không hợp lệ vẫn bị từ chối.
+    const notificationTime = normalizeNotificationTime(normalizeTimeToken(parts[timeIndex]), null);
     if (!notificationTime) return { error: "time" };
 
     let studentId = normalizeStudentId(savedStudentId);
@@ -2042,6 +2082,46 @@ function parseNhanLichArgument(argument, savedStudentId) {
     if (!studentId) return { error: "student" };
 
     return { studentId, notificationTime, targetDayOffset: dayToken.offset };
+}
+
+// Số phút "nhắc trước". Nhận "60", "60 phút", "1 tiếng", "1h".
+// Trả null khi bỏ trống (giữ nguyên thiết lập), "invalid" khi không hiểu.
+function parseLeadMinutes(argument) {
+    const raw = String(argument == null ? "" : argument).trim();
+    if (!raw) return null;
+    const folded = raw
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/đ/g, "d")
+        .toLowerCase()
+        .replace(/\s+/g, "");
+    const match = folded.match(/^(\d{1,3})(phut|p|m|tieng|gio|h)?$/);
+    if (!match) return "invalid";
+    const value = Number(match[1]);
+    const unit = match[2] || "phut";
+    const minutes = ["tieng", "gio", "h"].includes(unit) ? value * 60 : value;
+    if (!Number.isFinite(minutes) || minutes < 0 || minutes > 180) return "invalid";
+    return minutes;
+}
+
+// Tách đối số của /lich thành [MSSV] + [ngày].
+//
+// Ngày có thể dài 1–3 token ("12/11", "thứ 5", "ngày mai", "ngày kia"), nên phải
+// thử cụm DÀI nhất trước: nếu thử ngắn trước, "ngày mai" sẽ bị đọc thành MSSV
+// "ngày" + ngày "mai".
+function parseScheduleDateArgument(argument) {
+    const tokens = String(argument || "").trim().split(/\s+/).filter(Boolean);
+    for (const size of [3, 2, 1]) {
+        if (tokens.length < size) continue;
+        const tail = tokens.slice(-size).join(" ");
+        const resolved = resolveScheduleDate(tail);
+        if (!resolved) continue;
+        const head = tokens.slice(0, tokens.length - size);
+        if (head.length > 1) return { error: "syntax" };
+        return { studentPart: head.join(" "), resolved };
+    }
+    if (tokens.length > 1) return { error: "syntax" };
+    return { studentPart: tokens.join(" "), resolved: null };
 }
 
 // Cú pháp: /suagionhanlich ID hh:mm homnay|homsau
@@ -2064,7 +2144,7 @@ function parseSuaGioNhanLichArgument(argument) {
     if (beforeDay.length === 0) return { id, notificationTime: null, targetDayOffset: dayToken.offset };
     if (beforeDay.length > 1) return { error: "syntax" };
 
-    const notificationTime = normalizeNotificationTime(beforeDay[0], null);
+    const notificationTime = normalizeNotificationTime(normalizeTimeToken(beforeDay[0]), null);
     if (!notificationTime) return { error: "time" };
     return { id, notificationTime, targetDayOffset: dayToken.offset };
 }
@@ -2419,18 +2499,35 @@ async function handleCommand(msg, parsedCommand) {
         );
     } else if (command === "lich") {
         const saved = getSubscription(context);
-        const studentId = resolveStudentIdForCommand(argument, saved?.studentId);
+        // Cú pháp: /lich [MSSV] [ngày]
+        //   ngày: homnay | mai | mot | thu2…thu7 | chunhat | 12/11 | 2026-11-12
+        // Không có ngày ⇒ hôm nay, đúng hành vi cũ.
+        const parsedDate = parseScheduleDateArgument(argument);
+        const studentId = resolveStudentIdForCommand(parsedDate.studentPart, saved?.studentId);
+
+        if (parsedDate.error) {
+            await sendMessage(chatId, formatWarningMessage(
+                "SAI CÚ PHÁP",
+                "> **Cú pháp:** /lich [MSSV] [ngày]\n" +
+                "> **Ví dụ:** /lich thứ 5\n" +
+                "> **Ví dụ:** /lich mai\n" +
+                "> **Ví dụ:** /lich 123000xxx 12/11\n" +
+                "> Ngày nhận: **homnay**, **mai**, **mot**, **thu2**…**thu7**, **chunhat**, **12/11**, **2026-11-12**."
+            ));
+            return;
+        }
 
         if (!studentId) {
-            await sendMessage(chatId, argument
+            await sendMessage(chatId, parsedDate.studentPart
                 ? formatWarningMessage("MSSV KHÔNG HỢP LỆ", "> MSSV phải gồm đúng **9 chữ số**.")
                 : formatMissingStudentIdMessage("lich"));
             return;
         }
 
         try {
-            const data = await fetchStudentSchedule(studentId);
-            await sendMessage(chatId, formatDailySchedule(data));
+            const targetDate = parsedDate.resolved?.date || new Date();
+            const data = await fetchStudentSchedule(studentId, targetDate);
+            await sendMessage(chatId, formatDailySchedule(data, targetDate, { referenceDate: new Date() }));
         } catch (error) {
             await sendUserError(chatId, error, "daily_schedule");
         }
@@ -2475,7 +2572,38 @@ async function handleCommand(msg, parsedCommand) {
             await sendMessage(chatId, formatMissingStudentIdMessage("batnhaclich"));
             return;
         }
-        const updated = enableClassStartNotifications(context);
+        // /batnhaclich [phút] — bật nhắc, và nếu có số phút thì đặt luôn "nhắc trước".
+        const minutes = parseLeadMinutes(argument);
+        if (minutes === "invalid") {
+            await sendMessage(chatId, formatWarningMessage(
+                "SAI CÚ PHÁP",
+                "> **Cú pháp:** /batnhaclich [số phút]\n> **Ví dụ:** /batnhaclich 60\n> Số phút từ **0** đến **180**. Bỏ trống = nhắc đúng lúc vào học."
+            ));
+            return;
+        }
+        const updated = minutes === null
+            ? enableClassStartNotifications(context)
+            : setClassStartLead(context, minutes);
+        await sendMessage(chatId, formatClassStartEnabled(updated || saved));
+    } else if (command === "nhactruoc") {
+        const saved = getSubscription(context);
+        if (!saved?.studentId) {
+            await sendMessage(chatId, formatMissingStudentIdMessage("nhactruoc"));
+            return;
+        }
+        if (!String(argument || "").trim()) {
+            await sendMessage(chatId, formatClassStartStatus(saved));
+            return;
+        }
+        const minutes = parseLeadMinutes(argument);
+        if (minutes === "invalid" || minutes === null) {
+            await sendMessage(chatId, formatWarningMessage(
+                "SAI CÚ PHÁP",
+                "> **Cú pháp:** /nhactruoc [số phút]\n> **Ví dụ:** /nhactruoc 60 (báo trước 1 tiếng)\n> **Ví dụ:** /nhactruoc 10 (báo trước 10 phút)\n> Số phút từ **0** đến **180**."
+            ));
+            return;
+        }
+        const updated = setClassStartLead(context, minutes);
         await sendMessage(chatId, formatClassStartEnabled(updated || saved));
     } else if (command === "tatnhaclich") {
         if (disableClassStartNotifications(context)) {
@@ -3221,6 +3349,30 @@ function registerShutdownHandlers() {
     return shutdownController;
 }
 
+// Đánh giá kết quả khởi động nhà cung cấp.
+//
+// Tách thành hàm thuần để kiểm thử được mà không cần dựng cả runtime: đây là
+// quyết định "tiến trình có sống tiếp hay không", nên nó phải có bài kiểm tra
+// riêng thay vì chỉ được chứng minh gián tiếp qua log.
+function resolveStartupVerdict({ started = [], failed = [] } = {}) {
+    const officialStarted = started.filter((botId) => !String(botId).startsWith("zca:"));
+    if (started.length === 0) {
+        const detail = failed.map((item) => `${item.botId} (${item.message})`).join("; ");
+        return {
+            fatal: true,
+            officialStarted: [],
+            onlyZca: false,
+            reason: `Không nhà cung cấp nào khởi động được${detail ? `: ${detail}` : "."}`
+        };
+    }
+    return {
+        fatal: false,
+        officialStarted,
+        onlyZca: officialStarted.length === 0,
+        reason: null
+    };
+}
+
 async function startRuntime() {
     let firebaseTarget;
     metrics.start();
@@ -3232,6 +3384,7 @@ async function startRuntime() {
                 "adminAudit",
                 "adminLogs",
                 "adminSettings",
+                "aiAssistantState",
                 "chatDirectory",
                 "friendRequestSettings",
                 "friendRequests",
@@ -3445,12 +3598,19 @@ async function startRuntime() {
         console.warn(`[Runtime] dịch vụ lời mời kết bạn không khởi động được: ${error.message}`);
     }
 
-    // Chỉ coi là lỗi chí mạng khi KHÔNG nhà cung cấp CHÍNH THỨC nào lên được:
-    // đó mới là hệ thống hỏng. ZCA hỏng một mình là trạng thái bình thường và
-    // được báo cáo trên dashboard.
-    const startedOfficial = started.filter((botId) => !botId.startsWith("zca:"));
-    if (startedOfficial.length === 0) {
-        throw new Error(`Không bot chính thức nào khởi động được: ${failed.map((item) => `${item.botId} (${item.message})`).join("; ")}`);
+    // Quyết định sống còn sau khi mọi nhà cung cấp đã thử khởi động.
+    //
+    // Trước đây chỉ đếm nhà cung cấp CHÍNH THỨC, vì bot 1 là bắt buộc. Nay bot
+    // chính thức là tuỳ chọn, nên điều kiện đúng là: phải có ÍT NHẤT MỘT nhà cung
+    // cấp lên được — chính thức hoặc ZCA. Một triển khai chỉ dùng tài khoản Zalo
+    // cá nhân là hợp lệ, và lúc này ZCA đang ở trạng thái chờ quét QR chứ không
+    // phải hỏng.
+    const verdict = resolveStartupVerdict({ started, failed });
+    if (verdict.fatal) {
+        throw new Error(verdict.reason);
+    }
+    if (verdict.onlyZca) {
+        console.warn("[Runtime] không bot chính thức nào khởi động được; chỉ ZCA đang chạy.");
     }
 
     logDiscord("INFO", `Đã khởi động - timezone ${TIME_ZONE} - providers: ${started.join(", ")}`);
@@ -3466,6 +3626,168 @@ async function startRuntime() {
 
 // Cấu hình cổng nhóm, đọc một lần lúc khởi động.
 const GROUP_REPLY_OPTIONS = groupReplyOptionsFromEnv(process.env);
+
+// ---------------------------------------------------------------------------
+// Trợ lý AI hội thoại (DeepSeek) + thực thi lô lệnh tất định
+// ---------------------------------------------------------------------------
+
+// Khởi tạo MUỘN: cấu hình AI được đọc ở lần dùng đầu tiên, sau khi .env đã nạp
+// và sau khi bộ kiểm tra kịp đặt biến môi trường của nó.
+let assistantRuntime = null;
+
+// Dịch vụ quản trị cho trợ lý AI.
+//
+// Đây là nơi DUY NHẤT biết danh tính owner thật và biết các hàm quản trị hiện có,
+// nên chỉ main.js nối được. Danh mục cố ý hẹp: đọc chẩn đoán + thay đổi phạm vi
+// MỘT cuộc trò chuyện.
+//
+// KHÔNG nối: /thongbao, /update (phát cho toàn bộ người dùng), /blockbot,
+// /blockai, /allowbot, /allowai, /accessmode (phân quyền), /xoachat (xoá dữ
+// liệu). Những việc đó phải do người vận hành gõ lệnh tường minh — một câu "đồng
+// ý" nhầm hoặc một prompt injection lọt qua là ảnh hưởng tất cả người dùng và
+// không hoàn tác được.
+function buildAssistantAdminDeps() {
+    return {
+        isOwner,
+        adminBotStatus: () => {
+            const bots = describeRegisteredBots();
+            const lines = bots.map((bot) => {
+                const label = `- **${escapeMarkdown(bot.botId)}** · ${escapeMarkdown(bot.providerType || "official")} · ${escapeMarkdown(bot.status || "?")}`;
+                return bot.lastError ? `${label} · lỗi: ${escapeMarkdown(String(bot.lastError).slice(0, 120))}` : label;
+            });
+            const queue = getPersistenceQueueStats();
+            return [
+                "# {orange}[ADMIN] TRẠNG THÁI HỆ THỐNG{/orange}",
+                lines.join("\n") || "> Chưa có nhà cung cấp nào đang chạy.",
+                `> **Hàng đợi ghi:** ${queue.dirtyStores} store chờ · ${queue.activeWriters} writer`,
+                `> **Chat đã biết:** ${getAllChats().length}`
+            ].join("\n\n");
+        },
+        adminListChats: ({ step }) => formatChatDirectoryList(`${step.filter} ${step.page}`),
+        adminChatDetails: ({ step }) => formatChatDetails(getChat(step.chatId))
+            || formatWarningMessage("KHÔNG TÌM THẤY", `> Chat \`${escapeMarkdown(step.chatId)}\` chưa có trong sổ quản lý.`),
+        adminAccessList: () => {
+            const summary = getAccessSummary();
+            const row = (label, list) => `> **${label}:** ${list.length === 0
+                ? "trống"
+                : list.map((item) => escapeMarkdown(item.targetName || item.targetId)).join(", ")}`;
+            return [
+                "# {orange}[ADMIN] PHÂN QUYỀN{/orange}",
+                `> **Chế độ bot:** ${escapeMarkdown(summary.botMode)} · **Chế độ AI:** ${escapeMarkdown(summary.aiMode)}`,
+                row("Chặn bot", summary.botBlocked),
+                row("Chặn AI", summary.aiBlocked),
+                row("Allowlist bot", summary.botAllowlist),
+                row("Allowlist AI", summary.aiAllowlist)
+            ].join("\n\n");
+        },
+        adminPauseChat: ({ context, step }) => {
+            setChatStatus(step.chatId, "disabled", String(context.userId), step.reason);
+            return `# {orange}[ADMIN] ĐÃ TẠM DỪNG{/orange}\n\n> **Chat:** \`${escapeMarkdown(step.chatId)}\`\n> **Lý do:** ${escapeMarkdown(step.reason)}`;
+        },
+        adminResumeChat: ({ context, step }) => {
+            setChatStatus(step.chatId, "active", String(context.userId), "admin_reactivated");
+            return `# {green}[ADMIN] ĐÃ BẬT LẠI{/green}\n\n> **Chat:** \`${escapeMarkdown(step.chatId)}\``;
+        },
+        adminTestChat: async ({ step }) => {
+            const result = await sendNotification(
+                step.chatId,
+                "# {orange}[ADMIN TEST]{/orange}\n\nĐang kiểm tra khả năng gửi thông báo tới cuộc trò chuyện này.",
+                { feature: "broadcast", operation: "admin_test", bypassEligibility: true }
+            );
+            if (result.sent) {
+                return `# {green}[ADMIN] KIỂM TRA THÀNH CÔNG{/green}\n\n> **Chat:** \`${escapeMarkdown(step.chatId)}\``;
+            }
+            if (result.skipped) {
+                return formatWarningMessage("CHAT ĐANG BỊ KHÓA", "> Hãy bật lại chat trước khi thử.");
+            }
+            return formatWarningMessage("CHAT KHÔNG GỬI ĐƯỢC", `> ${escapeMarkdown(result.error?.message || "Lỗi không xác định")}`);
+        }
+    };
+}
+
+function getAssistantRuntime() {
+    if (!assistantRuntime) {
+        const config = loadAiConfig();
+        assistantRuntime = createAssistant({
+            // Trong môi trường kiểm thử, KHÔNG dùng cấu hình AI thật.
+            //
+            // `npm test` nạp main.js với .env của máy đang chạy. Nếu .env bật trợ
+            // lý và có khóa thật, mỗi bài kiểm tra gửi tin nhắn thường sẽ gọi
+            // DeepSeek thật: tốn tiền, phụ thuộc mạng, và kết quả thay đổi theo
+            // số dư tài khoản. Bài kiểm tra của trợ lý tự bơm provider giả.
+            config: isTestEnv ? { ...config, enabled: false, configured: false } : config,
+            // Danh tính quản trị: máy chủ xác thực từ sự kiện Zalo thật.
+            isOwner,
+            // Giữ nguyên cổng tiếp nhận: thao tác ghi của trợ lý cũng bị hoãn khi
+            // chat chưa được xác nhận, y như lệnh thường.
+            executorDeps: { gatedWrite, ...buildAssistantAdminDeps() }
+        });
+    }
+    return assistantRuntime;
+}
+
+const AI_ACTION_ERROR_TEXT = {
+    missing_student_id: "chưa có MSSV",
+    invalid_student_id: "MSSV phải gồm đúng 9 chữ số",
+    missing_target_day: "thiếu ngày đích (homnay hoặc homsau)",
+    missing_time: "thiếu giờ",
+    invalid_time: "giờ không hợp lệ",
+    invalid_id: "ID không hợp lệ",
+    invalid_arguments: "cú pháp chưa đúng",
+    unknown_command: "không có lệnh này",
+    unsupported_command: "lệnh này không gộp được vào một tin"
+};
+
+// Thực thi một lô lệnh đã nhận diện CHẮC CHẮN bằng bộ phân tích tất định.
+//
+// Không đi qua AI: người dùng gõ đúng cú pháp thì không có lý do gì phải trả tiền
+// cho một lần gọi API. Hành động phá huỷ vẫn phải xin xác nhận như đường AI.
+async function handleDeterministicBatch(context, plan) {
+    const assistant = getAssistantRuntime();
+
+    if (plan.invalid.length > 0) {
+        const lines = plan.invalid.map((item) => `- \`/${item.command}\`: ${AI_ACTION_ERROR_TEXT[item.error] || "chưa hiểu rõ"}`);
+        await sendMessage(
+            context.chatId,
+            formatWarningMessage(
+                "CHƯA HIỂU RÕ YÊU CẦU",
+                `${lines.join("\n")}\n\n> Chưa có thay đổi nào được ghi. Cậu gõ **/help** để xem cú pháp nhé.`
+            )
+        );
+        return;
+    }
+
+    if (plan.actions.length > assistant.config.maxActionsPerRequest) {
+        await sendMessage(
+            context.chatId,
+            formatWarningMessage(
+                "QUÁ NHIỀU YÊU CẦU",
+                `> Mỗi tin chỉ xử lý tối đa **${assistant.config.maxActionsPerRequest}** yêu cầu.\n> Cậu tách thành vài tin giúp mình nhé.`
+            )
+        );
+        return;
+    }
+
+    await assistant.executePlan({
+        context,
+        actions: plan.actions,
+        send: (message) => sendMessage(context.chatId, message)
+    });
+}
+
+// Một tin nhắn không phải lệnh: để trợ lý AI xử lý.
+//
+// `addressedToBot` đã được cổng nhóm bảo đảm ở nơi gọi, nên ở đây không cần kiểm
+// tra lại: trong nhóm, trợ lý chỉ nhận tin có tag hoặc lệnh.
+async function handleAssistantMessage(context, text, groupDecision) {
+    const assistant = getAssistantRuntime();
+    return assistant.handleTurn({
+        context,
+        text,
+        isGroup: groupDecision.isGroup,
+        send: (message) => sendMessage(context.chatId, message)
+    });
+}
 
 async function handleIncomingMessage(runtime, msg) {
     // Sau khi bắt đầu tắt máy thì không xử lý tin mới: tránh bắt đầu một đợt gửi
@@ -3540,6 +3862,10 @@ async function handleIncomingMessage(runtime, msg) {
             botId,
             chatId: String(context.chatId),
             direction: MSG_DIRECTION.INBOUND,
+            // Danh tính người gửi được lưu cùng tin để trợ lý AI chỉ đọc được tin
+            // của CHÍNH người đang hỏi. Thiếu trường này, mọi tin trong nhóm sẽ
+            // không phân biệt được ai với ai.
+            senderUserId: String(context.userId),
             text: historyText,
             attachments: hasAttachments ? pendingDescriptors(inboundAttachments) : [],
             status: MSG_STATUS.DELIVERED,
@@ -3686,7 +4012,30 @@ async function handleIncomingMessage(runtime, msg) {
                 }
             }
 
-            const parsed = parseCommand(effectiveText);
+            // Lệnh chờ xác nhận phải được xử lý TRƯỚC khi phân tích lệnh.
+            //
+            // Nhờ vậy câu "đồng ý" luôn có nghĩa như nhau, và một tin khác hẳn sẽ
+            // xoá lệnh chờ thay vì để nó nằm lại rồi chạy sau lưng người dùng.
+            const assistant = getAssistantRuntime();
+            const confirmationOutcome = await assistant.handlePendingConfirmation({
+                context,
+                text: effectiveText,
+                send: (message) => sendMessage(context.chatId, message)
+            });
+            if (confirmationOutcome.handled) return;
+
+            // THỨ TỰ ƯU TIÊN (không được đảo):
+            //   1. lệnh có dấu "/"  → engine lệnh cũ, không tốn token
+            //   2. lô lệnh tất định → engine cũ + một tổng kết duy nhất
+            //   3. lệnh không dấu   → quy về lệnh chính tắc rồi chạy như (1)
+            //   4. còn lại          → trợ lý AI (ngôn ngữ tự nhiên)
+            const batchPlan = parseMultiCommandPlan(effectiveText, { maxActions: assistant.config.maxActionsPerRequest });
+            const parsed = batchPlan ? null : parseCommand(effectiveText);
+            const looseCommand = (!parsed && !batchPlan) ? parseSingleCommand(effectiveText) : null;
+            // Tên lệnh đúng nhưng đối số chưa đủ để chạy: KHÔNG đưa sang engine
+            // lệnh ngay (sẽ thành "SAI CÚ PHÁP" cho một câu nói bình thường). Chỉ
+            // dùng làm đường dự phòng khi trợ lý AI không xử lý được.
+            const looseHint = (!parsed && !batchPlan && !looseCommand) ? parseCommandHint(effectiveText) : null;
             const looksLikeCommand = String(effectiveText || "").trim().startsWith("/");
 
             // Chào mừng khi chat chưa được tiếp nhận VÀ tin không phải lệnh.
@@ -3699,7 +4048,7 @@ async function handleIncomingMessage(runtime, msg) {
             // vì cổng tiếp nhận là bộ nhớ tạm (mất khi restart) nên nó sẽ lặp lại
             // sau mỗi lần khởi động. Đây chính là "bot gửi lời chào tự động" mà ta
             // phải tránh — nên là quy tắc cứng, không phải tuỳ chọn.
-            if (!groupDecision.isGroup && !parsed && !looksLikeCommand && !alreadyAdmitted) {
+            if (!groupDecision.isGroup && !parsed && !looksLikeCommand && !alreadyAdmitted && !batchPlan && !looseCommand) {
                 try {
                     // Người vừa kết bạn đã nhận tin chào riêng lúc được chấp nhận.
                     // Không chào lại bằng nội dung mặc định — nội dung đó sẽ che mất
@@ -3717,12 +4066,27 @@ async function handleIncomingMessage(runtime, msg) {
                 }
             }
 
-            if (parsed) {
+            if (batchPlan) {
+                // Lô lệnh tất định: nhiều lệnh trong một tin, một tổng kết duy nhất.
+                try {
+                    await handleDeterministicBatch(context, batchPlan);
+                } catch (error) {
+                    logDiscord("ERROR", `command_batch_failed: ${error.message}`);
+                }
+            } else if (parsed) {
                 // Lệnh có thể ném lỗi gửi (410/422/tạm thời). handler tin nhắn không
                 // được để lỗi làm chết vòng lặp polling — nuốt tại đây, cổng tiếp
                 // nhận đã ghi nhận kết quả qua notifyAdmissionFailure().
                 try {
                     await handleCommand(msg, parsed);
+                } catch (error) {
+                    logDiscord("ERROR", `command_failed: ${error.message}`);
+                }
+            } else if (looseCommand) {
+                // Lệnh không có dấu "/": quy về lệnh chính tắc rồi dùng đúng engine
+                // cũ, nên thông điệp và nghiệp vụ không thể lệch nhau.
+                try {
+                    await handleCommand(msg, looseCommand);
                 } catch (error) {
                     logDiscord("ERROR", `command_failed: ${error.message}`);
                 }
@@ -3737,6 +4101,21 @@ async function handleIncomingMessage(runtime, msg) {
                     );
                 } catch (error) {
                     logDiscord("ERROR", `invalid_command_reply_failed: ${error.message}`);
+                }
+            } else {
+                // Ngôn ngữ tự nhiên: trợ lý AI. Không bao giờ để lỗi của trợ lý làm
+                // chết vòng lặp polling, và không bao giờ chặn các lệnh thường.
+                try {
+                    const outcome = await handleAssistantMessage(context, effectiveText, groupDecision);
+                    // Trợ lý không xử lý (tắt/chưa cấu hình): nếu câu này rõ ràng là
+                    // một lệnh gõ thiếu dấu nhưng sai đối số, đưa về engine cũ để
+                    // người dùng nhận hướng dẫn cú pháp thay vì im lặng.
+                    // Trong nhóm thì im lặng, không phát hướng dẫn cho cả nhóm.
+                    if (!outcome?.handled && !groupDecision.isGroup && looseHint) {
+                        await handleCommand(msg, looseHint);
+                    }
+                } catch (error) {
+                    logDiscord("ERROR", `assistant_failed: ${error.message}`);
                 }
             }
         }
@@ -4018,6 +4397,12 @@ module.exports = {
     // Dùng cho bài kiểm tra cách ly nhà cung cấp: chứng minh phản hồi đi ra bằng
     // ĐÚNG nhà cung cấp đã nhận tin nhắn.
     handleIncomingMessage,
+    // Trợ lý AI: xuất để bộ kiểm tra và dashboard đọc được trạng thái hạn mức mà
+    // không phải dựng lại toàn bộ runtime.
+    getAssistantRuntime,
+    handleDeterministicBatch,
+    // Quyết định sống còn sau khi khởi động nhà cung cấp: ZCA-only vẫn hợp lệ.
+    resolveStartupVerdict,
     sendMessage,
     sendPhoto,
     sendFile,
@@ -4036,7 +4421,9 @@ module.exports = {
     formatTargetDay,
     formatTargetDayLabel,
     normalizeTargetDayToken,
+    parseLeadMinutes,
     parseNhanLichArgument,
+    parseScheduleDateArgument,
     parseRecordId,
     parseSuaGioNhanLichArgument,
     parseCommand,

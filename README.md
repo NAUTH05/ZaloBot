@@ -5,6 +5,7 @@ ZaloBot is a production-oriented Node.js bot for Lạc Hồng University schedul
 ## Features
 
 - Student, weekly, exam, teacher, and empty-room schedule queries.
+- Optional DeepSeek assistant: natural-language requests and multi-command messages, with the deterministic command engine always taking priority.
 - Daily schedule, schedule-change, class-start, and broadcast notifications.
 - Per-user and per-chat MSSV context with separate private/group records.
 - Firestore-backed persistence with legacy JSON migration support.
@@ -152,6 +153,7 @@ FIREBASE_SERVICE_ACCOUNT_FILE=C:\Secure\ZaloBot\zalobot-firebase-adminsdk-fbsvc.
 | Dashboard | `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `ADMIN_PASSWORD_HASH`, `ADMIN_PORT`, `ADMIN_BASE_PATH`, `ADMIN_COOKIE_SECURE` |
 | Discord | `DISCORD_WEBHOOK` |
 | Gemini | `GEMINI_API_KEY`, `GEMINI_MODEL` |
+| DeepSeek assistant | `AI_ASSISTANT_ENABLED`, `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL`, `DEEPSEEK_BASE_URL`, `AI_MAX_HISTORY_MESSAGES`, `AI_MAX_INPUT_CHARS`, `AI_MAX_OUTPUT_TOKENS`, `AI_MAX_ACTIONS_PER_REQUEST`, `AI_MAX_REQUESTS_PER_USER_PER_DAY`, `AI_MAX_REQUESTS_PER_DAY`, `AI_MONTHLY_BUDGET_USD`, `AI_COOLDOWN_MS`, `AI_REQUEST_TIMEOUT_MS`, `AI_MAX_RETRIES`, `AI_ENABLE_GROUP_ASSISTANT`, `AI_CONFIRMATION_TTL_MS`, `AI_PRICE_INPUT_PER_1M_USD`, `AI_PRICE_OUTPUT_PER_1M_USD` |
 | Firebase | `FIREBASE_SERVICE_ACCOUNT_FILE`, `FIREBASE_DATABASE_ID`, `FIREBASE_STATE_COLLECTION` |
 | Runtime | `TZ`, `NODE_ENV`, `PORT`, `CLASS_START_GRACE_MS`, `CLASS_START_CACHE_TTL_MS`, `SHUTDOWN_TIMEOUT_MS` |
 | Group replies | `GROUP_MENTION_ONLY`, `GROUP_ALLOW_COMMANDS_WITHOUT_MENTION` |
@@ -629,6 +631,57 @@ that stays an official-provider error, handled exactly as before and isolated fr
 ZCA. ZCA is an independent provider on an independent account; it is not a way
 around the official platform's quota.
 
+## AI assistant (DeepSeek)
+
+A conversational layer on top of the existing command engine, off by default.
+Full design notes: [`docs/AI_ASSISTANT.md`](docs/AI_ASSISTANT.md).
+
+Enable it with:
+
+```env
+AI_ASSISTANT_ENABLED=true
+DEEPSEEK_API_KEY=sk-...
+```
+
+The routing order is fixed and is the reason the feature is cheap:
+
+1. An explicit `/command` runs through the existing engine — **never** sent to the API.
+2. Several commands in one message are parsed deterministically and executed as one
+   batch with a single consolidated reply.
+3. A command without the `/` prefix (`luumssv 123456789`, `nhanlich 6:00 hôm nay`)
+   is normalised and routed to the same engine. Accents, casing, `[brackets]` and
+   one-digit hours are normalised **before** the strict validator runs.
+4. Only genuine natural language reaches DeepSeek, which returns a JSON plan. The
+   server validates it against a 12-action allowlist and executes it through the
+   existing services.
+
+Safety and cost:
+
+- The model never calls a function. It returns data; `ai/actionSchema.js` decides
+  what is allowed and `ai/actionExecutor.js` performs it.
+- `botId` / `chatId` / `userId` always come from the Zalo event, never from the model.
+- Destructive actions (deleting a notification time, disabling notifications,
+  replacing a stored MSSV) require an explicit confirmation scoped to
+  `botId + chatId + userId` with a short TTL.
+- Per-user daily limits, an optional global daily cap, a cooldown, bounded history,
+  and a hard monthly budget cap (`AI_MONTHLY_BUDGET_USD`) computed from the token
+  usage the API reports.
+- Limits can be changed at runtime from **Settings → Trợ lý AI** (blank = use
+  `.env`, `0` = unlimited). Owner accounts skip the per-user daily limit
+  (`AI_OWNER_BYPASS_LIMIT`) but are still bounded by the monthly budget.
+- If the API is out of balance or unavailable, the assistant explains that it is
+  temporarily unavailable and every normal command keeps working.
+- Group chats stay silent unless `AI_ENABLE_GROUP_ASSISTANT=true`, and history is
+  filtered to the current sender only.
+- `/blockai` and `AI allowlist` apply to the assistant exactly as they do to `/ai`.
+- The assistant always sees the **current sender's own** notification times (with
+  IDs), so "bỏ lịch 21 giờ hôm sau" works without asking for a record ID.
+- Owners get a narrow admin surface — read diagnostics plus pause/resume/test on
+  **one** chat, each verified server-side and destructive ones confirmed. There is
+  deliberately **no** AI path to broadcast, access control, block/unblock or chat
+  deletion: those affect every user at once and cannot be undone. See
+  [`docs/AI_ASSISTANT.md`](docs/AI_ASSISTANT.md#4-các-hành-động-được-phép).
+
 ## Feedback / Support
 
 Two-way support inside the chat the user is already in. A student sends `/feedback`,
@@ -723,10 +776,21 @@ dashboard reports that honestly rather than trying another identity.
 ## BẮT ĐẦU        /start, /luumssv
 ## LỊCH HỌC       /lich, /lichtuan, /lichthi, /lichgv, /phongtrong
 ## THÔNG BÁO      /nhanlich, /gionhanlich, /suagionhanlich, /xoagionhanlich,
-                  /tatnhanlich, /batnhaclich, /tatnhaclich, /trangthainhaclich
+                  /tatnhanlich, /batnhaclich, /nhactruoc, /tatnhaclich,
+                  /trangthainhaclich
 ## TIỆN ÍCH       /ai, /time, /myid
 ## TRỢ GIÚP       /help
 ```
+
+`/lich` takes an optional day: `/lich mai`, `/lich thứ 5`, `/lich 12/11`,
+`/lich 123000xxx 2026-11-12`. Accepted forms are `homnay`, `mai`, `mot`,
+`thu2`…`thu7`, `chunhat`, `d/m`, and `yyyy-mm-dd`; omitted means today. A glued
+`/lichngaymai` is understood as `/lich ngaymai`.
+
+`/nhactruoc [số phút]` sets how long before class the reminder fires (0–180).
+A class starting at 12:50 with `/nhactruoc 60` notifies at 11:50. `/batnhaclich`
+accepts the same optional minutes. `0` (the default) keeps the old "at class
+start" behaviour, and `/trangthainhaclich` shows the current lead time.
 
 ## Daily notification target day
 
@@ -834,11 +898,12 @@ One process, one codebase and one Firestore database can serve up to three Zalo 
 
 | Bot | Environment variable | Required |
 | --- | --- | --- |
-| bot1 | `BOT_1_TOKEN`, or the legacy `BOT_TOKEN` | yes |
+| bot1 | `BOT_1_TOKEN`, or the legacy `BOT_TOKEN` | recommended |
 | bot2 | `BOT_2_TOKEN` | no |
 | bot3 | `BOT_3_TOKEN` | no |
 
-- A bot whose token is absent is simply disabled. Bot 1 is required because it owns the legacy storage namespace.
+- A bot whose token is absent is simply disabled — bot 1 included. Bot 1 owns the **legacy** storage namespace (unprefixed keys), so turning it off leaves that existing data with no process reading or writing it. Keep it on for any deployment that already has users.
+- Startup only refuses when **no** identity is active: no bot token at all *and* `ZCA_ENABLED` off. A ZCA-only local setup is therefore valid.
 - If both `BOT_1_TOKEN` and `BOT_TOKEN` are set to **different** values, startup fails rather than silently picking one.
 - Two bots sharing one token fails at startup — that would mean two polling consumers on one identity, producing duplicate inbound messages and a fight over the update cursor.
 - Tokens are never printed. Logs and the dashboard show a short SHA-256 fingerprint instead, which is enough to tell two tokens apart.

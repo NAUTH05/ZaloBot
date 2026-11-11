@@ -67,8 +67,44 @@ test("runtime nạp Firestore trước scheduler và Zalo polling", async (t) =>
     }
 });
 
-test("cancelSchedulerJobs hủy đúng các job đã đăng ký", () => {
-    assert.ok(main.cancelSchedulerJobs() >= 1, "phải có ít nhất một job để hủy");
+/* -------------------------------------------------------------------------- */
+/* Quyết định sống còn sau khi khởi động nhà cung cấp                          */
+/* -------------------------------------------------------------------------- */
+
+test("có bot chính thức lên được thì tiến trình sống tiếp", () => {
+    const verdict = main.resolveStartupVerdict({ started: ["bot1"], failed: [] });
+    assert.equal(verdict.fatal, false);
+    assert.deepEqual(verdict.officialStarted, ["bot1"]);
+    assert.equal(verdict.onlyZca, false);
+});
+
+test("chỉ ZCA lên được vẫn hợp lệ, không phải lỗi chí mạng", () => {
+    const verdict = main.resolveStartupVerdict({ started: ["zca:pending"], failed: [] });
+    assert.equal(verdict.fatal, false, "một triển khai chỉ dùng tài khoản Zalo cá nhân phải chạy được");
+    assert.equal(verdict.onlyZca, true);
+    assert.deepEqual(verdict.officialStarted, []);
+});
+
+test("không nhà cung cấp nào lên được thì dừng và nêu rõ từng cái", () => {
+    const verdict = main.resolveStartupVerdict({
+        started: [],
+        failed: [{ botId: "bot1", message: "401 Unauthorized" }]
+    });
+    assert.equal(verdict.fatal, true);
+    assert.match(verdict.reason, /Không nhà cung cấp nào khởi động được/);
+    assert.match(verdict.reason, /bot1 \(401 Unauthorized\)/);
+});
+
+test("bot chính thức lỗi nhưng ZCA lên được thì chỉ cảnh báo", () => {
+    const verdict = main.resolveStartupVerdict({
+        started: ["zca:u9"],
+        failed: [{ botId: "bot1", message: "polling failed" }]
+    });
+    assert.equal(verdict.fatal, false);
+    assert.equal(verdict.onlyZca, true);
+});
+
+test("cancelSchedulerJobs hủy đúng các job đã đăng ký", () => {    assert.ok(main.cancelSchedulerJobs() >= 1, "phải có ít nhất một job để hủy");
     assert.equal(main.cancelSchedulerJobs(), 0, "gọi lần hai không còn job nào");
 });
 

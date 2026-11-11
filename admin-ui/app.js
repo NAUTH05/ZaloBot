@@ -516,6 +516,36 @@ function renderSettings() {
     const form = document.createElement("form"); form.id = "pageSizeForm"; form.innerHTML = `<label>Default rows per page<select id="defaultPageSize" name="defaultPageSize">${PAGE_SIZES.map((n) => `<option value="${n}" ${n === pageSize() ? "selected" : ""}>${n}</option>`).join("")}</select></label><button class="secondary" type="submit">Save page size</button><p id="pageSizeMessage" class="success"></p>`; panel.appendChild(form);
     form.addEventListener("submit", async (event) => { event.preventDefault(); try { await api("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ defaultPageSize: Number(form.elements.defaultPageSize.value) }) }); settings.defaultPageSize = Number(form.elements.defaultPageSize.value); Object.keys(pageState).forEach((key) => { pageState[key].page = 1; pageState[key].size = settings.defaultPageSize; }); $("#pageSizeMessage").textContent = "Saved."; applyPaginationViews(); } catch (error) { $("#pageSizeMessage").textContent = error.message; } });
   }
+  // Hạn mức trợ lý AI. Để trống = theo .env; 0 = không giới hạn. Hai thứ khác
+  // nhau nên ô nhập phân biệt rõ bằng placeholder thay vì mặc định 0.
+  if (panel && !$("#aiLimitForm")) {
+    const ai = settings.ai || {};
+    const input = (id, label, hint, value) => `<label>${label}<input id="${id}" name="${id}" type="number" min="0" step="1" value="${value === null || value === undefined ? "" : value}" placeholder="theo .env" /><small class="muted">${hint}</small></label>`;
+    const form = document.createElement("form");
+    form.id = "aiLimitForm";
+    form.innerHTML = `<h3>Trợ lý AI</h3>
+      ${input("aiPerUser", "Hạn mức mỗi người mỗi ngày", "0 = không giới hạn · để trống = theo .env", ai.perUserDailyLimit)}
+      ${input("aiGlobal", "Hạn mức toàn hệ thống mỗi ngày", "0 = không giới hạn · để trống = theo .env", ai.globalDailyLimit)}
+      ${input("aiBudget", "Ngân sách tháng (USD)", "0 = không đặt trần · để trống = theo .env", ai.monthlyBudgetUsd)}
+      <label>Trợ lý trong nhóm<select id="aiGroup" name="aiGroup"><option value="">Theo .env</option><option value="true">Bật</option><option value="false">Tắt</option></select></label>
+      <button class="secondary" type="submit">Lưu hạn mức AI</button>
+      <p id="aiLimitMessage" class="success"></p>`;
+    panel.appendChild(form);
+    form.elements.aiGroup.value = ai.groupAssistant === true ? "true" : ai.groupAssistant === false ? "false" : "";
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const num = (id) => { const raw = String(form.elements[id].value).trim(); return raw === "" ? null : Number(raw); };
+      const groupValue = form.elements.aiGroup.value;
+      try {
+        const updated = await api("/api/admin/settings", {
+          method: "PATCH",
+          body: JSON.stringify({ ai: { perUserDailyLimit: num("aiPerUser"), globalDailyLimit: num("aiGlobal"), monthlyBudgetUsd: num("aiBudget"), groupAssistant: groupValue === "" ? null : groupValue === "true" } })
+        });
+        settings.ai = updated.ai;
+        $("#aiLimitMessage").textContent = "Đã lưu.";
+      } catch (error) { $("#aiLimitMessage").textContent = error.message; }
+    });
+  }
 }
 
 function renderCommands() {

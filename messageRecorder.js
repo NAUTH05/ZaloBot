@@ -17,7 +17,8 @@
 //       lastMessageDirection, unreadCount, createdAt, updatedAt
 //   bot_conversations/{conversationId}/messages/{messageId}
 //     - direction (inbound|outbound), text, attachments[], status, providerMsgId,
-//       botId, chatId, sentAt, deliveredAt, failedAt, error, source
+//       botId, chatId, sentAt, deliveredAt, failedAt, error, source,
+//       senderUserId (chỉ tin vào; null với tin ra)
 // ============================================================================
 
 const { normalizeBotId, storageKeyPrefix } = require("./bots");
@@ -137,6 +138,10 @@ async function recordMessage({
     source = SOURCE.BOT_COMMAND,
     chatType = null,
     displayName = null,
+    // Danh tính người gửi của tin VÀO. Bắt buộc với tin nhóm: nếu không lưu, trợ
+    // lý AI không thể tách ngữ cảnh của từng thành viên và mọi tin trong nhóm sẽ
+    // trở thành ngữ cảnh chung — vừa sai quyền riêng tư vừa tốn token.
+    senderUserId = null,
     timestamp = null,
     error = null
 }) {
@@ -201,6 +206,10 @@ async function recordMessage({
             text: String(text || "").slice(0, 4096),
             attachments: Array.isArray(attachments) ? attachments.slice(0, 10) : [],
             status,
+            // Chỉ tin VÀO mới có người gửi; tin ra do chính bot gửi.
+            senderUserId: direction === DIRECTION.INBOUND && senderUserId != null
+                ? String(senderUserId).slice(0, 64)
+                : null,
             providerMsgId: providerMsgId ? String(providerMsgId).slice(0, 128) : null,
             source,
             sentAt: direction === DIRECTION.OUTBOUND ? ts : null,

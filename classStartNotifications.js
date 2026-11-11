@@ -30,13 +30,20 @@ function vietnamSerial(info) {
     );
 }
 
-function findDueClassStartLessons(lessons, evaluationAt = new Date(), gracePeriodMs = DEFAULT_GRACE_PERIOD_MS) {
+// Buổi học nào đã tới thời điểm cần nhắc.
+//
+// `leadMs` > 0 nghĩa là nhắc TRƯỚC giờ bắt đầu: mốc cần nhắc là (bắt đầu − lead).
+// Nhờ vậy cùng một hàm phục vụ cả "nhắc đúng lúc vào học" (lead 0, hành vi cũ) và
+// "nhắc trước 10 phút / 1 tiếng" mà không cần thêm cơ chế thứ hai.
+function findDueClassStartLessons(lessons, evaluationAt = new Date(), gracePeriodMs = DEFAULT_GRACE_PERIOD_MS, leadMs = 0) {
     const currentSerial = vietnamSerial(getVietnamDateInfo(evaluationAt));
+    const lead = Number(leadMs) > 0 ? Number(leadMs) : 0;
     return (lessons || []).filter((lesson) => {
         if (!isClassStartReminderLesson(lesson)) return false;
         const startSerial = vietnamSerial(getApiDateTimeInfo(lesson.ThoiGianBD));
         if (startSerial == null) return false;
-        const delay = currentSerial - startSerial;
+        const notifySerial = startSerial - lead;
+        const delay = currentSerial - notifySerial;
         return delay >= 0 && delay <= gracePeriodMs;
     });
 }
@@ -55,21 +62,33 @@ function createLessonEventKey(studentId, lesson) {
     return [text(studentId), start.dateKey, `${start.hour}:${start.minute}`, stableLessonIdentity].join("|");
 }
 
-function createDeliveryEventId(subscriptionKey, studentId, lesson) {
+// Mã chống trùng của một lần nhắc. Mốc nhắc khác nhau là hai lần nhắc khác nhau:
+// "trước 1 tiếng" và "đúng lúc vào học" cho cùng một buổi phải cùng tồn tại.
+// Với lead = 0, mã giữ NGUYÊN như trước để không gửi lại các buổi đã nhắc.
+function createDeliveryEventId(subscriptionKey, studentId, lesson, leadMs = 0) {
     const lessonEventKey = createLessonEventKey(studentId, lesson);
     if (!lessonEventKey) return null;
-    return crypto.createHash("sha256").update(`${subscriptionKey}|${lessonEventKey}`).digest("hex");
+    const lead = Number(leadMs) > 0 ? Math.trunc(Number(leadMs)) : 0;
+    const base = `${subscriptionKey}|${lessonEventKey}`;
+    const payload = lead > 0 ? `${base}|lead:${lead}` : base;
+    return crypto.createHash("sha256").update(payload).digest("hex");
 }
 
-function formatClassStartNotification(lessonsInput) {
+function formatClassStartNotification(lessonsInput, options = {}) {
     const lessons = (Array.isArray(lessonsInput) ? lessonsInput : [lessonsInput]).filter(Boolean);
     const numbered = lessons.length > 1;
     const lessonBlocks = lessons.map((lesson, index) => formatLesson(lesson, index, {
         layout: "notification",
         numbered
     }));
+    const leadMinutes = Number(options.leadMinutes) > 0 ? Math.trunc(Number(options.leadMinutes)) : 0;
+    // Nhắc trước phải NÓI RÕ là nhắc trước bao lâu, nếu không người dùng đọc "sắp
+    // đến giờ học" lúc 11:50 cho lớp 12:50 và tưởng đồng hồ sai.
+    const header = leadMinutes > 0
+        ? `# {orange}[SẮP ĐẾN GIỜ HỌC] Còn ${leadMinutes} phút{/orange}`
+        : "# {green}[ĐẾN GIỜ HỌC]{/green}";
     return [
-        "# {green}[ĐẾN GIỜ HỌC]{/green}",
+        header,
         lessonBlocks.join("\n\n────────────\n\n"),
         "Chúc bạn học tốt!"
     ].filter(Boolean).join("\n\n");
@@ -116,8 +135,9 @@ function pruneEvents(state, now = new Date()) {
     }
 }
 
-function claimDelivery({ subscriptionKey, subscription, lesson, now = new Date(), filePath = FILE_PATH }) {
-    const eventId = createDeliveryEventId(subscriptionKey, subscription.studentId, lesson);
+function claimDelivery({ subscriptionKey, subscription, lesson, leadMs = 0, now = new Date(), filePath = FILE_PATH }) {
+    const lead = Number(leadMs) > 0 ? Math.trunc(Number(leadMs)) : 0;
+    const eventId = createDeliveryEventId(subscriptionKey, subscription.studentId, lesson, lead);
     if (!eventId) return null;
     const state = readState(filePath);
     pruneEvents(state, now);
@@ -129,6 +149,7 @@ function claimDelivery({ subscriptionKey, subscription, lesson, now = new Date()
         chatId: String(subscription.chatId),
         userId: String(subscription.userId),
         studentId: String(subscription.studentId),
+        leadMinutes: lead,
         lessonEventKey: createLessonEventKey(subscription.studentId, lesson),
         lessonDateKey: start.dateKey,
         lessonStartTime: `${start.hour}:${start.minute}`,
@@ -202,12 +223,24 @@ function createClassStartReminderService(options) {
 
         running = true;
         const result = { processed: true, students: grouped.size, sent: 0, lessons: 0, failed: 0, duplicates: 0 };
+        // Mỗi đăng ký có thể muốn nhắc trước một khoảng khác nhau, nên "đến giờ
+        // nhắc" phải tính theo từng nhóm lead — không thể tính một lần cho cả MSSV.
+        const leadMinutesOf = (subscription) => {
+            const minutes = Number(subscription?.classStartLeadMinutes);
+            return Number.isFinite(minutes) && minutes > 0 ? Math.trunc(minutes) : 0;
+        };
         try {
             for (const [studentId, targets] of grouped.entries()) {
                 try {
+                    const leads = [...new Set(targets.map(({ subscription }) => leadMinutesOf(subscription)))];
                     const cachedSchedule = await fetchForBucket(studentId, evaluationAt);
-                    const cachedDueLessons = findDueClassStartLessons(cachedSchedule.lessons, evaluationAt, gracePeriodMs);
-                    if (cachedDueLessons.length === 0) continue;
+                    const anyDue = leads.some((minutes) => findDueClassStartLessons(
+                        cachedSchedule.lessons,
+                        evaluationAt,
+                        gracePeriodMs,
+                        minutes * 60000
+                    ).length > 0);
+                    if (!anyDue) continue;
 
                     // Confirm once more at delivery time so a moved or cancelled lesson is never sent from stale cache.
                     const confirmedSchedule = await fetchSchedule(studentId, evaluationAt);
@@ -215,55 +248,65 @@ function createClassStartReminderService(options) {
                         bucket: Math.floor(evaluationAt.getTime() / effectiveCacheTtlMs),
                         scheduleData: confirmedSchedule
                     });
-                    const dueLessonGroups = groupDueLessonsByStart(
-                        findDueClassStartLessons(confirmedSchedule.lessons, evaluationAt, gracePeriodMs)
-                    );
 
-                    for (const { subscriptionKey, subscription } of targets) {
-                        const currentSubscription = getSubscriptions()[subscriptionKey];
-                        if (!currentSubscription || currentSubscription.studentId !== subscription.studentId ||
-                            !isEligible(currentSubscription)) continue;
-                        for (const dueLessons of dueLessonGroups) {
-                            const claimed = [];
-                            for (const lesson of dueLessons) {
-                                const eventId = claimDelivery({
-                                    subscriptionKey,
-                                    subscription: currentSubscription,
-                                    lesson,
-                                    now: evaluationAt,
-                                    filePath: stateFilePath
-                                });
-                                if (!eventId) {
-                                    result.duplicates += 1;
-                                    continue;
+                    for (const minutes of leads) {
+                        const leadMs = minutes * 60000;
+                        const dueLessonGroups = groupDueLessonsByStart(
+                            findDueClassStartLessons(confirmedSchedule.lessons, evaluationAt, gracePeriodMs, leadMs)
+                        );
+                        if (dueLessonGroups.length === 0) continue;
+
+                        for (const { subscriptionKey, subscription } of targets) {
+                            if (leadMinutesOf(subscription) !== minutes) continue;
+                            const currentSubscription = getSubscriptions()[subscriptionKey];
+                            // Thiết lập có thể vừa đổi giữa hai bước: dùng giá trị HIỆN
+                            // TẠI, để không gửi "còn 60 phút" cho người vừa đổi sang 10.
+                            if (!currentSubscription || currentSubscription.studentId !== subscription.studentId ||
+                                leadMinutesOf(currentSubscription) !== minutes ||
+                                !isEligible(currentSubscription)) continue;
+                            for (const dueLessons of dueLessonGroups) {
+                                const claimed = [];
+                                for (const lesson of dueLessons) {
+                                    const eventId = claimDelivery({
+                                        subscriptionKey,
+                                        subscription: currentSubscription,
+                                        lesson,
+                                        leadMs,
+                                        now: evaluationAt,
+                                        filePath: stateFilePath
+                                    });
+                                    if (!eventId) {
+                                        result.duplicates += 1;
+                                        continue;
+                                    }
+                                    claimed.push({ eventId, lesson });
                                 }
-                                claimed.push({ eventId, lesson });
-                            }
-                            if (claimed.length === 0) continue;
+                                if (claimed.length === 0) continue;
 
-                            await flushPersistence();
-                            let delivery;
-                            try {
-                                const claimedLessons = claimed.map((item) => item.lesson);
-                                delivery = await sendReminder(
-                                    currentSubscription,
-                                    formatClassStartNotification(claimedLessons),
-                                    claimedLessons
-                                );
-                            } catch (error) {
-                                delivery = { failed: true, error };
-                            }
+                                await flushPersistence();
+                                let delivery;
+                                try {
+                                    const claimedLessons = claimed.map((item) => item.lesson);
+                                    delivery = await sendReminder(
+                                        currentSubscription,
+                                        formatClassStartNotification(claimedLessons, { leadMinutes: minutes }),
+                                        claimedLessons
+                                    );
+                                } catch (error) {
+                                    delivery = { failed: true, error };
+                                }
 
-                            if (delivery == null || delivery === true || delivery.sent === true) {
-                                for (const item of claimed) markDelivered(item.eventId, new Date(), stateFilePath);
-                                result.sent += 1;
-                                result.lessons += claimed.length;
-                            } else {
-                                onError({ stage: "delivery", error: delivery.error || new Error("Reminder delivery failed") });
-                                for (const item of claimed) releaseDelivery(item.eventId, stateFilePath);
-                                result.failed += 1;
+                                if (delivery == null || delivery === true || delivery.sent === true) {
+                                    for (const item of claimed) markDelivered(item.eventId, new Date(), stateFilePath);
+                                    result.sent += 1;
+                                    result.lessons += claimed.length;
+                                } else {
+                                    onError({ stage: "delivery", error: delivery.error || new Error("Reminder delivery failed") });
+                                    for (const item of claimed) releaseDelivery(item.eventId, stateFilePath);
+                                    result.failed += 1;
+                                }
+                                await flushPersistence();
                             }
-                            await flushPersistence();
                         }
                     }
                 } catch (error) {

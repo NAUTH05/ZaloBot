@@ -11,6 +11,18 @@ const TARGET_DAY_TODAY = 0;
 const TARGET_DAY_TOMORROW = 1;
 const TARGET_DAY_OFFSETS = Object.freeze([TARGET_DAY_TODAY, TARGET_DAY_TOMORROW]);
 
+// Nhắc trước giờ bắt đầu tiết học bao nhiêu phút. 0 = đúng lúc bắt đầu (hành vi
+// cũ). Trần 180 phút: nhắc trước nửa ngày là vô nghĩa và dễ gửi nhầm buổi khác.
+const CLASS_START_LEAD_DEFAULT = 0;
+const CLASS_START_LEAD_MAX = 180;
+
+function normalizeClassStartLead(value) {
+    if (value === null || value === undefined || value === "") return CLASS_START_LEAD_DEFAULT;
+    const number = Number(value);
+    if (!Number.isFinite(number) || number < 0) return CLASS_START_LEAD_DEFAULT;
+    return Math.min(Math.trunc(number), CLASS_START_LEAD_MAX);
+}
+
 function normalizeNotificationTime(value, fallback = DEFAULT_NOTIFICATION_TIME) {
     const raw = String(value == null ? "" : value).trim();
     if (!raw) return fallback;
@@ -145,6 +157,9 @@ function saveStudent(contextInput, { studentId, studentName }, filePath = FILE_P
         notificationTimes: normalizeNotificationTimes(existing),
         notificationsEnabled: existing?.studentId === studentId && existing.notificationsEnabled === true,
         classStartNotificationsEnabled: existing?.studentId === studentId && existing.classStartNotificationsEnabled === true,
+        // Giữ nguyên thiết lập "nhắc trước N phút" khi lưu lại MSSV — nếu không,
+        // /luumssv sẽ âm thầm xoá một tuỳ chọn người dùng đã đặt.
+        classStartLeadMinutes: normalizeClassStartLead(existing?.classStartLeadMinutes),
         updatedAt: new Date().toISOString()
     };
     writeJsonStore(filePath, FILE_PATH, subscriptions);
@@ -209,6 +224,21 @@ function enableClassStartNotifications(contextInput, filePath = FILE_PATH) {
     const key = createSubscriptionKey(contextInput);
     const subscription = subscriptions[key];
     if (!isCurrentSubscription(subscription) || !subscription.studentId) return null;
+    subscription.classStartNotificationsEnabled = true;
+    subscription.classStartLeadMinutes = normalizeClassStartLead(subscription.classStartLeadMinutes);
+    subscription.updatedAt = new Date().toISOString();
+    writeJsonStore(filePath, FILE_PATH, subscriptions);
+    return subscription;
+}
+
+// Đặt "nhắc trước N phút". Bật luôn nhắc giờ học nếu chưa bật: người dùng vừa nói
+// rõ họ muốn được nhắc, nên bắt họ gõ thêm /batnhaclich là thừa.
+function setClassStartLead(contextInput, minutes, filePath = FILE_PATH) {
+    const subscriptions = readJsonStore(filePath, FILE_PATH, {});
+    const key = createSubscriptionKey(contextInput);
+    const subscription = subscriptions[key];
+    if (!isCurrentSubscription(subscription) || !subscription.studentId) return null;
+    subscription.classStartLeadMinutes = normalizeClassStartLead(minutes);
     subscription.classStartNotificationsEnabled = true;
     subscription.updatedAt = new Date().toISOString();
     writeJsonStore(filePath, FILE_PATH, subscriptions);
@@ -338,6 +368,8 @@ function getClassStartNotificationSubscriptions() {
 }
 
 module.exports = {
+    CLASS_START_LEAD_DEFAULT,
+    CLASS_START_LEAD_MAX,
     CONTEXT_VERSION,
     DEFAULT_NOTIFICATION_TIME,
     FILE_PATH,
@@ -358,12 +390,14 @@ module.exports = {
     migrateNotificationTargetDays,
     needsTargetDayMigration,
     nextNotificationTimeId,
+    normalizeClassStartLead,
     normalizeNotificationTime,
     normalizeNotificationTimes,
     normalizeTargetDayOffset,
     notificationTimeKey,
     removeNotificationTime,
     saveStudent,
+    setClassStartLead,
     updateNotificationTime,
     updateSubscriptionMetadata
 };

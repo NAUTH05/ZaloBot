@@ -52,6 +52,13 @@ for (const id of requiredIds) {
     if (!html.includes(`id="${id}"`)) fail(`index.html is missing #${id}`);
 }
 
+// Hạn mức trợ lý AI do quản trị viên đặt. Giao diện phải gửi đúng khối `ai` của
+// PATCH /api/admin/settings, và phải đọc lại giá trị server trả về — nếu chỉ sửa
+// giao diện mà quên phần này thì nút Lưu sẽ "thành công" mà không đổi gì.
+if (!app.includes('form.id = "aiLimitForm"')) fail("Settings must render the AI limit form");
+if (!app.includes("JSON.stringify({ ai: {")) fail("Settings must PATCH the `ai` block of /api/admin/settings");
+if (!app.includes("settings.ai = updated.ai")) fail("Settings must store the AI limits returned by the server");
+
 // Command console: chọn nhiều người nhận. Khóa gửi lên là mảng User ID thật.
 if (!app.includes('id="targetUserInput"')) fail("Command console must render the target user combobox input");
 if (!app.includes("combobox-list")) fail("Command console must render the combobox option list");

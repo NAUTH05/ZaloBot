@@ -6,6 +6,14 @@ const path = require("node:path");
 process.env.BOT_TOKEN = "token-bot-1";
 process.env.BOT_2_TOKEN = "token-bot-2";
 delete process.env.BOT_3_TOKEN;
+// ZCA tắt cho bài kiểm tra này. Nếu không ghim, bài "registry có đúng các bot đã
+// bật" sẽ phụ thuộc nội dung .env của máy đang chạy (bật ZCA là thêm một danh
+// tính vào danh sách đang bật). dotenv không ghi đè biến đã có.
+process.env.ZCA_ENABLED = "false";
+// Cổng 0 = để hệ điều hành cấp cổng trống. Không ghim thì bài "khởi động polling"
+// sẽ đụng cổng 6003 của tiến trình dev đang chạy trên máy và báo EADDRINUSE.
+process.env.ADMIN_PORT = "0";
+process.env.ADMIN_BASE_PATH = "/";
 
 const ROOT = path.join(__dirname, "..");
 
@@ -136,14 +144,17 @@ test("bot 1 nhận hai token khác nhau bị từ chối thay vì chọn bừa",
     assert.ok(result.errors.some((line) => line.includes("token khác nhau")));
 });
 
-test("thiếu token bot 1 là lỗi cấu hình, không chạy được chỉ với bot 2", () => {
+test("thiếu token bot 1 chỉ tắt bot 1, không chặn khởi động", () => {
     const result = resolveBotConfigs({ BOT_2_TOKEN: "b" });
     // Bot 2 vẫn được nhận diện là có token...
     assert.deepEqual(result.bots.map((bot) => bot.botId), ["bot2"]);
-    // ...nhưng bot 1 thiếu token là lỗi chặn khởi động, và main.js từ chối chạy
-    // khi không có bot 1 (nó sở hữu không gian khóa cũ).
-    assert.ok(result.errors.some((line) => line.includes("Thiếu token cho bot 1")));
-    assert.equal(result.bots.some((bot) => bot.botId === "bot1"), false);
+    // ...và thiếu bot 1 chỉ là một CẢNH BÁO: một triển khai chỉ dùng bot 2/3 hoặc
+    // chỉ ZCA vẫn hợp lệ. main.js quyết định có chặn hay không, dựa trên việc có
+    // danh tính nào chạy được thật hay không.
+    assert.deepEqual(result.errors, []);
+    assert.ok(result.warnings.some((line) => line.includes("bot1 đang tắt")));
+    assert.ok(result.warnings.some((line) => line.includes("Không gian khóa cũ")),
+        "phải nói rõ hệ quả: khóa cũ của bot 1 không còn ai dùng");
 });
 
 test("mô tả bot không bao giờ chứa token", () => {

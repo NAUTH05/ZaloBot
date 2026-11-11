@@ -45,13 +45,13 @@ const HELP_COMMANDS = [
     },
     {
         command: "lich",
-        usage: "/lich [MSSV]",
+        usage: "/lich [MSSV] [ngày]",
         group: HELP_GROUPS.PUBLIC,
         category: CATEGORY.SCHEDULE,
         permission: "user",
-        description: "Xem lịch học hôm nay.",
-        examples: ["/lich", "/lich 123000xxx"],
-        note: "Nếu không truyền MSSV, dùng MSSV đã lưu."
+        description: "Xem lịch học của một ngày cụ thể.",
+        examples: ["/lich", "/lich mai", "/lich thứ 5", "/lich 123000xxx 12/11"],
+        note: "Ngày nhận: homnay, mai, mot, thu2…thu7, chunhat, 12/11, 2026-11-12. Bỏ trống = hôm nay. Không truyền MSSV thì dùng MSSV đã lưu."
     },
     {
         command: "lichtuan",
@@ -149,13 +149,23 @@ const HELP_COMMANDS = [
     },
     {
         command: "batnhaclich",
-        usage: "/batnhaclich",
+        usage: "/batnhaclich [số phút]",
         group: HELP_GROUPS.PUBLIC,
         category: CATEGORY.NOTIFY,
         permission: "user",
         description: "Bật nhắc giờ bắt đầu tiết học.",
-        examples: ["/batnhaclich"],
-        note: "Cần lưu MSSV bằng /luumssv trước."
+        examples: ["/batnhaclich", "/batnhaclich 60"],
+        note: "Cần lưu MSSV bằng /luumssv trước. Thêm số phút để nhắc trước (0–180); bỏ trống = nhắc đúng lúc vào học."
+    },
+    {
+        command: "nhactruoc",
+        usage: "/nhactruoc [số phút]",
+        group: HELP_GROUPS.PUBLIC,
+        category: CATEGORY.NOTIFY,
+        permission: "user",
+        description: "Nhắc trước giờ học bao nhiêu phút.",
+        examples: ["/nhactruoc 10", "/nhactruoc 60"],
+        note: "Ví dụ lớp bắt đầu 12:50, đặt 60 thì nhận tin lúc 11:50. Số phút 0–180. Gõ /nhactruoc không kèm số để xem mức đang đặt."
     },
     {
         command: "tatnhaclich",
@@ -183,7 +193,7 @@ const HELP_COMMANDS = [
         permission: "user",
         description: "Hỏi trợ lý AI về lịch học đã lưu.",
         examples: ["/ai Tuần này tôi học môn gì?"],
-        note: "Cần lưu MSSV bằng /luumssv trước."
+        note: "Cần lưu MSSV bằng /luumssv trước. Có thể nhắn tự nhiên, không cần gõ lệnh — ví dụ \"nhận lịch lúc 6 giờ sáng hôm nay\"."
     },
     {
         command: "time",

@@ -112,6 +112,14 @@ test("admin API exposes chat CRUD, settings and command execution", async (t) =>
     assert.equal(admin.status, 200);
     const settings = await request(port, "GET", "/zalobot/api/admin/settings", null, cookie);
     assert.ok(settings.body.admins.some((item) => item.userId === "dashboard-admin-user"));
+
+    // Hạn mức trợ lý AI: ghi được khối `ai` và trả lại đúng giá trị đã lưu.
+    const aiPatch = await request(port, "PATCH", "/zalobot/api/admin/settings", { ai: { perUserDailyLimit: 0, monthlyBudgetUsd: 5 } }, cookie);
+    assert.equal(aiPatch.status, 200);
+    assert.equal(aiPatch.body.ai.perUserDailyLimit, 0, "0 = không giới hạn, không được biến thành null");
+    assert.equal(aiPatch.body.ai.monthlyBudgetUsd, 5);
+    const badAi = await request(port, "PATCH", "/zalobot/api/admin/settings", { ai: { perUserDailyLimit: -3 } }, cookie);
+    assert.equal(badAi.status, 400, "giá trị sai phải bị từ chối để người vận hành biết");
     const command = await request(port, "POST", "/zalobot/api/admin/commands", { command: "/quanlychat", userId: "dashboard-admin-user", chatId: "dashboard-admin-chat" }, cookie);
     assert.equal(command.status, 400, "lệnh toàn cục không chạy theo từng người nhận nên phải bị từ chối");
     assert.match(command.body.error, /không chạy theo từng người được/);

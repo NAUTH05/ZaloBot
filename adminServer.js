@@ -32,6 +32,7 @@ const {
     getAdminSettings,
     getConfiguredAdminIds,
     removeAdmin,
+    setAiSettings,
     setBatchDelayMs,
     setDefaultPageSize,
     setMaxBatchSize,
@@ -1584,11 +1585,13 @@ async function handleApi(request, response, url, options = {}) {
             if (body.defaultPageSize !== undefined) updated = setDefaultPageSize(body.defaultPageSize);
             if (body.maxBatchSize !== undefined) updated = setMaxBatchSize(body.maxBatchSize);
             if (body.batchDelayMs !== undefined) updated = setBatchDelayMs(body.batchDelayMs);
+            if (body.ai !== undefined) updated = setAiSettings(body.ai);
             audit("settings.update", request, {
                 result: "success",
                 defaultPageSize: updated.defaultPageSize,
                 maxBatchSize: updated.maxBatchSize,
-                batchDelayMs: updated.batchDelayMs
+                batchDelayMs: updated.batchDelayMs,
+                ai: updated.ai
             });
             return json(response, 200, updated);
         } catch (error) {

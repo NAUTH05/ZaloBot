@@ -183,8 +183,16 @@ function resolveBotConfigs(env = process.env) {
 
         if (provided.length === 0) {
             if (botId === LEGACY_BOT_ID) {
-                errors.push(
-                    "Thiếu token cho bot 1. Đặt BOT_TOKEN (đường tương thích cũ) hoặc BOT_1_TOKEN trong .env."
+                // Thiếu token bot 1 KHÔNG còn là lỗi chặn khởi động: một triển khai
+                // chỉ dùng tài khoản Zalo cá nhân (ZCA) hoặc chỉ bot 2/3 vẫn hợp lệ.
+                //
+                // Hệ quả phải nói rõ, vì nó không hiển nhiên: bot 1 sở hữu không
+                // gian khóa CŨ (khóa không tiền tố). Không có bot 1 thì những bản
+                // ghi đó không có tiến trình nào đọc/ghi — với dữ liệu sản xuất cũ,
+                // đó là mất kết nối với toàn bộ người dùng hiện có.
+                warnings.push(
+                    "bot1 đang tắt (không có BOT_TOKEN hoặc BOT_1_TOKEN). " +
+                    "Không gian khóa cũ của bot 1 sẽ không được sử dụng."
                 );
             } else {
                 // Thiếu token bot 2/3 chỉ đơn giản là bot đó tắt.
