@@ -35,6 +35,7 @@ Xin chào **${escapeMarkdown(displayName || "bạn")}**!
 
 > Dùng **/luumssv [MSSV]** để lưu mã sinh viên.
 > Dùng **/lich** để xem lịch hôm nay hoặc **/nhanlich hh:mm homnay|homsau** để chọn giờ nhận lịch.
+> Combo nhanh: **/luumssv + mssv, /nhanlich 06:00 homnay, /nhanlich 20:00 homsau** (tự động nhận lịch hôm nay vào 06:00 và hôm sau vào 20:00).
 
 {orange}Dùng **/help** để xem danh sách lệnh.{/orange}`;
 }
@@ -92,8 +93,8 @@ function formatClassStartStatus(subscription) {
 **MSSV:** ${escapeMarkdown(subscription.studentId)}
 
 > ${enabled
-        ? "Bạn sẽ nhận thông báo khi mỗi tiết học bắt đầu."
-        : "Dùng **/batnhaclich** để bật tính năng này."}`;
+            ? "Bạn sẽ nhận thông báo khi mỗi tiết học bắt đầu."
+            : "Dùng **/batnhaclich** để bật tính năng này."}`;
 }
 
 // ---------------------------------------------------------------------------
