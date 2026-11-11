@@ -138,7 +138,7 @@ const { createAssistant } = require("./ai/assistantService");
 const { loadAiConfig } = require("./ai/aiConfig");
 const { normalizeTimeToken, parseCommandHint, parseMultiCommandPlan, parseSingleCommand } = require("./ai/commandNormalizer");
 // Cổng nhóm: trong nhóm chỉ phản hồi khi được nhắc tới (hoặc khi có lệnh "/...").
-const { groupReplyOptionsFromEnv, isGroupChat, resolveGroupReplyDecision } = require("./groupMentions");
+const { botIdentityOf, collectMentionIds, groupReplyOptionsFromEnv, isGroupChat, resolveGroupReplyDecision } = require("./groupMentions");
 // Chính sách theo TỪNG nhóm: nhóm hỗ trợ có thể bật chế độ nhận mọi tin.
 const groupPolicy = require("./groupPolicy");
 const { flushPersistenceWrites, initializeFirestorePersistence } = require("./firestorePersistence");
@@ -147,11 +147,12 @@ const { createAdminServer, BASE_PATH } = require("./adminServer");
 const { DEFAULT_SHUTDOWN_TIMEOUT_MS, createShutdownController } = require("./shutdown");
 const { recordSystemLog } = require("./operationalLog");
 const { getAdminSettings, getConfiguredAdminIds, isConfiguredAdmin } = require("./adminSettings");
-const { LEGACY_BOT_ID, extractBotName, isZcaId, normalizeBotId, parseScopedKey, providerTypeOf, resolveBotConfigs, resolveBotDisplayName, scopeKey } = require("./bots");
+const { LEGACY_BOT_ID, extractBotName, isZcaId, normalizeBotId, parseAliases, parseScopedKey, providerTypeOf, resolveBotConfigs, resolveBotDisplayName, scopeKey } = require("./bots");
 const { createFriendRequestService } = require("./friendRequestService");
 const friendRequestStore = require("./friendRequests");
 const { createOfficialProvider } = require("./providers/officialProvider");
 const { createZcaProvider } = require("./providers/zca/zcaProvider");
+const { isPendingZca, migratePendingZcaOwnership } = require("./zcaOwnershipMigration");
 const { createRuntimeMetrics } = require("./runtimeMetrics");
 const {
     addAdminReply,
@@ -550,6 +551,9 @@ const zcaProvider = createZcaProvider({
     sessionPath: process.env.ZCA_SESSION_PATH,
     autoReconnect: process.env.ZCA_AUTO_RECONNECT === undefined ? true : isTruthyEnv(process.env.ZCA_AUTO_RECONNECT),
     displayName: process.env.ZCA_DISPLAY_NAME || null,
+    // Tên người dùng gõ trong nhóm. Mặc định lấy luôn nhãn hiển thị để một biến
+    // là đủ trong trường hợp thường gặp.
+    aliases: parseAliases(process.env.ZCA_ALIASES || process.env.ZCA_DISPLAY_NAME || ""),
     language: process.env.ZCA_LANGUAGE || "vi",
     // Tin nhắn ZCA phải chạy trong ngữ cảnh của CHÍNH nhà cung cấp ZCA.
     //
@@ -576,6 +580,17 @@ const zcaProvider = createZcaProvider({
     onIdentityChanged: (provider, newBotId, previousBotId) => {
         const moved = rekeyBot(previousBotId, newBotId);
         console.log(`[ZCA] danh tính: ${previousBotId} → ${newBotId}${moved ? "" : " (giữ nguyên khóa cũ)"}`);
+        // Dữ liệu ghi trong lúc còn khóa tạm phải đi theo danh tính thật. Bỏ bước
+        // này thì mọi bản ghi `zca:pending` trỏ tới một danh tính không còn tồn
+        // tại, và mọi đợt /thongbao, /update đều lặng lẽ bỏ qua chat đó.
+        try {
+            const migration = migratePendingZcaOwnership(previousBotId, newBotId);
+            if (migration.moved > 0) {
+                console.log(`[ZCA] chuyển ${migration.moved} bản ghi sang ${newBotId} (${migration.stores.join(", ")})`);
+            }
+        } catch (error) {
+            console.warn(`[ZCA] không chuyển được dữ liệu khóa tạm: ${error.message}`);
+        }
         // Danh tính vừa đổi nghĩa là tài khoản đã đăng nhập xong. Tra tên ngay bây
         // giờ — lúc khởi động chưa hỏi được nên tên thật chưa có.
         refreshBotName(newBotId).catch((error) => {
@@ -811,6 +826,14 @@ async function refreshBotName(botId) {
     }
 }
 const dashboardCommandContext = new AsyncLocalStorage();
+
+// Ghi lại những tin bot vừa trả lời cho MỘT lệnh, để biết lệnh đó có bị từ chối vì
+// cú pháp hay không.
+//
+// Vì sao cần: cảnh báo "SAI CÚ PHÁP" nằm rải rác trong handleCommand, mỗi nhánh một
+// câu. Thay vì sửa hàng chục chỗ, ta bọc lệnh trong một ngữ cảnh ghi tin — đúng
+// cách dashboardCommandContext đã làm — rồi đọc lại nội dung đã gửi.
+const commandReplyCapture = new AsyncLocalStorage();
 
 // Ngữ cảnh CỔNG TIẾP NHẬN cho một sự kiện tin nhắn vào.
 //
@@ -1067,6 +1090,10 @@ async function sendMessage(chatId, text, options = {}) {
         const commandContext = dashboardCommandContext.getStore();
         if (commandContext && String(commandContext.chatId) === String(chatId)) {
             commandContext.messages.push({ chatId: String(chatId), text: payload });
+        }
+        const replyCapture = commandReplyCapture.getStore();
+        if (replyCapture && String(replyCapture.chatId) === String(chatId)) {
+            replyCapture.messages.push(payload);
         }
         try {
             await providerQueues.enqueueFor(
@@ -1677,6 +1704,11 @@ function interactionOwnerId(target) {
 function resolveBroadcastOwner(target) {
     const ownerId = interactionOwnerId(target);
     if (!ownerId) return { ownerId: null, runtime: null, reason: "unverified_source" };
+    // Danh tính TẠM của ZCA (trước khi quét QR) không bao giờ là đích thật: bản ghi
+    // còn mang khóa này là dấu vết của lần ghi trước đăng nhập, và đã có bản ghi
+    // tương ứng dưới khóa thật. Báo "bot sở hữu đang tắt" cho nó là nói sai nguyên
+    // nhân — không có bot nào tên `zca:pending` để bật.
+    if (isPendingZca(ownerId)) return { ownerId, runtime: null, reason: "pending_identity" };
     const runtime = getBot(ownerId);
     if (!runtime) return { ownerId, runtime: null, reason: "owner_bot_offline" };
     return { ownerId, runtime, reason: null };
@@ -1685,7 +1717,7 @@ function resolveBroadcastOwner(target) {
 function getBroadcastTargets(feature = "broadcast") {
     // Khóa gộp là (botId, chatId). Cùng Chat ID ở hai tài khoản là hai đích riêng.
     const targets = new Map();
-    const skipped = { unverifiedSource: 0, ownerBotOffline: 0 };
+    const skipped = { unverifiedSource: 0, ownerBotOffline: 0, pendingIdentity: 0 };
     const addTarget = (key, target) => {
         if (!targets.has(key)) targets.set(key, target);
     };
@@ -1709,6 +1741,11 @@ function getBroadcastTargets(feature = "broadcast") {
         const owner = resolveBroadcastOwner(target);
         if (!owner.ownerId) {
             skipped.unverifiedSource += 1;
+            continue;
+        }
+        if (owner.reason === "pending_identity") {
+            // Bản ghi trùng của danh tính tạm: đếm riêng, không tính là bot đang tắt.
+            skipped.pendingIdentity += 1;
             continue;
         }
         addEntry(owner.ownerId, {
@@ -1855,14 +1892,15 @@ async function sendBotAnnouncement(message, options = {}) {
 }
 
 function formatBroadcastSummary(title, result) {
-    const skipped = result.skipped || { unverifiedSource: 0, ownerBotOffline: 0 };
-    const skipTotal = skipped.unverifiedSource + skipped.ownerBotOffline;
+    const skipped = result.skipped || { unverifiedSource: 0, ownerBotOffline: 0, pendingIdentity: 0 };
+    const skipTotal = skipped.unverifiedSource + skipped.ownerBotOffline + (skipped.pendingIdentity || 0);
+    const pendingPart = skipped.pendingIdentity > 0 ? `, ${skipped.pendingIdentity} bản ghi trùng của danh tính tạm` : "";
     return `# {green}✓ ${title}{/green}\n\n` +
         `> **Tổng cuộc trò chuyện:** ${result.targets}\n` +
         `> **Gửi thành công:** ${result.sent}\n` +
         `> **Gửi lỗi:** ${result.failed}` +
         (skipTotal > 0
-            ? `\n> **Bỏ qua:** ${skipTotal} (${skipped.unverifiedSource} chưa rõ tài khoản, ${skipped.ownerBotOffline} bot sở hữu đang tắt)`
+            ? `\n> **Bỏ qua:** ${skipTotal} (${skipped.unverifiedSource} chưa rõ tài khoản, ${skipped.ownerBotOffline} bot sở hữu đang tắt${pendingPart})`
             : "");
 }
 
@@ -3789,6 +3827,50 @@ async function handleAssistantMessage(context, text, groupDecision) {
     });
 }
 
+// Những câu trả lời này nghĩa là người dùng GÕ SAI, không phải bot từ chối quyền.
+// Chỉ nhóm này mới kéo theo phần giải thích của trợ lý.
+const SYNTAX_ERROR_MARKERS = ["SAI CÚ PHÁP", "MSSV KHÔNG HỢP LỆ", "CHƯA CÓ MSSV", "LỆNH KHÔNG HỢP LỆ"];
+
+function looksLikeSyntaxError(messages) {
+    const text = (messages || []).join("\n");
+    return SYNTAX_ERROR_MARKERS.some((marker) => text.includes(marker));
+}
+
+// Trợ lý giải thích lỗi cú pháp, dựa trên cú pháp THẬT của lệnh.
+async function explainSyntaxError({ context, text, command, failedReply, isGroup, send }) {
+    try {
+        const entry = command ? findHelpCommand(command) : null;
+        await getAssistantRuntime().explainCommandError({
+            context,
+            text,
+            failedReply,
+            usage: entry ? entry.usage : null,
+            isGroup,
+            send
+        });
+    } catch (error) {
+        logDiscord("ERROR", `syntax_help_failed: ${error.message}`);
+    }
+}
+
+// Chạy một lệnh và, nếu lệnh đó bị từ chối vì cú pháp, để trợ lý nói thêm.
+//
+// Việc ghi tin nằm trong một ngữ cảnh riêng chứ không sửa từng nhánh cảnh báo:
+// "SAI CÚ PHÁP" xuất hiện ở hàng chục chỗ trong handleCommand.
+async function runCommandWithSyntaxHelp({ msg, context, parsed, text, isGroup, send }) {
+    const capture = { chatId: context.chatId, messages: [] };
+    await commandReplyCapture.run(capture, () => handleCommand(msg, parsed));
+    if (!looksLikeSyntaxError(capture.messages)) return;
+    await explainSyntaxError({
+        context,
+        text,
+        command: parsed?.command || null,
+        failedReply: capture.messages.join("\n"),
+        isGroup,
+        send
+    });
+}
+
 async function handleIncomingMessage(runtime, msg) {
     // Sau khi bắt đầu tắt máy thì không xử lý tin mới: tránh bắt đầu một đợt gửi
     // hoặc một lệnh quản trị trong lúc tiến trình đang dừng.
@@ -3827,7 +3909,14 @@ async function handleIncomingMessage(runtime, msg) {
     if (!groupDecision.respond) {
         // Một dòng ngắn thay cho hai dòng log của tin được xử lý: nhóm lớp có thể
         // rất nhiều tin, và tin bị bỏ qua thì không có gì để chẩn đoán thêm.
-        console.log(`[Nhóm] bỏ qua tin không nhắc tới bot (${groupDecision.reason}) · ${botId}/${context.chatId}`);
+        //
+        // Ngoại lệ: tin CÓ "@" mà vẫn bị coi là không nhắc tới bot. Đó gần như luôn
+        // là cấu hình thiếu (biệt danh trong nhóm khác tên tài khoản), nên ghi rõ
+        // bot đang biết những tên nào. Không ghi nội dung tin.
+        const detail = String(msg.text || "").includes("@")
+            ? ` · có "@" nhưng không khớp (mention=${collectMentionIds(msg).size}, tên bot=${botIdentityOf(runtime).names.join("|") || "chưa biết"})`
+            : "";
+        console.log(`[Nhóm] bỏ qua tin không nhắc tới bot (${groupDecision.reason})${detail} · ${botId}/${context.chatId}`);
         return;
     }
 
@@ -4078,7 +4167,14 @@ async function handleIncomingMessage(runtime, msg) {
                 // được để lỗi làm chết vòng lặp polling — nuốt tại đây, cổng tiếp
                 // nhận đã ghi nhận kết quả qua notifyAdmissionFailure().
                 try {
-                    await handleCommand(msg, parsed);
+                    await runCommandWithSyntaxHelp({
+                        msg,
+                        context,
+                        parsed,
+                        text: effectiveText,
+                        isGroup: groupDecision.isGroup,
+                        send: (message) => sendMessage(context.chatId, message)
+                    });
                 } catch (error) {
                     logDiscord("ERROR", `command_failed: ${error.message}`);
                 }
@@ -4086,19 +4182,34 @@ async function handleIncomingMessage(runtime, msg) {
                 // Lệnh không có dấu "/": quy về lệnh chính tắc rồi dùng đúng engine
                 // cũ, nên thông điệp và nghiệp vụ không thể lệch nhau.
                 try {
-                    await handleCommand(msg, looseCommand);
+                    await runCommandWithSyntaxHelp({
+                        msg,
+                        context,
+                        parsed: looseCommand,
+                        text: effectiveText,
+                        isGroup: groupDecision.isGroup,
+                        send: (message) => sendMessage(context.chatId, message)
+                    });
                 } catch (error) {
                     logDiscord("ERROR", `command_failed: ${error.message}`);
                 }
             } else if (looksLikeCommand) {
+                const invalidText = formatWarningMessage(
+                    "LỆNH KHÔNG HỢP LỆ",
+                    "> Không thể phân tích lệnh này.\n> Dùng **/help** để xem cú pháp và danh sách lệnh."
+                );
                 try {
-                    await sendMessage(
-                        context.chatId,
-                        formatWarningMessage(
-                            "LỆNH KHÔNG HỢP LỆ",
-                            "> Không thể phân tích lệnh này.\n> Dùng **/help** để xem cú pháp và danh sách lệnh."
-                        )
-                    );
+                    await sendMessage(context.chatId, invalidText);
+                    // Không có lệnh nào để tra cú pháp, nên trợ lý chỉ có thể gợi ý
+                    // cách nói lại — vẫn hữu ích hơn một câu từ chối khô.
+                    await explainSyntaxError({
+                        context,
+                        text: effectiveText,
+                        command: null,
+                        failedReply: invalidText,
+                        isGroup: groupDecision.isGroup,
+                        send: (message) => sendMessage(context.chatId, message)
+                    });
                 } catch (error) {
                     logDiscord("ERROR", `invalid_command_reply_failed: ${error.message}`);
                 }
@@ -4403,6 +4514,8 @@ module.exports = {
     handleDeterministicBatch,
     // Quyết định sống còn sau khi khởi động nhà cung cấp: ZCA-only vẫn hợp lệ.
     resolveStartupVerdict,
+    // Dùng cho kiểm thử: nhận diện câu trả lời là cảnh báo cú pháp.
+    looksLikeSyntaxError,
     sendMessage,
     sendPhoto,
     sendFile,

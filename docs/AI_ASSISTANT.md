@@ -127,7 +127,6 @@ Nay danh sách lệnh được lấy trực tiếp từ `helpContent.js`, nên t
 trợ lý biết ngay, không phải sửa prompt.
 
 ## 4c. Lịch theo ngày và nhắc trước giờ học
-
 | Nhu cầu | Lệnh | Hành động AI |
 | --- | --- | --- |
 | Lịch một ngày bất kỳ | `/lich [MSSV] [ngày]` | `get_schedule_for_date {date}` |
@@ -142,6 +141,32 @@ Nhắc trước: `0` phút là hành vi cũ (nhắc đúng lúc vào học). Mã
 một lần nhắc bao gồm cả số phút, nên "trước 1 tiếng" và "đúng lúc vào học" cho
 cùng một buổi là hai lần nhắc độc lập, không chặn nhau; với `0` mã giữ nguyên như
 trước nên không có buổi nào bị gửi lại sau khi nâng cấp.
+
+## 4d. Trợ lý nói thêm khi người dùng gõ sai
+
+Khi bot trả lời một cảnh báo cú pháp — `SAI CÚ PHÁP`, `MSSV KHÔNG HỢP LỆ`,
+`CHƯA CÓ MSSV`, `LỆNH KHÔNG HỢP LỆ` — trợ lý gửi thêm **một tin ngắn** giải thích
+người dùng sai ở đâu và đưa ví dụ đúng, dựa trên `usage` thật lấy từ
+`helpContent.js`.
+
+Cơ chế: `handleIncomingMessage` chạy lệnh trong `commandReplyCapture` (một
+`AsyncLocalStorage`), rồi đọc lại những gì bot vừa gửi. Nhờ vậy không phải sửa
+hàng chục nhánh cảnh báo rải rác trong `handleCommand`.
+
+Chốt chặn, vì đây là lời gọi API **thêm**:
+
+| Điều kiện | Hành vi |
+| --- | --- |
+| Trợ lý tắt / chưa có khóa | Không gọi, chỉ có cảnh báo như cũ |
+| `/blockai` hoặc không đủ quyền | Không gọi |
+| Nhóm mà `AI_ENABLE_GROUP_ASSISTANT` tắt | Im lặng — cảnh báo đã phát cho cả nhóm rồi |
+| Hết ngân sách tháng / hết hạn mức ngày | Không gọi |
+| Vừa giải thích trong 30 giây trước | Bỏ qua (gõ sai liên tiếp không thành nhiều lần gọi) |
+| Provider lỗi | Im lặng, không chồng thêm thông báo |
+
+Prompt của đường này **không** dùng JSON mode: đây là một câu văn, không phải kế
+hoạch hành động. Nó cũng bị chặn bằng "chỉ dùng cú pháp được cung cấp" để trợ lý
+không bịa ra lệnh không tồn tại.
 
 ## 5. Chi phí
 
@@ -180,10 +205,12 @@ dụng của người dùng cuối. Trần ngân sách tháng vẫn áp dụng c
 
 ## 6. Quyền riêng tư
 
-- Lần đầu dùng, người dùng được thông báo rằng một phần nội dung trò chuyện gần
-  đây được gửi tới DeepSeek. Thông báo là **một dòng gắn vào cuối câu trả lời đầu
-  tiên** — không phải một tin riêng đứng trước khi người dùng kịp hỏi gì. Mỗi
-  `bot + chat + user` chỉ thấy đúng một lần.
+- Trong chat, người dùng **không** bị làm phiền bằng thông báo kỹ thuật. Lần đầu
+  trợ lý trả lời, cuối tin có đúng một câu: *"Từ giờ các bạn sẽ được AI chat box hỗ
+  trợ xử lí nếu có câu hỏi."* Mỗi `bot + chat + user` chỉ thấy một lần.
+- Việc nội dung trò chuyện có thể được gửi tới nhà cung cấp AI được nêu ở
+  `/help` (mục `/ai`) và trong tài liệu này — đúng chỗ để tra khi cần, thay vì chen
+  vào mỗi cuộc trò chuyện.
 - Chỉ gửi: câu hiện tại + tối đa `AI_MAX_HISTORY_MESSAGES` tin gần nhất của chính
   hội thoại đó.
 - MSSV 9 chữ số trong câu hiện tại được thay bằng `{{mssv:N}}` trước khi gửi;

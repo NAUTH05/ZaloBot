@@ -202,3 +202,15 @@ test("parseLeadMinutes hiểu phút và giờ", () => {
     assert.equal(main.parseLeadMinutes("abc"), "invalid");
     assert.equal(main.parseLeadMinutes("500"), "invalid");
 });
+
+test("chỉ cảnh báo cú pháp mới kéo theo phần giải thích của trợ lý", () => {
+    assert.equal(main.looksLikeSyntaxError(["# {orange}⚠ SAI CÚ PHÁP{/orange}"]), true);
+    assert.equal(main.looksLikeSyntaxError(["# {orange}⚠ CHƯA CÓ MSSV{/orange}"]), true);
+    assert.equal(main.looksLikeSyntaxError(["# {orange}⚠ MSSV KHÔNG HỢP LỆ{/orange}"]), true);
+    assert.equal(main.looksLikeSyntaxError(["# {orange}⚠ LỆNH KHÔNG HỢP LỆ{/orange}"]), true);
+
+    // Từ chối quyền và kết quả bình thường thì KHÔNG kéo theo AI.
+    assert.equal(main.looksLikeSyntaxError(["# {orange}⚠ KHÔNG CÓ QUYỀN{/orange}"]), false);
+    assert.equal(main.looksLikeSyntaxError(["# {green}✓ ĐÃ LƯU MSSV{/green}"]), false);
+    assert.equal(main.looksLikeSyntaxError([]), false);
+});

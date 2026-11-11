@@ -204,6 +204,9 @@ function createZcaProvider(options = {}) {
         tokenSource: null,
         fingerprint: null,
         configuredName: options.displayName || null,
+        // Tên người dùng gõ khi gọi bot trong nhóm (ZCA_ALIASES). Cần riêng vì
+        // biệt danh trong nhóm Zalo có thể khác tên tài khoản.
+        aliases: Array.isArray(options.aliases) ? [...options.aliases] : [],
         verifiedName: null,
         displayName: options.displayName || "ZCA",
 

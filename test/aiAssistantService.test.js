@@ -530,7 +530,7 @@ test("kiểm tra trước thất bại thì báo lý do và không ghi gì", asy
     assert.match(sent.join("\n"), /không có mốc giờ nhận lịch/);
 });
 
-test("thông báo xử lý dữ liệu gắn vào câu trả lời đầu tiên, không gửi tin riêng", async () => {
+test("lời chào của trợ lý gắn vào câu trả lời đầu tiên, không gửi tin riêng", async () => {
     const provider = fakeProvider(() => planResponse({ decision: "answer", reply: "ok" }));
     const { assistant, sent, send } = buildAssistant({ provider, stateOptions: { seenDisclosure: false } });
 
@@ -538,8 +538,10 @@ test("thông báo xử lý dữ liệu gắn vào câu trả lời đầu tiên,
     await assistant.handleTurn({ context: CONTEXT, text: "hai", send });
 
     assert.equal(sent.length, 2, "mỗi tin một câu trả lời, không thêm tin thông báo riêng");
-    assert.match(sent[0], /DeepSeek/, "lần đầu phải có thông báo");
-    assert.doesNotMatch(sent[1], /DeepSeek/, "các lần sau không lặp lại");
+    assert.match(sent[0], /AI chat box hỗ trợ xử lí nếu có câu hỏi/, "lần đầu phải có lời giới thiệu");
+    assert.doesNotMatch(sent[1], /AI chat box/, "các lần sau không lặp lại");
+    // Nội dung kỹ thuật không còn xuất hiện trong khung chat.
+    assert.doesNotMatch(sent[0], /DeepSeek|API/);
 });
 
 /* -------------------------------------------------------------------------- */
@@ -842,4 +844,116 @@ test("hành động chỉ đọc: gửi nội dung, KHÔNG kèm tiêu đề tổ
         "Đây là các mốc giờ nhận lịch hiện tại của cậu.",
         "DANH SÁCH: ID 1 — 06:00 · hôm nay"
     ], "không được có tin 'ĐÃ HOÀN TÁT' rỗng nghĩa chen giữa");
+});
+
+/* -------------------------------------------------------------------------- */
+/* Giải thích lỗi cú pháp                                                      */
+/* -------------------------------------------------------------------------- */
+
+function syntaxProvider(text = "Cậu thiếu ngày đích. Dùng: /nhanlich 06:00 homnay") {
+    return fakeProvider(() => ({ text, usage: { promptTokens: 80, completionTokens: 20, totalTokens: 100 } }));
+}
+
+test("giải thích lỗi cú pháp dựa trên cú pháp THẬT của lệnh", async () => {
+    const provider = syntaxProvider();
+    const { assistant, sent, send } = buildAssistant({ provider });
+
+    const result = await assistant.explainCommandError({
+        context: CONTEXT,
+        text: "/nhanlich 06:00",
+        failedReply: "SAI CÚ PHÁP",
+        usage: "/nhanlich [MSSV] hh:mm homnay|homsau",
+        send
+    });
+
+    assert.equal(result.handled, true);
+    assert.match(sent[0], /nhanlich 06:00 homnay/);
+
+    const request = provider.calls[0];
+    assert.equal(request.jsonMode, false, "câu giải thích là văn bản, không phải JSON");
+    const prompt = JSON.stringify(request.messages);
+    assert.match(prompt, /CÚ PHÁP ĐÚNG/);
+    assert.match(prompt, /nhanlich \[MSSV\] hh:mm homnay\|homsau/, "phải đưa cú pháp thật vào prompt");
+    assert.match(prompt, /SAI CÚ PHÁP/, "phải đưa cả câu bot vừa trả lời");
+});
+
+test("không có cú pháp thì hướng dẫn nói lại bằng câu tự nhiên", async () => {
+    const provider = syntaxProvider("Mình chưa hiểu lệnh này. Cậu thử nói lại bằng câu thường nhé.");
+    const { assistant, send } = buildAssistant({ provider });
+
+    await assistant.explainCommandError({
+        context: CONTEXT,
+        text: "/lacmd",
+        failedReply: "LỆNH KHÔNG HỢP LỆ",
+        usage: null,
+        send
+    });
+
+    assert.match(JSON.stringify(provider.calls[0].messages), /không có — hướng dẫn người dùng nói lại/);
+});
+
+test("gõ sai liên tiếp chỉ giải thích một lần trong khoảng nghỉ", async () => {
+    const provider = syntaxProvider();
+    const { assistant, send } = buildAssistant({ provider });
+
+    const first = await assistant.explainCommandError({
+        context: CONTEXT, text: "/nhanlich", failedReply: "SAI CÚ PHÁP", usage: "/nhanlich [MSSV] hh:mm homnay|homsau", send
+    });
+    const second = await assistant.explainCommandError({
+        context: CONTEXT, text: "/nhanlich", failedReply: "SAI CÚ PHÁP", usage: "/nhanlich [MSSV] hh:mm homnay|homsau", send
+    });
+
+    assert.equal(first.handled, true);
+    assert.equal(second.handled, false);
+    assert.equal(second.reason, "cooldown");
+    assert.equal(provider.calls.length, 1, "không được gọi API cho mỗi lần gõ nhầm");
+});
+
+test("trong nhóm vẫn im lặng như mọi khi", async () => {
+    const provider = syntaxProvider();
+    const { assistant, sent, send } = buildAssistant({ provider, env: { AI_ENABLE_GROUP_ASSISTANT: "false" } });
+
+    const result = await assistant.explainCommandError({
+        context: CONTEXT, text: "/nhanlich", failedReply: "SAI CÚ PHÁP", usage: "/nhanlich ...", isGroup: true, send
+    });
+
+    assert.equal(result.reason, "group_disabled");
+    assert.equal(provider.calls.length, 0);
+    assert.deepEqual(sent, []);
+});
+
+test("không có quyền AI thì không giải thích", async () => {
+    const provider = syntaxProvider();
+    const { assistant, send } = buildAssistant({ provider, accessCheck: () => ({ allowed: false, reason: "ai_blocked" }) });
+
+    const result = await assistant.explainCommandError({
+        context: CONTEXT, text: "/nhanlich", failedReply: "SAI CÚ PHÁP", usage: "/nhanlich ...", send
+    });
+
+    assert.equal(result.handled, false);
+    assert.equal(provider.calls.length, 0);
+});
+
+test("hết ngân sách thì không giải thích, và không gửi thêm tin", async () => {
+    const provider = syntaxProvider();
+    const { assistant, sent, send } = buildAssistant({ provider, stateOptions: { budgetExhausted: true } });
+
+    const result = await assistant.explainCommandError({
+        context: CONTEXT, text: "/nhanlich", failedReply: "SAI CÚ PHÁP", usage: "/nhanlich ...", send
+    });
+
+    assert.equal(result.reason, "budget_exhausted");
+    assert.deepEqual(sent, [], "cảnh báo cú pháp đã tới người dùng rồi");
+});
+
+test("provider lỗi thì im lặng, không chồng thêm thông báo", async () => {
+    const provider = fakeProvider(() => { throw new AiProviderError("lỗi", { kind: ERROR_KIND.SERVER }); });
+    const { assistant, sent, send } = buildAssistant({ provider });
+
+    const result = await assistant.explainCommandError({
+        context: CONTEXT, text: "/nhanlich", failedReply: "SAI CÚ PHÁP", usage: "/nhanlich ...", send
+    });
+
+    assert.equal(result.handled, false);
+    assert.deepEqual(sent, []);
 });

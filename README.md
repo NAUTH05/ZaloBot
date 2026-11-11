@@ -172,7 +172,6 @@ Owner IDs can also be managed from the dashboard (**Settings -> Admins**) withou
 The same Settings panel configures the Command console batch limits: `maxBatchSize` (recipients per run, default 25) and `batchDelayMs` (pause between sends, default 350 ms).
 
 ### Group replies (mention gate)
-
 A bot receives **every** message in a group it belongs to, not only the ones addressed to it. The bot therefore stays silent in groups unless it is actually called:
 
 | Message in a group | Behaviour |
@@ -184,6 +183,34 @@ A bot receives **every** message in a group it belongs to, not only the ones add
 Private chats are unchanged. `GROUP_MENTION_ONLY=0` restores the previous behaviour, where any message in a group could trigger a reply.
 
 The decision lives in `groupMentions.js` and runs inside `handleIncomingMessage` before the contact-admission gate, so an ignored message leaves no trace in the stores.
+
+**When a tag does not count.** Two things can make `@Name` invisible to the bot:
+
+1. **Typing `@Name` by hand** does not produce structured mention metadata — only
+   picking the name from Zalo's suggestion list does. The text fallback then has to
+   match a known name.
+2. **The group nickname differs from the account name.** Zalo lets each group show
+   a different name for a member, so `verifiedName` (the account name) may not be
+   the string people type.
+
+Fix both with an alias list — the names people actually use:
+
+```env
+BOT_ALIASES=Fatherbot            # all official bots
+BOT_1_ALIASES=Fatherbot,Lịch Học # per-bot, takes precedence
+ZCA_ALIASES=Fatherbot            # personal account (defaults to ZCA_DISPLAY_NAME)
+```
+
+Matching is case- and accent-insensitive. When a group message contains `@` but
+still counts as untagged, the log now names what the bot knows, so the gap is
+visible without guessing:
+
+```
+[Nhóm] bỏ qua tin không nhắc tới bot (untagged) · có "@" nhưng không khớp (mention=0, tên bot=Nguyễn Thuận) · zca:123/456
+```
+
+`mention=0` means Zalo sent no mention metadata (typed by hand); an empty
+`tên bot` means no alias is configured.
 
 ## Development run
 

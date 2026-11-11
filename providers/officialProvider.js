@@ -41,6 +41,8 @@ function createOfficialProvider(config = {}) {
         tokenSource: config.source || null,
         fingerprint: config.fingerprint || tokenFingerprint(config.token),
         configuredName: config.configuredName || null,
+        // Tên người dùng gõ khi gọi bot trong nhóm (BOT_N_ALIASES / BOT_ALIASES).
+        aliases: Array.isArray(config.aliases) ? [...config.aliases] : [],
         verifiedName: config.verifiedName || null,
         displayName: config.displayName || config.configuredName || botId,
         monthlyMessageWarning: config.monthlyMessageWarning,

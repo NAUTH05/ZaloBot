@@ -30,6 +30,35 @@ const NAME_ENV_VARS = Object.freeze({
     bot3: ["BOT_3_NAME"]
 });
 
+// Tên mà NGƯỜI DÙNG thật sự gõ khi gọi bot trong nhóm.
+//
+// Vì sao cần riêng: trong nhóm Zalo, thành viên có thể đặt biệt danh khác với tên
+// tài khoản. Người dùng thấy "Fatherbot" và gõ "@Fatherbot", nhưng tài khoản Zalo
+// lại tên "Nguyễn Thuận" — nên so khớp theo tên tài khoản không bao giờ trúng.
+// Ngoài ra gõ tay "@Tên" không tạo ra mention có cấu trúc, nên phải có đường dự
+// phòng bằng chuỗi. Danh sách này là đường đó.
+const ALIAS_ENV_VARS = Object.freeze({
+    bot1: ["BOT_1_ALIASES", "BOT_ALIASES"],
+    bot2: ["BOT_2_ALIASES", "BOT_ALIASES"],
+    bot3: ["BOT_3_ALIASES", "BOT_ALIASES"]
+});
+
+// "Fatherbot, Lịch Học" → ["Fatherbot", "Lịch Học"]. Bỏ rỗng và trùng.
+function parseAliases(value) {
+    const list = Array.isArray(value) ? value : String(value == null ? "" : value).split(",");
+    const seen = new Set();
+    const aliases = [];
+    for (const item of list) {
+        const text = String(item == null ? "" : item).trim();
+        if (!text) continue;
+        const key = text.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        aliases.push(text);
+    }
+    return aliases;
+}
+
 // Tên thật của bot do Zalo trả về (qua getMe) được ưu tiên hơn nhãn cấu hình.
 // Không có cả hai thì dùng chính botId — dashboard luôn có gì đó để hiển thị.
 function resolveBotDisplayName({ botId, verifiedName, configuredName }) {
@@ -231,12 +260,18 @@ function resolveBotConfigs(env = process.env) {
             .map((name) => String(env?.[name] || "").trim())
             .find((value) => value.length > 0) || null;
 
+        const aliases = parseAliases((ALIAS_ENV_VARS[botId] || [])
+            .map((name) => env?.[name])
+            .filter((value) => value != null && String(value).trim() !== "")
+            .join(","));
+
         bots.push({
             botId,
             token,
             source,
             fingerprint: tokenFingerprint(token),
             configuredName,
+            aliases,
             verifiedName: null,
             displayName: resolveBotDisplayName({ botId, configuredName }),
             enabled: true,
@@ -296,6 +331,7 @@ function describeBots(bots) {
 }
 
 module.exports = {
+    ALIAS_ENV_VARS,
     BOT_IDS,
     DEFAULT_MONTHLY_MESSAGE_WARNING,
     LEGACY_BOT_ID,
@@ -315,6 +351,7 @@ module.exports = {
     isLegacyBotId,
     isMaskedToken,
     normalizeBotId,
+    parseAliases,
     parseScopedKey,
     resolveBotConfigs,
     resolveBotDisplayName,

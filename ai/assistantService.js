@@ -29,13 +29,26 @@ const { normalizeStudentId } = require("../lhuSchedule");
 const { sanitizeExternalRichText } = require("../richText");
 const { formatWarningMessage } = require("../messageTemplates");
 
-// Thông báo xử lý dữ liệu: KHÔNG gửi thành tin riêng.
+// Lời chào của trợ lý, gắn MỘT LẦN vào cuối câu trả lời đầu tiên.
 //
-// Gửi một tin riêng ngay sau lời chào khiến người dùng thấy như một bảng thông
-// báo kỹ thuật trước khi họ kịp hỏi gì. Nội dung này được gắn MỘT LẦN vào cuối
-// câu trả lời đầu tiên, đúng chỗ nó có nghĩa: ngay khi dữ liệu thật sự được gửi đi.
-const DISCLOSURE_TEXT =
-    "_Lần đầu dùng trợ lý: nội dung trò chuyện gần đây được gửi tới DeepSeek để xử lý._";
+// Trước đây đây là một thông báo kỹ thuật về việc dữ liệu được gửi tới DeepSeek.
+// Người dùng cuối không cần câu đó trong khung chat: nó xuất hiện trước cả khi họ
+// hỏi gì, và đọc như một bảng điều khoản. Thông tin về việc xử lý dữ liệu vẫn
+// được nêu ở /help (mục /ai) và trong docs/AI_ASSISTANT.md — đúng chỗ để tra khi
+// cần, không làm phiền mỗi cuộc trò chuyện.
+const DISCLOSURE_TEXT = "Từ giờ các bạn sẽ được AI chat box hỗ trợ xử lí nếu có câu hỏi.";
+
+// Prompt riêng cho việc giải thích lỗi cú pháp. Ngắn, và bị chặn bằng câu "chỉ
+// dùng cú pháp được cung cấp" — trợ lý không được bịa ra lệnh không tồn tại.
+const SYNTAX_HELP_PROMPT = `Bạn là trợ lý lịch học của ZaloBot (Đại học Lạc Hồng).
+Người dùng vừa gõ một yêu cầu mà bot chưa xử lý được.
+Nhiệm vụ: nói NGẮN GỌN (tối đa 2 câu) họ sai ở đâu và đưa ví dụ đúng.
+
+QUY TẮC:
+- CHỈ dùng cú pháp trong mục "CÚ PHÁP ĐÚNG". Không tự nghĩ ra lệnh mới.
+- Nếu không có "CÚ PHÁP ĐÚNG", hướng dẫn họ nói lại bằng câu tự nhiên.
+- Trả về văn bản thường. Không JSON, không markdown, không nhắc tới AI, mô hình hay hệ thống bên trong.
+- Không mở đầu bằng lời xin lỗi dài dòng.`;
 
 const REPLIES = Object.freeze({
     restricted: "Tài khoản hoặc nhóm này hiện không dùng được trợ lý AI. Cậu vẫn dùng được các lệnh thường bằng **/help**.",
@@ -133,6 +146,8 @@ function createAssistant(options = {}) {
 
     // Chống spam trong thời gian ngắn: bộ nhớ tạm, không cần bền vững.
     const cooldowns = new Map();
+    // Lần cuối đã giải thích một lỗi cú pháp cho mỗi người.
+    const syntaxHelpAt = new Map();
     // Lần cuối đã gửi một câu "trợ lý đang nghỉ" cho mỗi người. Không có nó thì
     // mỗi tin nhắn lại nhận đúng một câu thông báo giống nhau — đúng kiểu "câu nào
     // cũng rep thế này" mà người dùng phàn nàn.
@@ -493,8 +508,81 @@ function createAssistant(options = {}) {
         });
     }
 
-    function getStatus() {
-        const summary = stateStore.getSummary(now());
+    // Giải thích một lỗi cú pháp NGAY SAU cảnh báo của bot.
+    //
+    // Cảnh báo hiện có ("SAI CÚ PHÁP", "LỆNH KHÔNG HỢP LỆ") nói đúng nhưng khô: nó
+    // không nói người dùng đã hiểu sai chỗ nào. Trợ lý thêm đúng phần đó, dựa trên
+    // CÚ PHÁP THẬT lấy từ helpContent — không tự nghĩ ra lệnh mới.
+    //
+    // Đây là lời gọi API THÊM, nên có đủ chốt chặn: quyền, ngân sách, hạn mức,
+    // và một khoảng nghỉ riêng để gõ sai liên tiếp không thành nhiều lần gọi.
+    async function explainCommandError({ context, text, failedReply, usage, isGroup = false, send }) {
+        if (typeof send !== "function") return { handled: false, reason: "no_send" };
+        if (!config.enabled || !config.configured || !provider) return { handled: false, reason: "disabled" };
+
+        const access = accessCheck(context);
+        if (!access.allowed) return { handled: false, reason: access.reason || "ai_blocked" };
+
+        const owner = isOwner(context) === true;
+        const limits = resolveLimits(readAiSettings(), owner);
+        // Trong nhóm vẫn im lặng như mọi khi: cảnh báo đã phát cho cả nhóm, thêm
+        // một câu giải thích nữa chỉ làm ồn.
+        if (isGroup && !limits.groupAssistant) return { handled: false, reason: "group_disabled" };
+
+        const key = pendingKey(context.botId, context.chatId, context.userId);
+        const currentTime = now();
+        const last = syntaxHelpAt.get(key) || 0;
+        if (currentTime.getTime() - last < Math.max(config.cooldownMs, 30000)) {
+            return { handled: false, reason: "cooldown" };
+        }
+        if (stateStore.isBudgetExhausted({ budgetUsd: limits.budget, date: currentTime })) {
+            return { handled: false, reason: "budget_exhausted" };
+        }
+        const quota = stateStore.consumeQuota({
+            key,
+            perUserLimit: limits.perUser,
+            globalLimit: limits.global,
+            date: currentTime
+        });
+        if (!quota.allowed) return { handled: false, reason: quota.reason };
+        syntaxHelpAt.set(key, currentTime.getTime());
+
+        const messages = [
+            { role: "system", content: SYNTAX_HELP_PROMPT },
+            {
+                role: "user",
+                content: `<du_lieu>Người dùng gõ: ${String(text || "").slice(0, 300)}\n` +
+                    `Bot đã trả lời: ${String(failedReply || "").slice(0, 400)}</du_lieu>` +
+                    (usage ? `\n\nCÚ PHÁP ĐÚNG: ${usage}` : "\n\nCÚ PHÁP ĐÚNG: (không có — hướng dẫn người dùng nói lại bằng câu tự nhiên)")
+            }
+        ];
+
+        let response;
+        try {
+            response = await provider.complete({ messages, maxTokens: 200, jsonMode: false });
+        } catch (error) {
+            const kind = error instanceof AiProviderError ? error.kind : ERROR_KIND.NETWORK;
+            if (kind === ERROR_KIND.AUTH || kind === ERROR_KIND.INSUFFICIENT_QUOTA) {
+                providerDownUntil = currentTime.getTime() + config.providerCooldownMs;
+            }
+            // Không gửi thông báo lỗi: cảnh báo cú pháp đã tới người dùng rồi, thêm
+            // một câu "trợ lý đang nghỉ" nữa là thừa.
+            return { handled: false, reason: `provider_${kind}` };
+        }
+
+        stateStore.recordUsage({
+            usage: response.usage,
+            costUsd: estimateCostUsd(response.usage, config),
+            date: currentTime
+        });
+
+        const answer = sanitizeExternalRichText(response.text || "").trim();
+        if (!answer) return { handled: false, reason: "empty" };
+        await send(answer.slice(0, 400));
+        return { handled: true, reason: "syntax_help" };
+    }
+
+    function getStatus() {        const summary = stateStore.getSummary(now());
         // Hạn mức hiệu lực, không phải giá trị trong .env: dashboard cần thấy đúng
         // con số đang áp dụng.
         const limits = resolveLimits(readAiSettings(), false);
@@ -518,6 +606,7 @@ function createAssistant(options = {}) {
     return {
         config,
         handleTurn,
+        explainCommandError,
         handlePendingConfirmation,
         executePlan,
         getStatus,

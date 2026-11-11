@@ -311,3 +311,71 @@ test("HAI BOT cùng nhóm: tag bot2 thì chỉ bot2 trả lời", async (t) => {
     assert.equal(bot1.sent.length, 0, "bot1 không được trả lời tin tag bot2");
     assert.equal(bot2.sent.length, 0, "bot2 không nhận được sự kiện này");
 });
+
+/* ========================================================================== */
+/* Tên người dùng gõ khi gọi bot (alias)                                       */
+/* ========================================================================== */
+
+const { botIdentityOf, parseAliases, resolveBotConfigs } = (() => ({
+    botIdentityOf: require("../groupMentions").botIdentityOf,
+    parseAliases: require("../bots").parseAliases,
+    resolveBotConfigs: require("../bots").resolveBotConfigs
+}))();
+
+test("alias là tên người dùng gõ, khác tên tài khoản", () => {
+    const runtime = { botId: "zca:999", ownUid: "999", verifiedName: "Nguyễn Thuận", aliases: ["Fatherbot"] };
+    const identity = botIdentityOf(runtime);
+    assert.ok(identity.names.includes("Fatherbot"));
+    assert.ok(identity.names.includes("Nguyễn Thuận"));
+
+    // Gõ tay "@Fatherbot" (không có mention cấu trúc) vẫn phải khớp.
+    assert.equal(isBotMentioned({ text: "@Fatherbot lịch ngày mai thế nào" }, runtime), true);
+    // Không phân biệt hoa thường và dấu.
+    assert.equal(isBotMentioned({ text: "@fatherbot ơi" }, runtime), true);
+});
+
+test("alias nhận cả dạng chuỗi phân tách bằng dấu phẩy", () => {
+    const runtime = { botId: "bot1", aliases: "Fatherbot, Lịch Học" };
+    const identity = botIdentityOf(runtime);
+    assert.ok(identity.names.includes("Fatherbot"));
+    assert.ok(identity.names.includes("Lịch Học"));
+});
+
+test("không có alias và tên tài khoản khác thì vẫn bị coi là không nhắc", () => {
+    const runtime = { botId: "zca:999", ownUid: "999", verifiedName: "Nguyễn Thuận" };
+    assert.equal(isBotMentioned({ text: "@Fatherbot ơi" }, runtime), false);
+
+    const decision = resolveGroupReplyDecision({
+        msg: { text: "@Fatherbot ơi", chat: { id: "g1", type: "group" }, from: { id: "u1" } },
+        runtime,
+        text: "@Fatherbot ơi"
+    });
+    assert.equal(decision.respond, false);
+    assert.equal(decision.reason, "untagged");
+});
+
+test("mention có cấu trúc vẫn thắng, không cần alias", () => {
+    const runtime = { botId: "zca:999", ownUid: "999", verifiedName: "Nguyễn Thuận" };
+    const msg = {
+        text: "@Ai đó ơi",
+        chat: { id: "g1", type: "group" },
+        from: { id: "u1" },
+        meta: { mentions: [{ uid: "999" }] }
+    };
+    assert.equal(isBotMentioned(msg, runtime), true);
+});
+
+test("parseAliases bỏ rỗng, bỏ trùng, giữ nguyên chữ", () => {
+    assert.deepEqual(parseAliases("Fatherbot, Lịch Học , , fatherbot"), ["Fatherbot", "Lịch Học"]);
+    assert.deepEqual(parseAliases(""), []);
+    assert.deepEqual(parseAliases(null), []);
+    assert.deepEqual(parseAliases(["A", "B"]), ["A", "B"]);
+});
+
+test("cấu hình đọc alias từ BOT_ALIASES và BOT_N_ALIASES", () => {
+    const shared = resolveBotConfigs({ BOT_TOKEN: "t1", BOT_ALIASES: "Chung" });
+    assert.deepEqual(shared.bots[0].aliases, ["Chung"]);
+
+    const perBot = resolveBotConfigs({ BOT_TOKEN: "t1", BOT_1_ALIASES: "Riêng 1", BOT_ALIASES: "Chung" });
+    assert.deepEqual(perBot.bots[0].aliases, ["Riêng 1", "Chung"], "alias riêng của bot đứng trước");
+});

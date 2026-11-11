@@ -304,3 +304,39 @@ test("kiểm tra quyền chat chạy theo bot sở hữu: tắt ở ZCA không �
     assert.equal(shared[0].botId, "bot1", "đích còn lại phải là của bot1");
     assert.equal(zcaId() && shared[0].botId !== zca.botId, true, "ZCA đã tắt thì không còn đích của ZCA");
 });
+
+/* ========================================================================== */
+/* Bản ghi còn mang danh tính TẠM của ZCA                                      */
+/* ========================================================================== */
+
+test("bản ghi zca:pending không phải đích phát tin, và không bị báo là bot đang tắt", (t) => {
+    clearBots();
+    t.after(() => clearBots());
+    seedStores({ withUnverified: false });
+    registerBots([officialWithRecorder("bot1", "broadcast-route-token-1")]);
+
+    // Dấu vết của lần ghi TRƯỚC khi quét QR: khóa tạm, không có nhà cung cấp nào
+    // tên như vậy. Đây là bản trùng của một chat đã có bản ghi dưới khóa thật.
+    const baseline = main.getBroadcastTargets().skipped;
+
+    const interactions = memoryFiles.get(INTERACTIONS);
+    interactions["zca:pending::pending-chat"] = {
+        chatId: "pending-chat",
+        botId: "zca:pending",
+        chatType: "private",
+        chatTitle: "Ghi trước khi đăng nhập",
+        lastUserId: "user-pending"
+    };
+    memoryFiles.set(INTERACTIONS, interactions);
+
+    const targets = main.getBroadcastTargets();
+    const ids = targets.map((item) => item.chatId);
+
+    assert.ok(!ids.includes("pending-chat"), "không được phát tin tới danh tính tạm");
+    assert.equal(targets.skipped.pendingIdentity, 1, "phải đếm riêng");
+    assert.equal(
+        targets.skipped.ownerBotOffline,
+        baseline.ownerBotOffline,
+        "không được cộng bản ghi danh tính tạm vào 'bot sở hữu đang tắt'"
+    );
+});

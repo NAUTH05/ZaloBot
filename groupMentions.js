@@ -58,7 +58,14 @@ function botIdentityOf(runtime = {}) {
         if (uid && uid !== "pending") ids.add(uid);
     }
 
-    for (const value of [runtime.verifiedName, runtime.displayName, runtime.configuredName]) {
+    // `aliases` là tên NGƯỜI DÙNG gõ, khác với tên tài khoản. Trong nhóm Zalo mỗi
+    // thành viên có thể có biệt danh riêng, nên đây là nguồn khớp đáng tin nhất
+    // khi tin nhắn không kèm mention có cấu trúc.
+    const aliases = Array.isArray(runtime.aliases)
+        ? runtime.aliases
+        : String(runtime.aliases == null ? "" : runtime.aliases).split(",");
+
+    for (const value of [runtime.verifiedName, runtime.displayName, runtime.configuredName, ...aliases]) {
         const text = String(value == null ? "" : value).trim();
         // Tên quá ngắn hoặc trùng mã bot ("bot1") không dùng để so khớp nội dung.
         if (text.length >= 2 && !/^bot\d+$/i.test(text) && !text.startsWith("zca:")) names.add(text);

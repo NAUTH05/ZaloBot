@@ -193,7 +193,7 @@ const HELP_COMMANDS = [
         permission: "user",
         description: "Hỏi trợ lý AI về lịch học đã lưu.",
         examples: ["/ai Tuần này tôi học môn gì?"],
-        note: "Cần lưu MSSV bằng /luumssv trước. Có thể nhắn tự nhiên, không cần gõ lệnh — ví dụ \"nhận lịch lúc 6 giờ sáng hôm nay\"."
+        note: "Cần lưu MSSV bằng /luumssv trước. Có thể nhắn tự nhiên, không cần gõ lệnh — ví dụ \"nhận lịch lúc 6 giờ sáng hôm nay\". Nội dung trò chuyện gần đây có thể được gửi tới nhà cung cấp AI để xử lý."
     },
     {
         command: "time",
