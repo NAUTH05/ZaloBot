@@ -41,6 +41,9 @@ function recordDeliveryTrace(input = {}) {
         error: text(input.error, 400),
         errorKind: text(input.errorKind, 30)
     };
+    // Chỉ ghi khi có ý nghĩa: Zalo có trả mã tin nhắn hay không. `false` là bằng
+    // chứng NGƯỢC LẠI với "đã gửi" — Zalo nhận yêu cầu mà không tạo tin.
+    if (input.confirmed !== undefined) record.confirmed = input.confirmed === true;
     entries.push(record);
     if (entries.length > MAX_ENTRIES) entries.splice(0, entries.length - MAX_ENTRIES);
     return record;

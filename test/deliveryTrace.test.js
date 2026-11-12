@@ -99,3 +99,14 @@ test("thống kê đếm theo kết quả và xoá sạch được", () => {
     assert.equal(clearDeliveryTraces(), 3);
     assert.equal(getDeliveryTraceStats().total, 0);
 });
+
+test("phân biệt 'đã gửi có mã tin nhắn' với 'Zalo nhận nhưng không tạo tin'", () => {
+    recordDeliveryTrace({ botId: "bot1", chatId: "confirmed", result: "sent", confirmed: true });
+    recordDeliveryTrace({ botId: "bot1", chatId: "unconfirmed", result: "sent", confirmed: false });
+    recordDeliveryTrace({ botId: "bot1", chatId: "failed", result: "failed", error: "410" });
+
+    const list = listDeliveryTraces();
+    assert.equal(list[2].confirmed, true);
+    assert.equal(list[1].confirmed, false, "Zalo không trả mã tin nhắn là bằng chứng NGƯỢC LẠI với 'đã gửi'");
+    assert.equal("confirmed" in list[0], false, "lần gửi lỗi không có khái niệm xác nhận");
+});

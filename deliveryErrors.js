@@ -68,6 +68,22 @@ function looksLikeFormatError(error) {
 function classifyDeliveryError(error) {
     const code = readErrorCode(error);
 
+    // Nhãn do CHÍNH nhà cung cấp gắn, đáng tin hơn mọi suy đoán theo mã HTTP.
+    //
+    // Trường hợp thật: zca-js trả về `message: null` khi Zalo nhận yêu cầu nhưng
+    // không tạo tin (tài khoản bị giới hạn gửi). Không có mã lỗi nào để đọc, nên
+    // nếu đoán theo chữ sẽ ra "unknown" và tầng gửi không biết phải chậm lại.
+    const declared = String(error?.deliveryKind || "");
+    if (declared && Object.values(DELIVERY_ERROR_KIND).includes(declared)) {
+        return {
+            kind: declared,
+            code,
+            retryable: declared !== DELIVERY_ERROR_KIND.PERMANENT,
+            retryAsPlainText: false,
+            reason: error?.message || declared
+        };
+    }
+
     if (code === 429) {
         return {
             kind: DELIVERY_ERROR_KIND.RATE_LIMIT,

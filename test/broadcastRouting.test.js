@@ -286,6 +286,52 @@ test("gửi lỗi ở một tài khoản không thử lại bằng tài khoản 
     assert.equal(bot1.sent.some((item) => item.chatId === BOT1_ONLY_CHAT), true, "đích của bot1 vẫn gửi được");
 });
 
+// ---------------------------------------------------------------------------
+// Sự cố thật: /thongbao báo "đã gửi thành công 100+ người" nhưng rất nhiều người
+// không nhận được gì. Nguyên nhân: Zalo nhận yêu cầu nhưng KHÔNG tạo tin (tài
+// khoản cá nhân bị giới hạn gửi), và zca-js trả `{ message: null }` mà KHÔNG ném
+// lỗi. Tầng gửi vì thế đếm là thành công.
+// ---------------------------------------------------------------------------
+test("Zalo nhận nhưng KHÔNG tạo tin ⇒ không đếm là đã gửi, và chat không bị đánh dấu hỏng", async (t) => {
+    const { zca } = registerAll(t);
+    seedStores({ secondBotId: zca.botId });
+
+    // Đúng phản hồi thật khi bị siết tốc độ: không lỗi, nhưng không có msgId.
+    zca.api.sendMessage = async () => ({ message: null, attachment: [] });
+
+    const result = await main.sendBotAnnouncement("Thông báo cho số đông", { operation: "announcement" });
+
+    // Chỉ hai đích của bot1 được tính là đã gửi; hai đích của ZCA không có tin nào.
+    assert.equal(result.sent, 2, "chỉ đích thật sự có mã tin nhắn mới được đếm là đã gửi");
+    assert.equal(result.failed + result.deferred, 2, "đích của ZCA phải rơi vào lỗi hoặc hoãn, không im lặng");
+
+    // Bị giới hạn tốc độ KHÔNG phải lỗi của chat: người dùng vẫn phải nhận được
+    // thông báo ở đợt sau, nên chat không được chuyển sang inactive.
+    const directory = memoryFiles.get(CHAT_DIR);
+    for (const chatId of [SHARED_CHAT, BOT2_ONLY_CHAT]) {
+        const record = directory.chats[`${zca.botId}::${chatId}`];
+        assert.notEqual(record?.status, "inactive", `chat ${chatId} không được bị tạm dừng vì bị siết tốc độ`);
+        assert.notEqual(record?.admissionStatus, "unreachable", `chat ${chatId} vẫn liên lạc được`);
+    }
+});
+
+test("tổng kết /thongbao nói rõ số chưa xác nhận thay vì chỉ khoe thành công", async (t) => {
+    const { bot1, zca } = registerAll(t);
+    seedStores({ secondBotId: zca.botId });
+    // Bot chính thức trả ok nhưng KHÔNG kèm message_id: không có bằng chứng tin
+    // nhắn được tạo, nên phải hiện "chưa xác nhận".
+    bot1.client.sendMessage = async (chatId, text) => {
+        bot1.sent.push({ chatId: String(chatId), text, botId: "bot1" });
+        return { ok: true };
+    };
+
+    const result = await main.sendBotAnnouncement("Thông báo", { operation: "announcement" });
+    const summary = main.formatBroadcastSummary("ĐÃ GỬI THÔNG BÁO CHUNG", result);
+
+    assert.ok(result.unconfirmed > 0, "phải đếm được số lần gửi không có mã tin nhắn");
+    assert.match(summary, /chưa có mã tin nhắn xác nhận/);
+});
+
 test("kiểm tra quyền chat chạy theo bot sở hữu: tắt ở ZCA không ảnh hưởng bot1", (t) => {
     const { zca } = registerAll(t);
     seedStores({ secondBotId: zca.botId });

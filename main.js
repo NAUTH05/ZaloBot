@@ -149,6 +149,7 @@ const { DEFAULT_SHUTDOWN_TIMEOUT_MS, createShutdownController } = require("./shu
 const { recordSystemLog } = require("./operationalLog");
 const { recordDeliveryTrace } = require("./deliveryTrace");
 const { installVietnamLogTimestamps } = require("./logTime");
+const { createSendPacer } = require("./sendPacing");
 const { getAdminSettings, getConfiguredAdminIds, isConfiguredAdmin } = require("./adminSettings");
 const { LEGACY_BOT_ID, extractBotName, isZcaId, normalizeBotId, parseAliases, parseScopedKey, providerTypeOf, resolveBotConfigs, resolveBotDisplayName, scopeKey } = require("./bots");
 const { createFriendRequestService } = require("./friendRequestService");
@@ -1878,16 +1879,42 @@ function getBroadcastTargets(feature = "broadcast") {
 // chung) và /update (thông báo cập nhật): cùng cách chọn đích, cùng kiểm tra
 // điều kiện nhận, cùng bảng tổng kết gửi/lỗi. Chỉ khác nhãn ghi log.
 async function sendBotAnnouncement(message, options = {}) {
-    const { operation = "announcement", logLabel = "thông báo chung" } = options;
+    const { operation = "announcement", logLabel = "thông báo chung", onStart } = options;
     const targets = getBroadcastTargets();
     const skipped = targets.skipped || { unverifiedSource: 0, ownerBotOffline: 0 };
-    const result = { targets: targets.length, sent: 0, failed: 0, skipped };
+    const result = { targets: targets.length, sent: 0, unconfirmed: 0, failed: 0, deferred: 0, skipped, warning: null };
     if (skipped.unverifiedSource > 0 || skipped.ownerBotOffline > 0) {
         console.warn(
             `[Phát tin] Bỏ qua ${skipped.unverifiedSource} đích chưa rõ tài khoản và ` +
             `${skipped.ownerBotOffline} đích có bot sở hữu đang tắt.`
         );
     }
+
+    // Cảnh báo khi phần lớn người nhận thuộc tài khoản Zalo CÁ NHÂN.
+    //
+    // Zalo giới hạn rất chặt việc gửi hàng loạt từ tài khoản cá nhân: gửi nhanh sẽ
+    // bị nuốt tin. Người vận hành cần biết điều này TRƯỚC khi kết luận "bot gửi
+    // hỏng", và nên chuyển sang bot chính thức cho các đợt lớn.
+    const personalCount = targets.filter((target) => isZcaId(normalizeBotId(target.botId))).length;
+    if (personalCount > 0) {
+        result.personalAccountTargets = personalCount;
+        if (personalCount >= 10) {
+            result.warning = `> **Lưu ý:** ${personalCount}/${targets.length} cuộc trò chuyện thuộc tài khoản Zalo **cá nhân**. ` +
+                "Zalo giới hạn chặt việc gửi hàng loạt từ tài khoản cá nhân và có thể bỏ tin mà không báo lỗi. " +
+                "Đợt này đã được giãn cách để an toàn; với thông báo cho số đông, hãy dùng bot chính thức.";
+        }
+    }
+
+    // Đợt gửi có giãn cách nên có thể mất vài phút. Báo trước cho người gõ lệnh,
+    // nếu không họ tưởng bot treo và gõ lại — mỗi lần gõ lại là một đợt phát nữa.
+    if (typeof onStart === "function" && targets.length > 0) {
+        try {
+            await onStart(targets.length, result);
+        } catch (error) {
+            logDiscord("ERROR", `announcement_start_notice_failed: ${error.message}`);
+        }
+    }
+
     // Gửi hàng loạt có kiểm soát.
     //
     // Trước đây vòng lặp này await TUẦN TỰ từng đích: 500 đích × ~200ms = 100 giây.
@@ -1925,8 +1952,18 @@ async function sendBotAnnouncement(message, options = {}) {
             logDiscord("ERROR", `Không thể gửi ${logLabel} cho chat ${target.chatId}: ${error.message}`);
             continue;
         }
+        if (delivery?.deferred) {
+            // Bị tạm dừng vì giới hạn tốc độ: KHÔNG phải đã gửi, cũng KHÔNG phải
+            // đích hỏng. Chạy lại lệnh sau ít phút là gửi tiếp được.
+            result.deferred += 1;
+            continue;
+        }
         if (delivery?.sent) {
             result.sent += 1;
+            if (delivery.confirmed === false) result.unconfirmed += 1;
+        } else if (delivery?.failed && delivery.rateLimited) {
+            // Bị Zalo siết tốc độ: chưa gửi, nhưng không phải đích hỏng.
+            result.deferred += 1;
         } else if (delivery?.failed) {
             result.failed += 1;
             logDiscord("ERROR", `Không thể gửi ${logLabel} cho chat ${target.chatId}: ${delivery.error?.message || "không rõ"}`);
@@ -1939,13 +1976,18 @@ function formatBroadcastSummary(title, result) {
     const skipped = result.skipped || { unverifiedSource: 0, ownerBotOffline: 0, pendingIdentity: 0 };
     const skipTotal = skipped.unverifiedSource + skipped.ownerBotOffline + (skipped.pendingIdentity || 0);
     const pendingPart = skipped.pendingIdentity > 0 ? `, ${skipped.pendingIdentity} bản ghi trùng của danh tính tạm` : "";
+    const unconfirmed = Number(result.unconfirmed) || 0;
+    const deferred = Number(result.deferred) || 0;
     return `# {green}✓ ${title}{/green}\n\n` +
         `> **Tổng cuộc trò chuyện:** ${result.targets}\n` +
-        `> **Gửi thành công:** ${result.sent}\n` +
-        `> **Gửi lỗi:** ${result.failed}` +
+        `> **Gửi thành công:** ${result.sent}` +
+        (unconfirmed > 0 ? ` (trong đó ${unconfirmed} chưa có mã tin nhắn xác nhận)` : "") +
+        `\n> **Gửi lỗi:** ${result.failed}` +
+        (deferred > 0 ? `\n> **Hoãn do bị giới hạn tốc độ:** ${deferred} — chạy lại lệnh sau vài phút để gửi tiếp` : "") +
         (skipTotal > 0
             ? `\n> **Bỏ qua:** ${skipTotal} (${skipped.unverifiedSource} chưa rõ tài khoản, ${skipped.ownerBotOffline} bot sở hữu đang tắt${pendingPart})`
-            : "");
+            : "") +
+        (result.warning ? `\n\n${result.warning}` : "");
 }
 
 // Chạy đợt thông báo MỘT LẦN từ danh sách liên hệ khôi phục, TRONG CÙNG tiến trình
@@ -2983,7 +3025,9 @@ async function handleCommand(msg, parsedCommand) {
             setChatStatus(targetId, "removed", String(context.userId), "admin_removed");
             await sendMessage(chatId, `# {orange}[CHAT] ĐÃ XÓA MỀM{/orange}\n\n> \`${escapeMarkdown(targetId)}\`\n> Dữ liệu lịch sử vẫn được giữ lại.`);
         } else {
-            const result = await sendNotification(targetId, "# {orange}[ADMIN TEST]{/orange}\n\nĐang kiểm tra khả năng gửi thông báo tới cuộc trò chuyện này.", { feature: "broadcast", operation: "admin_test", bypassEligibility: true });
+            // Gửi thử MỘT chat: không xếp vào nhịp gửi hàng loạt. Người vận hành
+            // đang chờ kết quả ngay, và một tin thử không tạo ra đợt bắn nào.
+            const result = await sendNotification(targetId, "# {orange}[ADMIN TEST]{/orange}\n\nĐang kiểm tra khả năng gửi thông báo tới cuộc trò chuyện này.", { feature: "broadcast", operation: "admin_test", bypassEligibility: true, paced: false });
             if (result.sent) {
                 setChatStatus(targetId, "active", String(context.userId), "admin_test_succeeded");
                 await sendMessage(chatId, `# {green}[CHAT] KIỂM TRA THÀNH CÔNG{/green}\n\n> \`${escapeMarkdown(targetId)}\``);
@@ -3016,7 +3060,11 @@ async function handleCommand(msg, parsedCommand) {
             return;
         }
         const message = `# {green}[THÔNG BÁO CHUNG]{/green}\n\n${escapeMarkdownMultiline(argument)}`;
-        const result = await sendBotAnnouncement(message, { operation: "announcement", logLabel: "thông báo chung" });
+        const result = await sendBotAnnouncement(message, {
+            operation: "announcement",
+            logLabel: "thông báo chung",
+            onStart: (count, summary) => announceStartNotice(chatId, count, summary)
+        });
         await sendMessage(chatId, formatBroadcastSummary("ĐÃ GỬI THÔNG BÁO CHUNG", result));
     } else if (command === "update") {
         if (!await requireOwner(context)) return;
@@ -3028,7 +3076,11 @@ async function handleCommand(msg, parsedCommand) {
             return;
         }
         const message = `# {green}[THÔNG BÁO CẬP NHẬT]{/green}\n\n${escapeMarkdownMultiline(argument)}`;
-        const result = await sendBotAnnouncement(message, { operation: "update", logLabel: "thông báo cập nhật" });
+        const result = await sendBotAnnouncement(message, {
+            operation: "update",
+            logLabel: "thông báo cập nhật",
+            onStart: (count, summary) => announceStartNotice(chatId, count, summary)
+        });
         await sendMessage(chatId, formatBroadcastSummary("ĐÃ GỬI THÔNG BÁO CẬP NHẬT", result));
     } else if (command === "myid") {
         await sendMessage(
@@ -3120,10 +3172,36 @@ Lịch học và thông báo đều dùng múi giờ này.`;
     }
 }
 
+// ---------------------------------------------------------------------------
+// NHỊP GỬI CHO THÔNG BÁO HÀNG LOẠT VÀ THÔNG BÁO THEO LỊCH.
+//
+// Gửi 100+ tin trong vài giây khiến Zalo chặn: bot chính thức trả 429, còn tài
+// khoản Zalo CÁ NHÂN thì Zalo nhận yêu cầu mà KHÔNG tạo tin, cũng KHÔNG trả lỗi —
+// người dùng thấy "đã gửi 100+ người" nhưng rất nhiều người không nhận được gì.
+// Xem sendPacing.js để biết cách mô-đun đó xử lý.
+//
+// Trong môi trường kiểm thử, nhịp bị TẮT để bộ kiểm tra không phải chờ vài phút.
+// ---------------------------------------------------------------------------
+const sendPacer = createSendPacer({
+    enabled: !isTestEnv,
+    log: (level, message) => console.log(`[Nhịp gửi] ${message}`)
+});
+
 async function sendNotification(chatId, text, options = {}) {
     const configuredThreshold = Number(process.env.CHAT_MAX_CONSECUTIVE_FAILURES || 3);
     const defaultThreshold = Number.isInteger(configuredThreshold) && configuredThreshold > 0 ? configuredThreshold : 3;
-    const { feature = "broadcast", operation = feature, maxConsecutiveFailures = defaultThreshold, bypassEligibility = false, priority } = options;
+    const {
+        feature = "broadcast",
+        operation = feature,
+        maxConsecutiveFailures = defaultThreshold,
+        bypassEligibility = false,
+        priority,
+        // Thông báo hàng loạt và thông báo theo lịch phải đi qua nhịp gửi; trả lời
+        // trực tiếp người dùng (feedback, test chat) thì không — người đang chờ
+        // không phải đợi hàng đợi.
+        paced
+    } = options;
+    const shouldPace = (paced === undefined ? (feature === "broadcast" || feature === "schedule") : paced === true) && !isTestEnv;
     // Dấu vết gửi tin: bot nào, chat nào, việc gì, kết quả ra sao. Chỉ ghi vào bộ
     // đệm trong bộ nhớ (xem deliveryTrace.js) — không thêm lượt ghi Firestore nào.
     const traceBase = {
@@ -3136,32 +3214,82 @@ async function sendNotification(chatId, text, options = {}) {
     // Kiểm tra quyền và GHI NHẬN KẾT QUẢ GỬI đều phải chạy trong ngữ cảnh của bot
     // sở hữu chat: sổ chat có phạm vi theo bot, nên ghi nhận bằng ngữ cảnh bot 1 sẽ
     // đánh dấu nhầm lên bản ghi của bot 1 khi chat thuộc bot 2.
-    if (!bypassEligibility && !isChatEligible(chatId, feature)) {
-        recordDeliveryTrace({ ...traceBase, result: "skipped", reason: "inactive_or_disabled" });
-        return { skipped: true, reason: "inactive_or_disabled" };
-    }
-    try {
-        const sendResult = await sendMessage(chatId, text, { ...(options.sendOptions || {}), ...(priority === undefined ? {} : { priority }) });
-        recordDeliverySuccess(chatId);
-        recordDeliveryTrace({
-            ...traceBase,
-            result: "sent",
-            chunks: sendResult?.chunks || 0,
-            providerMessageIds: sendResult?.providerMessageIds || []
-        });
-        return { sent: true };
-    } catch (error) {
-        // Lỗi vĩnh viễn (410/422) đã được ghi nhận ngay tại sendMessage, nơi biết
-        // rõ phân loại. Ghi thêm ở đây sẽ đếm hai lần cùng một lần gửi.
-        const errorKind = error?.deliveryClassification?.kind || null;
-        if (error?.deliveryRecorded === true) {
-            recordDeliveryTrace({ ...traceBase, result: "failed", error: error.message, errorKind, providerMessageIds: error?.deliveryResult?.providerMessageIds || [] });
-            return { failed: true, error, suspended: false };
+    const deliver = async () => {
+        if (!bypassEligibility && !isChatEligible(chatId, feature)) {
+            recordDeliveryTrace({ ...traceBase, result: "skipped", reason: "inactive_or_disabled" });
+            return { skipped: true, reason: "inactive_or_disabled" };
         }
-        const record = recordDeliveryFailure(chatId, error, { feature, operation, maxConsecutiveFailures });
-        recordDeliveryTrace({ ...traceBase, result: "failed", error: error.message, errorKind, providerMessageIds: error?.deliveryResult?.providerMessageIds || [] });
-        return { failed: true, error, suspended: record?.status === "inactive" };
+        try {
+            const sendResult = await sendMessage(chatId, text, { ...(options.sendOptions || {}), ...(priority === undefined ? {} : { priority }) });
+            recordDeliverySuccess(chatId);
+            // `confirmed`: nhà cung cấp có trả về mã tin nhắn không. Với bot chính
+            // thức, Zalo có thể trả ok mà không kèm mã — khi đó ta KHÔNG có bằng
+            // chứng tin nhắn đã được tạo, và bảng tổng kết phải nói đúng điều đó.
+            const confirmed = (sendResult?.providerMessageIds || []).length > 0;
+            recordDeliveryTrace({
+                ...traceBase,
+                result: "sent",
+                confirmed,
+                chunks: sendResult?.chunks || 0,
+                providerMessageIds: sendResult?.providerMessageIds || []
+            });
+            return { sent: true, confirmed };
+        } catch (error) {
+            // Lỗi vĩnh viễn (410/422) đã được ghi nhận ngay tại sendMessage, nơi biết
+            // rõ phân loại. Ghi thêm ở đây sẽ đếm hai lần cùng một lần gửi.
+            const errorKind = error?.deliveryClassification?.kind || null;
+            if (error?.deliveryRecorded === true) {
+                recordDeliveryTrace({ ...traceBase, result: "failed", error: error.message, errorKind, providerMessageIds: error?.deliveryResult?.providerMessageIds || [] });
+                return { failed: true, error, suspended: false };
+            }
+
+            // BỊ GIỚI HẠN TỐC ĐỘ KHÔNG PHẢI LỖI CỦA CHAT.
+            //
+            // Nếu vẫn ghi vào sổ chat, một đợt gửi bị Zalo siết tốc độ sẽ đẩy
+            // `consecutiveFailureCount` của MỌI người nhận lên, và sau vài lần là
+            // chat bị tạm dừng — người dùng mất thông báo vĩnh viễn chỉ vì ta gửi
+            // quá nhanh. Chỉ ghi nhận khi lỗi thuộc về đích.
+            if (errorKind === DELIVERY_ERROR_KIND.RATE_LIMIT) {
+                recordDeliveryTrace({ ...traceBase, result: "failed", error: error.message, errorKind, providerMessageIds: error?.deliveryResult?.providerMessageIds || [] });
+                return { failed: true, error, suspended: false, rateLimited: true };
+            }
+
+            const record = recordDeliveryFailure(chatId, error, { feature, operation, maxConsecutiveFailures });
+            recordDeliveryTrace({ ...traceBase, result: "failed", error: error.message, errorKind, providerMessageIds: error?.deliveryResult?.providerMessageIds || [] });
+            return { failed: true, error, suspended: record?.status === "inactive" };
+        }
+    };
+
+    if (!shouldPace) return deliver();
+
+    // Gửi hàng loạt: xếp hàng theo nhà cung cấp, giãn cách, và chậm lại khi bị
+    // giới hạn tốc độ. Nhà cung cấp đang bị tạm dừng thì trả `deferred` — người
+    // gọi biết là "chưa gửi", không phải "đã gửi".
+    const outcome = await sendPacer.run(traceBase.botId, deliver);
+    if (outcome?.deferred) {
+        recordDeliveryTrace({ ...traceBase, result: "deferred", reason: outcome.reason || "provider_paused" });
     }
+    return outcome;
+}
+
+// Báo trước khi bắt đầu một đợt gửi có giãn cách.
+//
+// Đợt gửi hàng loạt nay mất vài phút (cố ý). Nếu im lặng, người gõ lệnh tưởng bot
+// treo rồi gõ lại — mỗi lần gõ lại là một đợt phát nữa tới toàn bộ người dùng.
+async function announceStartNotice(chatId, count, result = {}) {
+    if (count < 5) return;
+    const personal = Number(result.personalAccountTargets) || 0;
+    const personalLine = personal > 0
+        ? `\n> **Tài khoản cá nhân:** ${personal}/${count} cuộc trò chuyện. Zalo giới hạn gửi hàng loạt từ tài khoản cá nhân nên đợt này sẽ chậm và có thể bị bỏ tin — nên dùng bot chính thức cho thông báo số đông.`
+        : "";
+    await sendMessage(
+        chatId,
+        `# {orange}[ĐANG GỬI]{/orange}\n\n` +
+        `> **Số cuộc trò chuyện:** ${count}\n` +
+        `> Tin được gửi lần lượt, có giãn cách để Zalo không chặn.\n` +
+        `> Bảng tổng kết sẽ tới ngay khi xong — vui lòng đừng gõ lại lệnh.` +
+        personalLine
+    );
 }
 
 function positiveDuration(value, fallback) {
@@ -3334,7 +3462,11 @@ async function sendDailySchedulesAtTime(notificationTime = DEFAULT_NOTIFICATION_
         processed: true,
         matchedStudents: subscriptionsGrouped.size,
         sent: 0,
-        failed: 0
+        failed: 0,
+        // Bị hoãn vì giới hạn tốc độ: chưa gửi, nhưng cũng không phải lỗi của đích.
+        // Phải đếm riêng, nếu không nó biến mất khỏi mọi con số và người vận hành
+        // không biết có người chưa nhận được lịch.
+        deferred: 0
     };
     console.log(`⏰ Bắt đầu tiến trình gửi lịch học ${notificationTime} hàng ngày...`);
     logDiscord("INFO", `Bắt đầu tiến trình gửi lịch học ${notificationTime} hàng ngày...`);
@@ -3382,6 +3514,9 @@ async function sendDailySchedulesAtTime(notificationTime = DEFAULT_NOTIFICATION_
                         if (delivery.sent) {
                             dispatchResult.sent += 1;
                             console.log(`[${notificationTime}] Đã gửi lịch ${targetDateKey} cho MSSV ${studentId} tới chat ${subscription.chatId}`);
+                        } else if (delivery.deferred || delivery.rateLimited) {
+                            dispatchResult.deferred += 1;
+                            logDiscord("WARN", `Hoãn gửi lịch ${notificationTime} cho chat ${subscription.chatId}: nhà cung cấp đang bị giới hạn tốc độ.`);
                         } else if (delivery.failed) {
                             dispatchResult.failed += 1;
                             logDiscord("ERROR", `Không thể gửi lịch ${notificationTime} cho chat ${subscription.chatId}: ${delivery.error.message}`);
@@ -3400,12 +3535,13 @@ async function sendDailySchedulesAtTime(notificationTime = DEFAULT_NOTIFICATION_
         // Ghi lại KẾT QUẢ của lượt gửi vào log hệ thống: dashboard cần thấy được
         // "06:30 gửi 12 người, 1 lỗi" mà không phải ssh vào VPS đọc `pm2 logs`.
         try {
-            recordSystemLog("INFO", `Gửi lịch ${notificationTime}: ${dispatchResult.sent} thành công, ${dispatchResult.failed} lỗi (${dispatchResult.matchedStudents} MSSV).`, {
+            recordSystemLog("INFO", `Gửi lịch ${notificationTime}: ${dispatchResult.sent} thành công, ${dispatchResult.failed} lỗi${dispatchResult.deferred > 0 ? `, ${dispatchResult.deferred} hoãn` : ""} (${dispatchResult.matchedStudents} MSSV).`, {
                 kind: "scheduler",
                 operation: "daily_schedule",
                 notificationTime,
                 sent: dispatchResult.sent,
                 failed: dispatchResult.failed,
+                deferred: dispatchResult.deferred,
                 students: dispatchResult.matchedStudents
             });
         } catch (_) { /* log không được làm hỏng lượt gửi */ }
@@ -3634,7 +3770,7 @@ async function startRuntime() {
         retryChat: async (chatId) => sendNotification(
             chatId,
             "# {orange}[ADMIN TEST]{/orange}\n\nĐang kiểm tra khả năng gửi thông báo tới cuộc trò chuyện này.",
-            { feature: "broadcast", operation: "admin_dashboard_retry", bypassEligibility: true }
+            { feature: "broadcast", operation: "admin_dashboard_retry", bypassEligibility: true, paced: false }
         ),
 
         // Đăng nhập QR cho tài khoản Zalo cá nhân, chỉ qua API đã xác thực admin.
@@ -3858,7 +3994,7 @@ function buildAssistantAdminDeps() {
             const result = await sendNotification(
                 step.chatId,
                 "# {orange}[ADMIN TEST]{/orange}\n\nĐang kiểm tra khả năng gửi thông báo tới cuộc trò chuyện này.",
-                { feature: "broadcast", operation: "admin_test", bypassEligibility: true }
+                { feature: "broadcast", operation: "admin_test", bypassEligibility: true, paced: false }
             );
             if (result.sent) {
                 return `# {green}[ADMIN] KIỂM TRA THÀNH CÔNG{/green}\n\n> **Chat:** \`${escapeMarkdown(step.chatId)}\``;
@@ -4672,6 +4808,9 @@ module.exports = {
     parseQuestionIdAndText,
     registerRuntimeJobs,
     sendBotAnnouncement,
+    // Bảng tổng kết đợt phát tin. Xuất để kiểm thử được phần đếm "chưa xác nhận"
+    // và "hoãn" — hai con số quyết định việc người vận hành có tin là đã gửi xong.
+    formatBroadcastSummary,
     runRecoveredAnnouncement,
     // Cầu nối dashboard cho đợt thông báo một-lần. Tách riêng để kiểm thử được
     // đường xem trước / gửi / tiến độ mà không cần dựng cả HTTP server.

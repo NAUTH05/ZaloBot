@@ -504,3 +504,52 @@ and every scheduled notification. The pause is stored in `adminSettings.aiPause`
 (`global` plus a `botId::chatId` map), evaluated at read time, so it expires on its
 own without a timer and survives a restart. A banner stays visible on every tab
 while a pause is active.
+
+# Broadcast: why "sent to 100+" did not reach everyone
+
+Reported symptom: `/thongbao` reported more than 100 successful deliveries, the
+Chat Center showed `✓` for each of them, and many users received nothing.
+
+## Root cause
+
+`zca-js` resolves `sendMessage` with `{ message: null }` when Zalo accepts the
+request but does **not** create the message — which is what happens when a
+personal account is being rate-limited for sending in bulk. No error is thrown, so
+the delivery layer counted it as success and the Chat Center recorded `✓`.
+
+Two problems stacked:
+
+1. **No proof of delivery.** The provider returned whatever Zalo answered without
+   checking for a `msgId`. `providers/zca/zcaProvider.js` now throws unless Zalo
+   returns a message id (or an attachment id). The error is tagged
+   `deliveryKind: "rate_limit"`, so the send layer slows down instead of treating
+   the chat as broken.
+2. **No pacing.** Broadcasts and scheduled notifications were fired as fast as the
+   API answered (100+ messages in seconds). `sendPacing.js` now sends one message
+   at a time per provider: 1.2 s between messages on an official bot, 3 s on a
+   personal account.
+
+## What the numbers mean now
+
+| Counter | Meaning |
+| --- | --- |
+| `Gửi thành công` | Zalo accepted the request |
+| `trong đó N chưa có mã tin nhắn xác nhận` | Accepted, but Zalo returned no `message_id` — no proof a message was created |
+| `Gửi lỗi` | Rejected (410/422) or the provider could not create the message |
+| `Hoãn do bị giới hạn tốc độ` | Not sent because the provider is throttled — run the command again later |
+
+A rate-limit failure is **never** written to the chat record: otherwise one
+throttled broadcast would push `consecutiveFailureCount` up for every recipient and
+suspend them all, silently unsubscribing users because we sent too fast.
+
+## Operational rules
+
+- Broadcasting from a **personal account** to a large audience is what Zalo
+  throttles hardest. The command now warns before and after when more than 10
+  recipients belong to a personal account. Use an official bot for large
+  announcements.
+- The start notice says "đang gửi" before the run begins — do **not** re-run the
+  command while it is running; each run is another full broadcast.
+- Tune pacing with `BROADCAST_INTERVAL_MS` (official) and
+  `BROADCAST_ZCA_INTERVAL_MS` (personal). Raising them is always safe; lowering
+  them brings the silent-drop problem back.

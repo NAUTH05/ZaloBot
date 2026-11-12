@@ -1128,7 +1128,7 @@ function setupCommandConsole() {
 // ---------------------------------------------------------------------------
 
 const TRACE_RESULT_LABEL = { sent: "Đã gửi", failed: "Lỗi gửi", skipped: "Bỏ qua", deferred: "Hoãn" };
-const TRACE_RESULT_TONE = { sent: "success", failed: "danger", skipped: "warning", deferred: "neutral" };
+const TRACE_RESULT_TONE = { sent: "success", failed: "danger", skipped: "warning", deferred: "warning" };
 
 function traceOperationLabel(item) {
   const feature = item.feature === "schedule" ? "Lịch học" : item.feature === "broadcast" ? "Thông báo" : (item.feature || "?");
@@ -1160,7 +1160,7 @@ function renderLogs() {
     return logMatches(query, [item.botId, item.chatId, item.chatName, item.feature, item.operation, item.result, item.reason, item.error, item.providerMessageId]);
   });
   $("#deliveryTraceList").innerHTML = traces.map((item) => `<article class="stack-item">
-      <div class="trace-head">${badge(TRACE_RESULT_LABEL[item.result] || item.result, TRACE_RESULT_TONE[item.result] || "neutral")}<strong>${escapeHtml(item.chatName || item.chatId || "?")}</strong><code>${escapeHtml(item.chatId || "")}</code>${item.botId ? badge(item.botId, "neutral") : ""}</div>
+      <div class="trace-head">${badge(TRACE_RESULT_LABEL[item.result] || item.result, TRACE_RESULT_TONE[item.result] || "neutral")}${item.result === "sent" && item.confirmed === false ? badge("Chưa xác nhận", "warning") : ""}<strong>${escapeHtml(item.chatName || item.chatId || "?")}</strong><code>${escapeHtml(item.chatId || "")}</code>${item.botId ? badge(item.botId, "neutral") : ""}</div>
       <div class="trace-meta"><span>${escapeHtml(traceOperationLabel(item))}</span><span>${escapeHtml(formatDateTimeVN(item.at))}</span>${item.chunks ? `<span>${item.chunks} phần</span>` : ""}${item.providerMessageId ? `<span>mã Zalo: <code>${escapeHtml(item.providerMessageId)}</code></span>` : `<span>Zalo không trả mã tin nhắn</span>`}${item.reason ? `<span>lý do: ${escapeHtml(item.reason)}</span>` : ""}</div>
       ${item.error ? `<p class="trace-error">${escapeHtml(item.error)}</p>` : ""}
     </article>`).join("") || `<div class="empty-state">Chưa có lần gửi nào được ghi. Nhật ký này chỉ tồn tại trong bộ nhớ của tiến trình đang chạy.</div>`;

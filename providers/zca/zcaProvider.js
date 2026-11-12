@@ -174,6 +174,37 @@ function normalizeRequestStatus(raw) {
     };
 }
 
+// ============================================================================
+// BẰNG CHỨNG TIN NHẮN ĐÃ ĐƯỢC TẠO.
+//
+// zca-js trả về `{ message: { msgId } | null, attachment: [{ msgId }] }`. Khi Zalo
+// nhận yêu cầu nhưng KHÔNG tạo tin (tài khoản bị giới hạn gửi, gửi quá nhanh, nội
+// dung bị chặn), phản hồi vẫn KHÔNG ném lỗi — chỉ là `message` rỗng.
+//
+// Trước đây nhà cung cấp trả nguyên phản hồi đó về tầng trên, nên tầng gửi coi là
+// thành công: Chat Center hiện "✓", bảng tổng kết /thongbao đếm "đã gửi 100+", còn
+// người dùng thì không nhận được gì. Đó là nguồn gốc của báo cáo "bot nói đã gửi
+// nhưng rất nhiều người không nhận được".
+//
+// Không có msgId nghĩa là KHÔNG có tin nhắn. Không đoán thêm.
+// ============================================================================
+function assertMessageCreated(result) {
+    const messageId = result?.message?.msgId;
+    const attachmentIds = Array.isArray(result?.attachment)
+        ? result.attachment.filter((item) => item && item.msgId)
+        : [];
+    if (messageId || attachmentIds.length > 0) return result;
+
+    const error = new Error(
+        "Zalo không tạo tin nhắn (phản hồi không có msgId) — thường do tài khoản bị giới hạn gửi vì gửi quá nhanh hoặc quá nhiều"
+    );
+    // Nhãn do nhà cung cấp quyết định: đây KHÔNG phải đích hỏng (không được đánh dấu
+    // unreachable), mà là giới hạn tốc độ ⇒ tầng gửi phải CHẬM LẠI.
+    error.deliveryKind = "rate_limit";
+    error.providerResponse = result ?? null;
+    throw error;
+}
+
 function createZcaProvider(options = {}) {
     const {
         enabled = false,
@@ -622,16 +653,15 @@ function createZcaProvider(options = {}) {
         try {
             const result = await provider.api.sendMessage(styledPayload, threadId, threadType);
             provider.lastActivityAt = new Date().toISOString();
-            return result;
+            return assertMessageCreated(result);
         } catch (error) {
-            // Zalo có thể từ chối payload có styles (ví dụ phiên bản ứng dụng
-            // không hỗ trợ). Thử lại ĐÚNG MỘT LẦN bằng chính văn bản đã bỏ ký hiệu
-            // định dạng — không bao giờ gửi lại nguyên Markdown, và không lặp vô hạn.
-            if (rendered.styles.length === 0) throw error;
+            // Lỗi đã được nhà cung cấp phân loại (Zalo nhận yêu cầu nhưng KHÔNG tạo
+            // tin) thì không thử lại: gửi lại chỉ làm tình trạng giới hạn nặng thêm.
+            if (error.deliveryKind || rendered.styles.length === 0) throw error;
             log("warn", `gửi kèm định dạng thất bại (${error.message}), thử lại không kèm định dạng`);
             const result = await provider.api.sendMessage({ msg: rendered.text }, threadId, threadType);
             provider.lastActivityAt = new Date().toISOString();
-            return result;
+            return assertMessageCreated(result);
         }
     }
 
@@ -674,15 +704,15 @@ function createZcaProvider(options = {}) {
         try {
             const result = await provider.api.sendMessage(payload, threadId, threadType);
             provider.lastActivityAt = new Date().toISOString();
-            return result;
+            return assertMessageCreated(result);
         } catch (error) {
             // Thử lại không kèm caption (một số phiên bản Zalo từ chối caption+attachment).
-            if (!options.caption) throw error;
+            if (error.deliveryKind || !options.caption) throw error;
             log("warn", `gui anh kem caption that bai (${error.message}), thu lai khong caption`);
             const fallback = { attachments: [attachment] };
             const result = await provider.api.sendMessage(fallback, threadId, threadType);
             provider.lastActivityAt = new Date().toISOString();
-            return result;
+            return assertMessageCreated(result);
         }
     };
 
@@ -796,17 +826,17 @@ function createZcaProvider(options = {}) {
         try {
             const result = await provider.api.sendMessage(payload, threadId, threadType);
             provider.lastActivityAt = new Date().toISOString();
-            return result;
+            return assertMessageCreated(result);
         } catch (error) {
             // Một số phiên bản Zalo từ chối caption kèm tệp: thử lại không caption.
-            if (!options.caption) throw error;
+            if (error.deliveryKind || !options.caption) throw error;
             log("warn", `gui tep kem caption that bai (${error.message}), thu lai khong caption`);
             const fallback = {
                 attachments: [{ data: buffer, filename, metadata: { totalSize: buffer.length } }]
             };
             const result = await provider.api.sendMessage(fallback, threadId, threadType);
             provider.lastActivityAt = new Date().toISOString();
-            return result;
+            return assertMessageCreated(result);
         }
     };
 
