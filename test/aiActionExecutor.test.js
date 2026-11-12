@@ -96,6 +96,7 @@ function createHarness(options = {}) {
         initializeScheduleSnapshot: () => { state.snapshots += 1; },
         formatDailySchedule: () => "LỊCH HÔM NAY",
         formatWeeklySchedule: () => "LỊCH TUẦN",
+        formatScheduleWeeks: () => ["LỊCH TUẦN"],
         formatExamSchedule: () => "LỊCH THI",
         getEnabledSubscriptions: () => ({}),
         gatedWrite: (_context, _label, run) => run(),
@@ -524,4 +525,52 @@ test("nhắc trước giờ học cần có MSSV trước", async () => {
     });
     assert.equal(result.ok, false);
     assert.equal(result.errors[0].error, "missing_student_id");
+});
+
+/* -------------------------------------------------------------------------- */
+/* Lịch nhiều tuần                                                             */
+/* -------------------------------------------------------------------------- */
+
+test("xem lịch tuần không nêu gì: mặc định tuần này, một tuần", async () => {
+    const seen = [];
+    const { executor } = createHarness({
+        record: { studentId: "123456789", studentName: "A" },
+        deps: {
+            formatScheduleWeeks: (_data, options) => {
+                seen.push(options);
+                return ["LỊCH TUẦN NÀY"];
+            }
+        }
+    });
+
+    const result = await executor.run({ context: CONTEXT, actions: [{ type: "get_week_schedule" }] });
+
+    assert.equal(result.ok, true);
+    assert.equal(seen[0].startOffset, 0);
+    assert.equal(seen[0].weeks, 1);
+    assert.deepEqual(result.extraMessages, ["LỊCH TUẦN NÀY"]);
+    assert.equal(result.message, "", "nội dung là câu trả lời, không phải dòng tổng kết");
+});
+
+test("xem nhiều tuần: chuyển đúng tuần bắt đầu và số tuần, gửi đủ từng tin", async () => {
+    const seen = [];
+    const { executor } = createHarness({
+        record: { studentId: "123456789", studentName: "A" },
+        deps: {
+            formatScheduleWeeks: (_data, options) => {
+                seen.push(options);
+                return ["TUẦN SAU", "TUẦN SAU NỮA", "TUẦN THỨ 4"];
+            }
+        }
+    });
+
+    const result = await executor.run({
+        context: CONTEXT,
+        actions: [{ type: "get_week_schedule", week_offset: 1, weeks: 3 }]
+    });
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(seen.map((item) => [item.startOffset, item.weeks]), [[1, 3]]);
+    assert.deepEqual(result.extraMessages, ["TUẦN SAU", "TUẦN SAU NỮA", "TUẦN THỨ 4"]);
+    assert.equal(result.message, "");
 });

@@ -182,3 +182,22 @@ test("set_class_start_reminder chỉ nhận 0–180 phút", () => {
     assert.equal(validateAction({ type: "set_class_start_reminder", lead_minutes: "abc" }).ok, false);
     assert.equal(validateAction({ type: "set_class_start_reminder" }).ok, false);
 });
+
+/* -------------------------------------------------------------------------- */
+/* Lịch nhiều tuần                                                             */
+/* -------------------------------------------------------------------------- */
+
+test("get_week_schedule nhận tuần bắt đầu và số tuần, có trần rõ ràng", () => {
+    assert.equal(validateAction({ type: "get_week_schedule" }).ok, true);
+    assert.equal(validateAction({ type: "get_week_schedule", week_offset: 0 }).ok, true);
+    assert.equal(validateAction({ type: "get_week_schedule", week_offset: 8 }).ok, true);
+    assert.equal(validateAction({ type: "get_week_schedule", week_offset: 9 }).ok, false);
+    assert.equal(validateAction({ type: "get_week_schedule", week_offset: -1 }).ok, false);
+    assert.equal(validateAction({ type: "get_week_schedule", weeks: 1 }).ok, true);
+    assert.equal(validateAction({ type: "get_week_schedule", weeks: 6 }).ok, true);
+    assert.equal(validateAction({ type: "get_week_schedule", weeks: 0 }).ok, false);
+    assert.equal(validateAction({ type: "get_week_schedule", weeks: 7 }).ok, false);
+    assert.equal(validateAction({ type: "get_week_schedule", weeks: 2.5 }).ok, false);
+    assert.equal(validateAction({ type: "get_week_schedule", weeks: "abc" }).ok, false);
+    assert.equal(validateAction({ type: "get_week_schedule", week_offset: 1, weeks: 3 }).ok, true);
+});

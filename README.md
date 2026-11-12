@@ -814,6 +814,11 @@ dashboard reports that honestly rather than trying another identity.
 `thu2`…`thu7`, `chunhat`, `d/m`, and `yyyy-mm-dd`; omitted means today. A glued
 `/lichngaymai` is understood as `/lich ngaymai`.
 
+`/lichtuan` takes an optional week: `/lichtuan tuan sau`, `/lichtuan tuan sau nua`,
+`/lichtuan 3` (three weeks starting this week, max 6), `/lichtuan 123000xxx tuan sau`.
+Omitted means this week. Each week is sent as its own message, and an empty week
+inside a multi-week request is skipped rather than sent as an empty block.
+
 `/nhactruoc [số phút]` sets how long before class the reminder fires (0–180).
 A class starting at 12:50 with `/nhactruoc 60` notifies at 11:50. `/batnhaclich`
 accepts the same optional minutes. `0` (the default) keeps the old "at class

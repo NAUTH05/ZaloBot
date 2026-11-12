@@ -126,16 +126,24 @@ khi `/lich mai` tồn tại: nó chỉ thấy danh sách hành động, không t
 Nay danh sách lệnh được lấy trực tiếp từ `helpContent.js`, nên thêm lệnh mới là
 trợ lý biết ngay, không phải sửa prompt.
 
-## 4c. Lịch theo ngày và nhắc trước giờ học
+## 4c. Lịch theo ngày, lịch nhiều tuần và nhắc trước giờ học
 | Nhu cầu | Lệnh | Hành động AI |
 | --- | --- | --- |
 | Lịch một ngày bất kỳ | `/lich [MSSV] [ngày]` | `get_schedule_for_date {date}` |
+| Lịch tuần này / tuần sau | `/lichtuan`, `/lichtuan tuan sau` | `get_week_schedule {week_offset}` |
+| Lịch nhiều tuần liền | `/lichtuan 3` | `get_week_schedule {week_offset, weeks}` |
 | Nhắc trước N phút | `/nhactruoc N` hoặc `/batnhaclich N` | `set_class_start_reminder {lead_minutes}` |
 
 Cụm ngày được quy đổi **ở máy chủ** (`scheduleDate.js`), dùng chung cho lệnh và
 cho AI: `homnay`, `mai`, `mot`, `thu2`…`thu7`, `chunhat`, `12/11`, `2026-11-12`.
 Mô hình chỉ trả về cụm từ, không tự tính ra ngày — và nếu cụm từ không hiểu được
 thì máy chủ hỏi lại thay vì đoán.
+
+Tuần cũng vậy (`scheduleWeek.js`): `tuan nay` = 0, `tuan sau` = 1, `tuan sau nua`
+= 2; một con số đứng riêng là **số tuần muốn xem** (1–6). Mỗi tuần được gửi thành
+một tin riêng — gộp 4 tuần vào một tin thì không ai đọc — và tuần trống bị bỏ khỏi
+chuỗi nhiều tuần; nếu cả khoảng đều trống thì trả một tin tổng hợp nêu rõ khoảng
+ngày. Trần 6 tuần và 8 tuần về trước nằm ở máy chủ, mô hình không tự nới.
 
 Nhắc trước: `0` phút là hành vi cũ (nhắc đúng lúc vào học). Mã chống trùng của
 một lần nhắc bao gồm cả số phút, nên "trước 1 tiếng" và "đúng lúc vào học" cho

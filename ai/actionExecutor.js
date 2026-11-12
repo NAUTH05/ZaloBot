@@ -12,9 +12,10 @@
 //                   chừng được báo chính xác, không bao giờ báo "thành công toàn bộ".
 
 const subscriptions = require("../subscriptions");
-const { fetchStudentSchedule, normalizeStudentId, formatDailySchedule, formatExamSchedule, formatWeeklySchedule } = require("../lhuSchedule");
+const { fetchStudentSchedule, normalizeStudentId, formatDailySchedule, formatExamSchedule, formatScheduleWeeks, formatWeeklySchedule } = require("../lhuSchedule");
 const { initializeScheduleSnapshot } = require("../scheduleChanges");
 const { resolveScheduleDate } = require("../scheduleDate");
+const { weekLabel } = require("../scheduleWeek");
 const { findHelpCommand, renderCommand } = require("../helpContent");
 const { formatPublicHelp } = require("../messageTemplates");
 const { TARGET_DAY, offsetToTargetDay, targetDayToOffset } = require("./commandNormalizer");
@@ -98,6 +99,7 @@ function createActionExecutor(deps = {}) {
         initializeScheduleSnapshot: deps.initializeScheduleSnapshot || initializeScheduleSnapshot,
         formatDailySchedule: deps.formatDailySchedule || formatDailySchedule,
         formatWeeklySchedule: deps.formatWeeklySchedule || formatWeeklySchedule,
+        formatScheduleWeeks: deps.formatScheduleWeeks || formatScheduleWeeks,
         formatExamSchedule: deps.formatExamSchedule || formatExamSchedule,
         // Cổng tiếp nhận: mặc định chạy ngay (đúng hành vi khi chat đã được tiếp
         // nhận). main.js truyền gatedWrite thật vào để giữ nguyên cơ chế hoãn ghi.
@@ -325,7 +327,6 @@ function createActionExecutor(deps = {}) {
                         steps.push({ ...base, label: TYPE_LABEL[action.type] });
                         break;
                     case "get_today_schedule":
-                    case "get_week_schedule":
                     case "get_exam_schedule": {
                         const studentId = services.normalizeStudentId(action.student_id || effectiveStudentId);
                         if (!studentId) {
@@ -334,6 +335,22 @@ function createActionExecutor(deps = {}) {
                         }
                         const data = await loadSchedule(studentId);
                         steps.push({ ...base, studentId, scheduleData: data, label: TYPE_LABEL[action.type] });
+                        break;
+                    }
+                    case "get_week_schedule": {
+                        const studentId = services.normalizeStudentId(action.student_id || effectiveStudentId);
+                        if (!studentId) {
+                            errors.push({ ...base, error: "missing_student_id" });
+                            break;
+                        }
+                        const data = await loadSchedule(studentId);
+                        // Tuần và số tuần đều do máy chủ quyết định, mô hình chỉ nói ý.
+                        const weekOffset = Number(action.week_offset) || 0;
+                        const weeks = Number(action.weeks) || 1;
+                        const label = weeks > 1
+                            ? `xem lịch ${weeks} tuần`
+                            : `xem lịch ${weekLabel(weekOffset).toLowerCase()}`;
+                        steps.push({ ...base, studentId, scheduleData: data, weekOffset, weeks, label });
                         break;
                     }
                     case "get_schedule_for_date": {
@@ -574,8 +591,13 @@ function createActionExecutor(deps = {}) {
                         break;
                     }
                     case "get_week_schedule": {
-                        extraMessages.push(services.formatWeeklySchedule(step.scheduleData));
-                        results.push({ ...baseResult(step), status: STATUS.OK, standalone: true, detail: `lịch tuần của ${step.studentId}` });
+                        const messages = services.formatScheduleWeeks(step.scheduleData, {
+                            referenceDate: services.now(),
+                            startOffset: step.weekOffset,
+                            weeks: step.weeks
+                        });
+                        for (const message of messages) extraMessages.push(message);
+                        results.push({ ...baseResult(step), status: STATUS.OK, standalone: true, detail: step.label });
                         break;
                     }
                     case "get_exam_schedule": {

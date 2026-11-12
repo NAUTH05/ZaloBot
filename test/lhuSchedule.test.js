@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const {
     formatDailySchedule,
     formatLesson,
+    formatScheduleWeeks,
     formatWeeklySchedule,
     isLessonActive,
     lessonsForDate,
@@ -341,4 +342,118 @@ test("formatter hiển thị trạng thái hủy và lịch thi, đồng thời 
     assert.doesNotMatch(cancelled, /Phòng:|Giảng viên:|Nhóm:|Hình thức:|Trực tuyến:/);
     assert.match(exam, /Trạng thái:\*\* \{orange\}\[LỊCH THI\]/);
     assert.match(exam, /Hình thức:\*\* Thi/);
+});
+
+/* -------------------------------------------------------------------------- */
+/* Lịch nhiều tuần                                                             */
+/* -------------------------------------------------------------------------- */
+
+const MULTI_WEEK_DATA = {
+    studentId: "123456789",
+    studentName: "Nguyễn Văn A",
+    lessons: [
+        { ThoiGianBD: "2026-11-12T07:00:00", TenMonHoc: "Toán", TenPhong: "A101", Type: 0, TinhTrang: 0 },
+        { ThoiGianBD: "2026-11-19T07:00:00", TenMonHoc: "Lý", TenPhong: "A102", Type: 0, TinhTrang: 0 },
+        { ThoiGianBD: "2026-11-26T07:00:00", TenMonHoc: "Hoá", TenPhong: "A103", Type: 0, TinhTrang: 0 }
+    ]
+};
+
+// 11/11/2026 là Thứ Tư ⇒ tuần này 09/11 – 15/11.
+const MULTI_WEEK_REFERENCE = new Date("2026-11-11T05:00:00Z");
+
+test("tuần sau có nhãn riêng và đúng khoảng ngày", () => {
+    const message = formatWeeklySchedule(MULTI_WEEK_DATA, MULTI_WEEK_REFERENCE, { weekOffset: 1 });
+
+    assert.match(message, /^# \{green\}\[LỊCH HỌC\] TUẦN SAU\{\/green\}/);
+    assert.match(message, /16\/11\/2026 – 22\/11\/2026/);
+    assert.match(message, /· Lý\*\*/);
+    assert.doesNotMatch(message, /· Toán\*\*/, "không được lẫn buổi của tuần này");
+});
+
+test("tuần trống vẫn trả lời rõ là không có lịch, không im lặng", () => {
+    const message = formatWeeklySchedule(MULTI_WEEK_DATA, MULTI_WEEK_REFERENCE, { weekOffset: 3 });
+
+    assert.match(message, /TUẦN THỨ 4/);
+    assert.match(message, /TUẦN THỨ 4 KHÔNG CÓ LỊCH HỌC/);
+});
+
+test("xem 3 tuần trả về 3 tin, mỗi tuần một tin đúng thứ tự", () => {
+    const messages = formatScheduleWeeks(MULTI_WEEK_DATA, {
+        referenceDate: MULTI_WEEK_REFERENCE,
+        startOffset: 0,
+        weeks: 3
+    });
+
+    assert.equal(messages.length, 3);
+    assert.match(messages[0], /TUẦN NÀY/);
+    assert.match(messages[0], /09\/11\/2026 – 15\/11\/2026/);
+    assert.match(messages[1], /TUẦN SAU/);
+    assert.match(messages[2], /TUẦN SAU NỮA/);
+    // Mỗi tin chỉ chứa buổi của tuần đó.
+    assert.match(messages[0], /Toán/);
+    assert.doesNotMatch(messages[0], /· Lý\*\*/, "không được lẫn môn của tuần sau");
+    assert.match(messages[2], /Hoá/);
+});
+
+test("bắt đầu từ tuần sau thì không lẫn tuần này", () => {
+    const messages = formatScheduleWeeks(MULTI_WEEK_DATA, {
+        referenceDate: MULTI_WEEK_REFERENCE,
+        startOffset: 1,
+        weeks: 2
+    });
+
+    assert.equal(messages.length, 2);
+    assert.match(messages[0], /TUẦN SAU/);
+    assert.match(messages[1], /TUẦN SAU NỮA/);
+    assert.doesNotMatch(messages.join("\n"), /Toán/);
+});
+
+test("tuần trống bị bỏ khỏi chuỗi nhiều tuần nhưng khoảng ngày vẫn rõ", () => {
+    const messages = formatScheduleWeeks(MULTI_WEEK_DATA, {
+        referenceDate: MULTI_WEEK_REFERENCE,
+        startOffset: 0,
+        weeks: 2
+    });
+
+    assert.equal(messages.length, 2, "tuần 3 trống nên không sinh tin thứ ba");
+    assert.match(messages[1], /16\/11\/2026 – 22\/11\/2026/);
+});
+
+test("cả khoảng đều trống thì trả một tin tổng hợp, không phải N tin rỗng", () => {
+    const messages = formatScheduleWeeks(MULTI_WEEK_DATA, {
+        referenceDate: MULTI_WEEK_REFERENCE,
+        startOffset: 5,
+        weeks: 3
+    });
+
+    assert.equal(messages.length, 1);
+    assert.match(messages[0], /\[LỊCH HỌC\] 3 TUẦN/);
+    assert.match(messages[0], /KHÔNG CÓ LỊCH HỌC/);
+    assert.match(messages[0], /14\/12\/2026 – 03\/01\/2027/);
+});
+
+test("số tuần vượt trần bị cắt, không sinh vô số tin", () => {
+    const messages = formatScheduleWeeks(MULTI_WEEK_DATA, {
+        referenceDate: MULTI_WEEK_REFERENCE,
+        startOffset: 0,
+        weeks: 99
+    });
+
+    // 3 tuần có buổi học + 1 tin ghi các tuần còn lại (bị cắt ở trần 6 tuần).
+    assert.equal(messages.length, 4);
+    assert.match(messages[3], /TUẦN KHÔNG CÓ LỊCH/);
+    assert.equal((messages[3].match(/^- /gm) || []).length, 3);
+});
+
+test("tuần trống trong chuỗi nhiều tuần được nêu tên, không im lặng bỏ qua", () => {
+    // 3 tuần có buổi học, tuần thứ 4 (30/11 – 06/12) trống.
+    const messages = formatScheduleWeeks(MULTI_WEEK_DATA, {
+        referenceDate: MULTI_WEEK_REFERENCE,
+        startOffset: 0,
+        weeks: 4
+    });
+
+    assert.equal(messages.length, 4);
+    assert.match(messages[3], /TUẦN KHÔNG CÓ LỊCH/);
+    assert.match(messages[3], /30\/11\/2026 – 06\/12\/2026/);
 });

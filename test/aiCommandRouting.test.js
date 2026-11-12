@@ -214,3 +214,42 @@ test("chỉ cảnh báo cú pháp mới kéo theo phần giải thích của tr�
     assert.equal(main.looksLikeSyntaxError(["# {green}✓ ĐÃ LƯU MSSV{/green}"]), false);
     assert.equal(main.looksLikeSyntaxError([]), false);
 });
+
+/* -------------------------------------------------------------------------- */
+/* /lichtuan theo tuần                                                         */
+/* -------------------------------------------------------------------------- */
+
+test("parseWeekArgument tách đúng MSSV và tuần", () => {
+    assert.deepEqual(main.parseWeekArgument(""), { studentPart: "", request: null });
+    assert.deepEqual(main.parseWeekArgument("123456789"), { studentPart: "123456789", request: null });
+
+    const next = main.parseWeekArgument("tuan sau");
+    assert.equal(next.studentPart, "");
+    assert.equal(next.request.startOffset, 1);
+
+    const withId = main.parseWeekArgument("123456789 tuan sau nua");
+    assert.equal(withId.studentPart, "123456789");
+    assert.equal(withId.request.startOffset, 2);
+
+    assert.equal(main.parseWeekArgument("3").request.weeks, 3);
+    assert.equal(main.parseWeekArgument("tuần sau").request.startOffset, 1);
+});
+
+test("cụm từ không hiểu được báo sai cú pháp, không âm thầm hiện tuần này", () => {
+    assert.equal(main.parseWeekArgument("thang sau").error, "syntax");
+    assert.equal(main.parseWeekArgument("123456789 thang sau").error, "syntax");
+});
+
+test("/lichtuan tuan sau trả lịch của tuần sau, không phải tuần này", async () => {
+    const output = await run("/lichtuan tuan sau");
+    assert.ok(!/LỆNH KHÔNG HỢP LỆ|SAI CÚ PHÁP/.test(output), "phải nhận diện được cú pháp có tuần");
+    assert.match(output, /TUẦN SAU/);
+});
+
+test("/lichtuan 2 hiểu là xem 2 tuần, không phải lỗi cú pháp", async () => {
+    const output = await run("/lichtuan 2");
+    assert.ok(!/LỆNH KHÔNG HỢP LỆ|SAI CÚ PHÁP/.test(output), "số tuần phải được nhận diện");
+    // Dữ liệu thử không có buổi học nào ⇒ một tin tổng hợp cho cả khoảng.
+    assert.match(output, /\[LỊCH HỌC\] 2 TUẦN/);
+    assert.match(output, /KHÔNG CÓ LỊCH HỌC/);
+});

@@ -14,6 +14,7 @@
 //     tệp tin hay HTTP tuỳ ý.
 
 const { findHelpCommand } = require("../helpContent");
+const { MAX_START_OFFSET: MAX_WEEK_START_OFFSET, MAX_WEEKS } = require("../scheduleWeek");
 const { normalizeTimeToken } = require("./commandNormalizer");
 
 const DECISION = Object.freeze({
@@ -190,6 +191,25 @@ function validateLeadMinutes(value) {
     return { ok: true, value: minutes };
 }
 
+// Tuần: 0 = tuần này, 1 = tuần sau… Trần 8 tuần để một câu nói nhầm ("tuần 99")
+// không thành lần tra cứu vô nghĩa.
+function validateWeekOffset(value) {
+    const offset = Number(value);
+    if (!Number.isFinite(offset) || !Number.isInteger(offset) || offset < 0 || offset > MAX_WEEK_START_OFFSET) {
+        return { ok: false, error: `week_offset phải là số nguyên 0–${MAX_WEEK_START_OFFSET}` };
+    }
+    return { ok: true, value: offset };
+}
+
+// Số tuần muốn xem trong một lần: 1–6.
+function validateWeekCount(value) {
+    const weeks = Number(value);
+    if (!Number.isFinite(weeks) || !Number.isInteger(weeks) || weeks < 1 || weeks > MAX_WEEKS) {
+        return { ok: false, error: `weeks phải là số nguyên 1–${MAX_WEEKS}` };
+    }
+    return { ok: true, value: weeks };
+}
+
 // Bảng luật cho từng hành động: thuộc tính bắt buộc, thuộc tính tuỳ chọn và hàm
 // kiểm tra giá trị. Không có luật ⇒ không có quyền chạy.
 const ACTION_RULES = Object.freeze({
@@ -220,7 +240,17 @@ const ACTION_RULES = Object.freeze({
     set_class_start_reminder: { required: ["lead_minutes"], optional: [], fields: { lead_minutes: validateLeadMinutes } },
     disable_class_start_notifications: { required: [], optional: [], fields: {} },
     get_today_schedule: { required: [], optional: ["student_id"], fields: { student_id: validateStudentId } },
-    get_week_schedule: { required: [], optional: ["student_id"], fields: { student_id: validateStudentId } },
+    // Tuần: `week_offset` 0 = tuần này, 1 = tuần sau; `weeks` = xem bao nhiêu
+    // tuần liền nhau. Cả hai đều do máy chủ chặn trần, mô hình không tự tính ngày.
+    get_week_schedule: {
+        required: [],
+        optional: ["student_id", "week_offset", "weeks"],
+        fields: {
+            student_id: validateStudentId,
+            week_offset: validateWeekOffset,
+            weeks: validateWeekCount
+        }
+    },
     get_exam_schedule: { required: [], optional: ["student_id"], fields: { student_id: validateStudentId } },
     // Ngày do mô hình trả về chỉ là CỤM TỪ ("mai", "thứ 5", "12/11"). Máy chủ tự
     // quy đổi và từ chối nếu không hiểu — mô hình không bao giờ tự tính ra ngày.

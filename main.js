@@ -19,8 +19,8 @@ const {
     findEmptyRooms,
     formatDailySchedule,
     formatExamSchedule,
+    formatScheduleWeeks,
     formatTeacherSchedule,
-    formatWeeklySchedule,
     normalizeStudentId,
     resolveStudentIdForCommand,
     searchTeacherByName
@@ -59,6 +59,7 @@ const {
 } = require("./scheduleChanges");
 const { TIME_ZONE, getVietnamDateInfo } = require("./timezone");
 const { resolveScheduleDate } = require("./scheduleDate");
+const { MAX_WEEKS, resolveWeekRequest } = require("./scheduleWeek");
 const { addCalendarDays, dateFromVietnamDateKey } = require("./scheduleDatePolicy");
 const { escapeMarkdown, escapeMarkdownMultiline, sanitizeExternalRichText } = require("./richText");
 const {
@@ -2162,6 +2163,31 @@ function parseScheduleDateArgument(argument) {
     return { studentPart: tokens.join(" "), resolved: null };
 }
 
+// Tách đối số của /lichtuan thành [MSSV] + [tuần].
+//
+// Cùng cách làm với ngày: thử cụm DÀI nhất trước, vì "tuần sau nữa" là ba token
+// và nếu thử ngắn trước thì "sau" sẽ bị bỏ rơi. Không hiểu ⇒ error "syntax" để
+// người dùng thấy cú pháp đúng, thay vì âm thầm hiển thị tuần này.
+function parseWeekArgument(argument) {
+    const tokens = String(argument || "").trim().split(/\s+/).filter(Boolean);
+    if (tokens.length === 0) return { studentPart: "", request: null };
+    for (const size of [3, 2, 1]) {
+        if (tokens.length < size) continue;
+        const tail = tokens.slice(-size).join(" ");
+        const request = resolveWeekRequest(tail);
+        if (!request) continue;
+        const head = tokens.slice(0, tokens.length - size);
+        if (head.length > 1) return { error: "syntax" };
+        return { studentPart: head.join(" "), request };
+    }
+    if (tokens.length > 1) return { error: "syntax" };
+    // Một token duy nhất không phải tuần: coi là MSSV nếu đúng 9 chữ số, còn lại
+    // là cú pháp sai — "tuần ba" hay "tuần tới nữa" không được đoán bừa.
+    const single = tokens[0];
+    if (/^\d{9}$/.test(single)) return { studentPart: single, request: null };
+    return { error: "syntax" };
+}
+
 // Cú pháp: /suagionhanlich ID hh:mm homnay|homsau
 // hoặc     /suagionhanlich ID homnay|homsau   (chỉ đổi ngày đích)
 // "ID" là số nguyên dương; "#1" cũ vẫn nhận được.
@@ -2198,7 +2224,7 @@ const COMMAND_EXAMPLES = {
     suagionhanlich: "/suagionhanlich 1 06:30 homnay",
     xoagionhanlich: "/xoagionhanlich 1",
     lich: "/lich 123456789",
-    lichtuan: "/lichtuan 123456789",
+    lichtuan: "/lichtuan 123456789 tuan sau",
     lichthi: "/lichthi 123456789",
     lichgv: "/lichgv Nguyễn Văn A",
     phongtrong: "/phongtrong 1",
@@ -2571,10 +2597,21 @@ async function handleCommand(msg, parsedCommand) {
         }
     } else if (command === "lichtuan") {
         const saved = getSubscription(context);
-        const studentId = resolveStudentIdForCommand(argument, saved?.studentId);
+        const parsedWeek = parseWeekArgument(argument);
+        if (parsedWeek.error) {
+            await sendMessage(chatId, formatWarningMessage(
+                "SAI CÚ PHÁP",
+                `> **Cú pháp:** /lichtuan [MSSV] [tuần]\n` +
+                "> **Ví dụ:** /lichtuan tuan sau\n" +
+                "> **Ví dụ:** /lichtuan tuan sau nua\n" +
+                `> **Ví dụ:** /lichtuan 3 (xem 3 tuần liên tiếp, tối đa ${MAX_WEEKS} tuần)`
+            ));
+            return;
+        }
+        const studentId = resolveStudentIdForCommand(parsedWeek.studentPart, saved?.studentId);
 
         if (!studentId) {
-            await sendMessage(chatId, argument
+            await sendMessage(chatId, parsedWeek.studentPart
                 ? formatWarningMessage("MSSV KHÔNG HỢP LỆ", "> MSSV phải gồm đúng **9 chữ số**.")
                 : formatMissingStudentIdMessage("lichtuan"));
             return;
@@ -2582,7 +2619,14 @@ async function handleCommand(msg, parsedCommand) {
 
         try {
             const data = await fetchStudentSchedule(studentId);
-            await sendMessage(chatId, formatWeeklySchedule(data));
+            // Mỗi tuần một tin: gộp nhiều tuần vào một tin sẽ dài không đọc nổi.
+            const request = parsedWeek.request || { startOffset: 0, weeks: 1 };
+            const messages = formatScheduleWeeks(data, {
+                referenceDate: new Date(),
+                startOffset: request.startOffset,
+                weeks: request.weeks
+            });
+            for (const message of messages) await sendMessage(chatId, message);
         } catch (error) {
             await sendUserError(chatId, error, "weekly_schedule");
         }
@@ -4537,6 +4581,7 @@ module.exports = {
     parseLeadMinutes,
     parseNhanLichArgument,
     parseScheduleDateArgument,
+    parseWeekArgument,
     parseRecordId,
     parseSuaGioNhanLichArgument,
     parseCommand,

@@ -6,6 +6,8 @@ const {
     toLhuQueryDate
 } = require("./timezone");
 const { escapeMarkdown } = require("./richText");
+const { addCalendarDays, dateFromVietnamDateKey } = require("./scheduleDatePolicy");
+const { MAX_WEEKS, weekLabel } = require("./scheduleWeek");
 
 const API_URL = "https://tapi.lhu.edu.vn/calen/auth/XemLich_LichSinhVien";
 const PAGE_SIZE = 100;
@@ -332,15 +334,27 @@ function formatDailySchedule(scheduleData, date = new Date(), options = {}) {
     return `${header}\n\n## {orange}${lessons.length} BUỔI HỌC{/orange}\n${lessons.map((lesson, index) => formatLesson(lesson, index, { referenceDate })).join("\n\n────────────\n\n")}`;
 }
 
+// Dịch ngày đi N ngày theo lịch Việt Nam. Dùng dateKey thay vì cộng mili giây để
+// không phụ thuộc múi giờ của máy chủ.
+function shiftVietnamDays(date, days) {
+    const { dateKey } = getVietnamDateInfo(date);
+    return dateFromVietnamDateKey(addCalendarDays(dateKey, days));
+}
+
+// `options.weekOffset`: 0 = tuần này, 1 = tuần sau… Ngày truyền vào vẫn là mốc
+// "hôm nay"; hàm tự dịch tuần nên người gọi không phải tự cộng ngày.
 function formatWeeklySchedule(scheduleData, date = new Date(), options = {}) {
-    const week = getVietnamWeekInfo(date);
+    const weekOffset = Math.max(0, Number(options.weekOffset) || 0);
+    const weekDate = weekOffset > 0 ? shiftVietnamDays(date, weekOffset * 7) : date;
+    const week = getVietnamWeekInfo(weekDate);
     const referenceDate = options.referenceDate || date;
     const todayDateKey = getVietnamDateInfo(referenceDate).dateKey;
-    const lessons = lessonsForWeek(scheduleData.lessons || [], date);
+    const lessons = lessonsForWeek(scheduleData.lessons || [], weekDate);
+    const label = weekLabel(weekOffset);
     const studentName = escapeMarkdown(scheduleData.studentName || "Sinh viên");
     const studentId = escapeMarkdown(scheduleData.studentId);
     const header = [
-        "# {green}[LỊCH HỌC] TUẦN NÀY{/green}",
+        `# {green}[LỊCH HỌC] ${label}{/green}`,
         `**Sinh viên:** ${studentName}`,
         `> **MSSV:** ${studentId}`,
         `> **Tuần:** ${week.formattedStartDate} – ${week.formattedEndDate}`,
@@ -348,7 +362,7 @@ function formatWeeklySchedule(scheduleData, date = new Date(), options = {}) {
     ].join("\n");
 
     if (lessons.length === 0) {
-        return `${header}\n\n## {green}TUẦN NÀY KHÔNG CÓ LỊCH HỌC{/green}`;
+        return `${header}\n\n## {green}${label} KHÔNG CÓ LỊCH HỌC{/green}`;
     }
 
     const sections = week.days.map((day) => {
@@ -362,6 +376,59 @@ function formatWeeklySchedule(scheduleData, date = new Date(), options = {}) {
     }).filter(Boolean);
 
     return `${header}\n\n${sections.join("\n\n════════════════\n\n")}`;
+}
+
+// Lịch của NHIỀU tuần liền nhau. Trả về mảng tin nhắn — mỗi tuần một tin, vì gộp
+// 4 tuần vào một tin sẽ dài tới mức không ai đọc và dễ bị Zalo cắt.
+//
+// Tuần không có buổi nào bị bỏ khỏi chuỗi (mỗi tin đều ghi rõ khoảng ngày nên
+// không mất thông tin), trừ khi CẢ khoảng đều trống — lúc đó trả một tin tổng hợp.
+function formatScheduleWeeks(scheduleData, options = {}) {
+    const referenceDate = options.referenceDate || new Date();
+    const startOffset = Math.max(0, Number(options.startOffset) || 0);
+    const requested = Number(options.weeks) || 1;
+    const weeks = Math.min(Math.max(1, Math.floor(requested)), MAX_WEEKS);
+
+    if (weeks === 1) {
+        return [formatWeeklySchedule(scheduleData, referenceDate, { referenceDate, weekOffset: startOffset })];
+    }
+
+    const messages = [];
+    const emptyWeeks = [];
+    for (let index = 0; index < weeks; index += 1) {
+        const offset = startOffset + index;
+        const weekDate = shiftVietnamDays(referenceDate, offset * 7);
+        const hasLessons = lessonsForWeek(scheduleData.lessons || [], weekDate).length > 0;
+        if (!hasLessons) {
+            emptyWeeks.push(getVietnamWeekInfo(weekDate));
+            continue;
+        }
+        messages.push(formatWeeklySchedule(scheduleData, referenceDate, { referenceDate, weekOffset: offset }));
+    }
+    if (messages.length > 0) {
+        // Tuần trống không sinh tin riêng, nhưng phải NÓI RA: nếu chỉ im lặng bỏ
+        // qua, người dùng không biết tuần đó đã được kiểm tra hay chưa.
+        if (emptyWeeks.length > 0) {
+            messages.push([
+                "# {green}[LỊCH HỌC] TUẦN KHÔNG CÓ LỊCH{/green}",
+                ...emptyWeeks.map((week) => `- ${week.formattedStartDate} – ${week.formattedEndDate}`)
+            ].join("\n"));
+        }
+        return messages;
+    }
+
+    const firstWeek = getVietnamWeekInfo(shiftVietnamDays(referenceDate, startOffset * 7));
+    const lastWeek = getVietnamWeekInfo(shiftVietnamDays(referenceDate, (startOffset + weeks - 1) * 7));
+    const studentName = escapeMarkdown(scheduleData.studentName || "Sinh viên");
+    const studentId = escapeMarkdown(scheduleData.studentId);
+    return [[
+        `# {green}[LỊCH HỌC] ${weeks} TUẦN{/green}`,
+        `**Sinh viên:** ${studentName}`,
+        `> **MSSV:** ${studentId}`,
+        `> **Khoảng:** ${firstWeek.formattedStartDate} – ${lastWeek.formattedEndDate}`,
+        "",
+        "## {green}KHÔNG CÓ LỊCH HỌC{/green}"
+    ].join("\n")];
 }
 
 async function fetchExamSchedule(studentIdInput, date = new Date()) {
@@ -539,6 +606,7 @@ module.exports = {
     formatExamSchedule,
     formatLesson,
     formatLessonDetails,
+    formatScheduleWeeks,
     formatTeacherSchedule,
     formatWeeklySchedule,
     isLessonActive,

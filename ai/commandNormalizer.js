@@ -10,6 +10,7 @@
 
 const { COMMAND_ALIASES, findHelpCommand } = require("../helpContent");
 const { foldText } = require("../mentionUtils");
+const { resolveWeekRequest } = require("../scheduleWeek");
 
 const TARGET_DAY = Object.freeze({
     TODAY: "today",
@@ -224,6 +225,35 @@ function buildScheduleAction(type, argument) {
     return { action: { type, student_id: trimmed } };
 }
 
+// "lichtuan", "lichtuan tuan sau", "lichtuan 3", "lichtuan 123456789 tuan sau nua".
+// Phần tuần đi CUỐI câu (giống /lich), nên phải thử cụm dài trước — "tuần sau nữa"
+// là ba token, thử ngắn trước sẽ bỏ rơi chữ "nữa".
+function buildWeekScheduleAction(argument) {
+    const trimmed = normalizeArgument(argument);
+    if (!trimmed) return { action: { type: "get_week_schedule" } };
+
+    const tokens = trimmed.split(/\s+/).filter(Boolean);
+    for (const size of [3, 2, 1]) {
+        if (tokens.length < size) continue;
+        const request = resolveWeekRequest(tokens.slice(-size).join(" "));
+        if (!request) continue;
+        const head = tokens.slice(0, tokens.length - size).join("");
+        if (head && !looksLikeStudentId(head)) return { error: "invalid_student_id" };
+        return {
+            action: {
+                type: "get_week_schedule",
+                ...(head ? { student_id: head } : {}),
+                week_offset: request.startOffset,
+                weeks: request.weeks
+            }
+        };
+    }
+
+    const single = tokens.join("");
+    if (looksLikeStudentId(single)) return { action: { type: "get_week_schedule", student_id: single } };
+    return { error: "invalid_week" };
+}
+
 function buildHelpAction(argument) {
     const name = foldText(normalizeArgument(argument)).replace(/^\//, "").trim();
     if (!name) return { action: { type: "help" } };
@@ -241,7 +271,7 @@ const ACTION_BUILDERS = {
     enable_class_start_notifications: () => ({ action: { type: "enable_class_start_notifications" } }),
     disable_class_start_notifications: () => ({ action: { type: "disable_class_start_notifications" } }),
     get_today_schedule: (argument) => buildScheduleAction("get_today_schedule", argument),
-    get_week_schedule: (argument) => buildScheduleAction("get_week_schedule", argument),
+    get_week_schedule: (argument) => buildWeekScheduleAction(argument),
     get_exam_schedule: (argument) => buildScheduleAction("get_exam_schedule", argument),
     list_notifications: () => ({ action: { type: "list_notifications" } }),
     help: buildHelpAction

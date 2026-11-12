@@ -22,7 +22,7 @@ const ACTION_CATALOG = `- save_mssv {student_id}
 - set_class_start_reminder {lead_minutes}   (0–180; 0 = đúng lúc vào học)
 - disable_class_start_notifications {}
 - get_today_schedule {student_id?}
-- get_week_schedule {student_id?}
+- get_week_schedule {student_id?, week_offset?:0-8, weeks?:1-6}   (0 = tuần này, 1 = tuần sau)
 - get_exam_schedule {student_id?}
 - get_schedule_for_date {date:"mai"|"thứ 5"|"12/11"|"2026-11-12", student_id?}
 - help {command?}`;
@@ -101,6 +101,7 @@ QUY TẮC BẮT BUỘC:
 12. "reply" tối đa 3 câu ngắn. Không giải thích kỹ thuật, không nhắc tên bảng, tên trường dữ liệu hay tên hệ thống bên trong.
 13. Nếu đã biết GIỜ nhưng chưa biết NGÀY ĐÍCH: dùng "clarify", hỏi đúng một câu, và vẫn trả hành động dở dang {"type":"register_notification","time":"HH:mm"} (bỏ target_day). Hệ thống sẽ hoàn tất khi người dùng trả lời "hôm nay"/"hôm sau".
 14. Danh sách mốc giờ ở trên là dữ liệu THẬT của chính người đang hỏi. Khi họ nói "bỏ lịch 21 giờ hôm sau", hãy tự chọn đúng mốc và dùng delete_notification — KHÔNG hỏi xin mã số nếu đã khớp được. Chỉ hỏi mã số khi không mốc nào khớp.
+15. Hỏi về TUẦN thì dùng get_week_schedule: "tuần này" ⇒ week_offset 0; "tuần sau" ⇒ 1; "tuần sau nữa" ⇒ 2. Hỏi nhiều tuần một lúc ("3 tuần tới", "mấy tuần sau") ⇒ giữ week_offset 0 hoặc 1 và đặt weeks tương ứng (1–6). KHÔNG trả lời là chưa xem được tuần sau.
 
 CÁCH TƯ DUY (làm theo thứ tự này):
 a. Xác định NHU CẦU thật của người dùng (họ muốn xem gì, đổi gì, hay chỉ đang hỏi).

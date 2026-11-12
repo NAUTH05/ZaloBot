@@ -1,6 +1,7 @@
 node_modules/
-.env
-.env.*
+# Mọi biến thể của .env — kể cả bản sao lưu tay như ".env - vps" (có dấu cách),
+# vốn chứa token và mật khẩu thật.
+.env*
 !.env.example
 credentials.json
 subscriptions.json

@@ -55,13 +55,13 @@ const HELP_COMMANDS = [
     },
     {
         command: "lichtuan",
-        usage: "/lichtuan [MSSV]",
+        usage: "/lichtuan [MSSV] [tuần]",
         group: HELP_GROUPS.PUBLIC,
         category: CATEGORY.SCHEDULE,
         permission: "user",
-        description: "Xem lịch học trong tuần.",
-        examples: ["/lichtuan", "/lichtuan 123000xxx"],
-        note: "Hiển thị lịch từ Thứ Hai đến Chủ Nhật."
+        description: "Xem lịch học theo tuần — tuần này, tuần sau hoặc nhiều tuần liền.",
+        examples: ["/lichtuan", "/lichtuan tuan sau", "/lichtuan 3", "/lichtuan 123000xxx tuan sau"],
+        note: "Nhận: tuần sau, tuần sau nữa, hoặc số tuần muốn xem (1–6). Bỏ trống = tuần này."
     },
     {
         command: "lichthi",
