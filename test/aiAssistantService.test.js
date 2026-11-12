@@ -957,3 +957,96 @@ test("provider lỗi thì im lặng, không chồng thêm thông báo", async ()
     assert.equal(result.handled, false);
     assert.deepEqual(sent, []);
 });
+
+/* -------------------------------------------------------------------------- */
+/* Ngoài phạm vi: im lặng, và chặn chi phí khi bị lạm dụng                     */
+/* -------------------------------------------------------------------------- */
+
+test("câu ngoài phạm vi: không gửi gì, không thực thi gì", async () => {
+    const provider = fakeProvider(() => planResponse({ decision: "ignore", reply: "" }));
+    const executor = fakeExecutor();
+    const { assistant, sent, send } = buildAssistant({ provider, executor });
+
+    const result = await assistant.handleTurn({ context: CONTEXT, text: "1+1 bằng mấy", send });
+
+    assert.equal(result.reason, "ignored");
+    assert.deepEqual(sent, [], "im lặng hoàn toàn, không xin lỗi, không gợi ý");
+    assert.deepEqual(executor.calls.prepare, []);
+});
+
+test("mô hình trả ignore kèm lời giải thích thì lời đó cũng bị bỏ", async () => {
+    const provider = fakeProvider(() => planResponse({
+        decision: "ignore",
+        reply: "Mình chỉ trả lời về lịch học thôi nhé."
+    }));
+    const { assistant, sent, send } = buildAssistant({ provider });
+
+    await assistant.handleTurn({ context: CONTEXT, text: "giải phương trình x^2-1=0", send });
+    assert.deepEqual(sent, [], "không được gửi cả câu 'mình chỉ hỗ trợ lịch học'");
+});
+
+test("prompt nêu rõ phạm vi và yêu cầu ignore im lặng", async () => {
+    const provider = fakeProvider(() => planResponse({ decision: "answer", reply: "ok" }));
+    const { assistant, send } = buildAssistant({ provider });
+
+    await assistant.handleTurn({ context: CONTEXT, text: "chào", send });
+    const system = provider.calls[0].messages[0].content;
+
+    assert.match(system, /KHÔNG PHẢI CHATBOT ĐA NĂNG/);
+    assert.match(system, /PHẠM VI DUY NHẤT/);
+    assert.match(system, /"decision":"ignore","reply":""/);
+    assert.match(system, /KHÔNG giải thích, KHÔNG xin lỗi/, "phải cấm cả câu giải thích");
+    assert.match(system, /bài tập|câu hỏi trắc nghiệm/, "phải kể rõ ví dụ ngoài phạm vi");
+});
+
+test("hỏi ngoài phạm vi liên tiếp thì ngừng gọi API", async () => {
+    const provider = fakeProvider(() => planResponse({ decision: "ignore", reply: "" }));
+    const { assistant, sent, send } = buildAssistant({
+        provider,
+        env: { AI_OFFTOPIC_SILENCE_AFTER: "3", AI_OFFTOPIC_SILENCE_MS: "60000" }
+    });
+
+    for (let index = 0; index < 3; index += 1) {
+        await assistant.handleTurn({ context: CONTEXT, text: `câu ngoài phạm vi ${index}`, send });
+    }
+    assert.equal(provider.calls.length, 3);
+
+    const muted = await assistant.handleTurn({ context: CONTEXT, text: "câu thứ tư", send });
+    assert.equal(muted.reason, "offtopic_muted");
+    assert.equal(provider.calls.length, 3, "không được tốn thêm token");
+    assert.deepEqual(sent, []);
+});
+
+test("một câu trả lời thật đặt lại chuỗi ngoài phạm vi", async () => {
+    let decision = "ignore";
+    const provider = fakeProvider(() => planResponse(
+        decision === "ignore" ? { decision: "ignore", reply: "" } : { decision: "answer", reply: "ok" }
+    ));
+    const { assistant, send } = buildAssistant({
+        provider,
+        env: { AI_OFFTOPIC_SILENCE_AFTER: "3", AI_OFFTOPIC_SILENCE_MS: "60000" }
+    });
+
+    await assistant.handleTurn({ context: CONTEXT, text: "một", send });
+    await assistant.handleTurn({ context: CONTEXT, text: "hai", send });
+    decision = "answer";
+    await assistant.handleTurn({ context: CONTEXT, text: "lịch hôm nay", send });
+    decision = "ignore";
+    await assistant.handleTurn({ context: CONTEXT, text: "ba", send });
+    await assistant.handleTurn({ context: CONTEXT, text: "bốn", send });
+
+    const result = await assistant.handleTurn({ context: CONTEXT, text: "năm", send });
+    assert.equal(result.reason, "ignored", "chuỗi đã bị đặt lại nên vẫn được gọi API");
+    assert.equal(provider.calls.length, 6);
+});
+
+test("đặt ngưỡng 0 thì tắt hẳn cơ chế tạm ngừng", async () => {
+    const provider = fakeProvider(() => planResponse({ decision: "ignore", reply: "" }));
+    const { assistant, send } = buildAssistant({ provider, env: { AI_OFFTOPIC_SILENCE_AFTER: "0" } });
+
+    for (let index = 0; index < 6; index += 1) {
+        const result = await assistant.handleTurn({ context: CONTEXT, text: `câu ${index}`, send });
+        assert.equal(result.reason, "ignored");
+    }
+    assert.equal(provider.calls.length, 6);
+});

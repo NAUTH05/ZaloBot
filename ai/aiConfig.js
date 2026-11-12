@@ -36,6 +36,11 @@ const DEFAULTS = Object.freeze({
     noticeCooldownMs: 900000,
     // Sau lỗi toàn cục (hết số dư / sai khoá), tạm ngừng gọi API trong khoảng này.
     providerCooldownMs: 600000,
+    // Chống lạm dụng: hỏi ngoài phạm vi liên tiếp N lần thì ngừng gọi API cho
+    // chính người đó trong một khoảng. Câu ngoài phạm vi vẫn TỐN token (phải gọi
+    // mô hình mới biết là ngoài phạm vi), nên đây là cách chặn chi phí do spam.
+    offTopicSilenceAfter: 3,
+    offTopicSilenceMs: 600000,
     // Owner không bị hạn mức NGÀY theo người chặn (vẫn chịu trần ngân sách tháng).
     // Người vận hành phải thử được hệ thống của mình; hạn mức theo người sinh ra để
     // chặn lạm dụng của người dùng cuối, không phải để chặn chính mình.
@@ -114,6 +119,9 @@ function loadAiConfig(env = process.env) {
         cooldownMs: readNumber(env, "AI_COOLDOWN_MS", DEFAULTS.cooldownMs, { min: 0, max: 600000, integer: true }),
         noticeCooldownMs: readNumber(env, "AI_NOTICE_COOLDOWN_MS", DEFAULTS.noticeCooldownMs, { min: 0, max: 86400000, integer: true }),
         providerCooldownMs: readNumber(env, "AI_PROVIDER_COOLDOWN_MS", DEFAULTS.providerCooldownMs, { min: 0, max: 86400000, integer: true }),
+        // 0 = tắt hoàn toàn cơ chế tạm ngừng.
+        offTopicSilenceAfter: readNumber(env, "AI_OFFTOPIC_SILENCE_AFTER", DEFAULTS.offTopicSilenceAfter, { min: 0, max: 100, integer: true }),
+        offTopicSilenceMs: readNumber(env, "AI_OFFTOPIC_SILENCE_MS", DEFAULTS.offTopicSilenceMs, { min: 0, max: 86400000, integer: true }),
         ownerBypassLimit: readBoolean(env, "AI_OWNER_BYPASS_LIMIT", DEFAULTS.ownerBypassLimit),
         enableGroupAssistant: readBoolean(env, "AI_ENABLE_GROUP_ASSISTANT", DEFAULTS.enableGroupAssistant),
         priceInputPer1mUsd: readNumber(env, "AI_PRICE_INPUT_PER_1M_USD", DEFAULTS.priceInputPer1mUsd, { min: 0, max: 10000 }),

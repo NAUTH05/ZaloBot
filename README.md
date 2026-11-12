@@ -700,6 +700,12 @@ Safety and cost:
   temporarily unavailable and every normal command keeps working.
 - Group chats stay silent unless `AI_ENABLE_GROUP_ASSISTANT=true`, and history is
   filtered to the current sender only.
+- Scope is deliberately narrow: schedules, notifications and the bot's own commands.
+  Anything else (homework, general knowledge, small talk) is answered with
+  `decision: "ignore"` and **no message at all**. Because finding that out costs a
+  call, `AI_OFFTOPIC_SILENCE_AFTER` consecutive off-topic messages from one user
+  stop API calls for that user for `AI_OFFTOPIC_SILENCE_MS`; plain commands still
+  work during that window.
 - `/blockai` and `AI allowlist` apply to the assistant exactly as they do to `/ai`.
 - The assistant always sees the **current sender's own** notification times (with
   IDs), so "bỏ lịch 21 giờ hôm sau" works without asking for a record ID.

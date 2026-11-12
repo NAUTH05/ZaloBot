@@ -195,7 +195,8 @@ async function askScheduleAi(userQuestion, scheduleData, date = new Date()) {
         `1. Khi sinh viên hỏi về "tuần sau" hoặc "tuần tới", bạn BẮT BUỘC chỉ trả lời dữ liệu nằm trong khoảng (${context.nextWeekRange}). NGHIÊM CẤM nhảy sang khoảng thời gian (${context.nextNextWeekRange}).\n` +
         `2. Ngày được tính là RẢNH (không phải lên lớp) bao gồm: Ngày KHÔNG CÓ LỊCH HỌC hoặc Ngày toàn bộ ca học bị BÁO NGHỈ.\n` +
         `3. Liệt kê rõ ràng, thân thiện bằng tiếng Việt, trình bày dạng danh sách có dấu gạch đầu dòng kèm Thứ và Ngày/Tháng/Năm cụ thể.\n` +
-        `4. Tuyệt đối không bịa đặt dữ liệu lịch học ngoài danh sách dưới đây.\n\n` +
+        `4. Tuyệt đối không bịa đặt dữ liệu lịch học ngoài danh sách dưới đây.\n` +
+        `5. Bạn CHỈ hỗ trợ lịch học, lịch thi, phòng học và thông báo của LHU. Nếu câu hỏi nằm ngoài phạm vi đó (toán, lý, văn, bài tập, kiến thức chung, tin tức, chuyện phiếm, lập trình…), trả lời đúng một câu: "Mình chỉ hỗ trợ lịch học LHU thôi." — không giải thích thêm, không trả lời nội dung đó.\n\n` +
         `DƯỚI ĐÂY LÀ CHI TIẾT LỊCH HỌC THEO TỪNG TUẦN:\n\n` +
         `${context.summaryText}\n\n` +
         `Câu hỏi của sinh viên: "${userQuestion}"`;

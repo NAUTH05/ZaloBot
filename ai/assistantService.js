@@ -146,6 +146,21 @@ function createAssistant(options = {}) {
 
     // Chống spam trong thời gian ngắn: bộ nhớ tạm, không cần bền vững.
     const cooldowns = new Map();
+    // Đếm số câu NGOÀI PHẠM VI liên tiếp của mỗi người. Câu ngoài phạm vi vẫn tốn
+    // token (phải gọi mô hình mới biết là ngoài phạm vi), nên khi ai đó dùng bot
+    // như chatbot đa năng, ta ngừng gọi API cho chính người đó một lúc. Đây là
+    // chặn CHI PHÍ, không phải chặn quyền: lệnh thường không đi qua đường này.
+    const ignoreStreaks = new Map();
+    const MAX_IGNORE_STREAK_ENTRIES = 500;
+
+    // Map này không được phình theo số người dùng. Chỉ dọn khi đã lớn, và chỉ bỏ
+    // mục đã hết hiệu lực — mục đang tạm ngừng phải giữ nguyên.
+    function pruneIgnoreStreaks(at) {
+        if (ignoreStreaks.size <= MAX_IGNORE_STREAK_ENTRIES) return;
+        for (const [entryKey, entry] of ignoreStreaks) {
+            if (!entry.mutedUntil || entry.mutedUntil <= at) ignoreStreaks.delete(entryKey);
+        }
+    }
     // Lần cuối đã giải thích một lỗi cú pháp cho mỗi người.
     const syntaxHelpAt = new Map();
     // Lần cuối đã gửi một câu "trợ lý đang nghỉ" cho mỗi người. Không có nó thì
@@ -397,6 +412,13 @@ function createAssistant(options = {}) {
             return { handled: true, reason: "cooldown" };
         }
 
+        // Người này vừa hỏi ngoài phạm vi liên tiếp quá nhiều lần ⇒ im lặng và
+        // KHÔNG gọi API. Không tiêu hạn mức, không tiêu token, không trả lời gì.
+        const streak = ignoreStreaks.get(key);
+        if (streak && streak.mutedUntil > currentTime.getTime()) {
+            return { handled: true, reason: "offtopic_muted" };
+        }
+
         // Cầu dao: lỗi toàn cục vừa xảy ra thì không gọi lại ngay. Người dùng nhận
         // tối đa một câu thông báo trong mỗi cửa sổ `noticeCooldownMs`.
         if (currentTime.getTime() < providerDownUntil) {
@@ -483,8 +505,22 @@ function createAssistant(options = {}) {
         ));
 
         if (plan.decision === DECISION.IGNORE) {
+            // Câu ngoài phạm vi: không gửi gì. Đếm để chặn chi phí khi bị dùng
+            // như chatbot đa năng — ngưỡng và thời gian tạm ngừng đến từ cấu hình.
+            const previous = ignoreStreaks.get(key) || { count: 0, mutedUntil: 0 };
+            const count = previous.count + 1;
+            if (config.offTopicSilenceAfter > 0 && count >= config.offTopicSilenceAfter) {
+                ignoreStreaks.set(key, { count: 0, mutedUntil: currentTime.getTime() + config.offTopicSilenceMs });
+                log.info?.(`[AI] tạm ngừng trả lời ${config.offTopicSilenceMs}ms sau ${count} câu ngoài phạm vi liên tiếp`);
+                pruneIgnoreStreaks(currentTime.getTime());
+            } else {
+                ignoreStreaks.set(key, { count, mutedUntil: previous.mutedUntil });
+            }
             return { handled: true, reason: "ignored" };
         }
+
+        // Một câu trả lời thật ⇒ người này đang dùng bot đúng mục đích, xoá chuỗi.
+        ignoreStreaks.delete(key);
 
         if (plan.decision === DECISION.ANSWER || plan.decision === DECISION.CLARIFY) {
             // Hành động dở dang của câu hỏi làm rõ (ví dụ đã biết 21:00 nhưng chưa
