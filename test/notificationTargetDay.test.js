@@ -469,3 +469,59 @@ test("danh sách giờ hiển thị ID không có dấu #", async () => {
     assert.match(output, /ID 2/);
     assert.ok(!/#1|#2/.test(output), "danh sách không được hiển thị #1/#2");
 });
+
+/* -------------------------------------------------------------------------- */
+/* Chống trùng khi gửi trước                                                  */
+/* -------------------------------------------------------------------------- */
+
+// Cửa sổ gửi trước khiến job chạy nhiều phút cho CÙNG một mốc. Không có sổ chống
+// trùng thì mỗi người nhận 5–20 tin. Đây là bài chốt hành vi đó ở tầng nghiệp vụ
+// (bài kiểm tra của dailyScheduleLedger chỉ chốt bản thân sổ).
+test("chạy lại trong cùng cửa sổ gửi trước KHÔNG gửi trùng", async () => {
+    seed({ times: [{ id: 1, time: "06:30", targetDayOffset: 0 }] });
+
+    const first = await main.sendDailySchedulesAtTime("06:30", REFERENCE);
+    assert.equal(first.sent, 1);
+    assert.equal(sent.length, 1);
+
+    // Job chạy lại một phút sau, vẫn trong cửa sổ của mốc 06:30.
+    const second = await main.sendDailySchedulesAtTime("06:30", REFERENCE);
+    assert.equal(second.processed, false, "không còn ai cần gửi");
+    assert.equal(sent.length, 1, "mỗi người chỉ nhận một tin cho mỗi mốc trong một ngày");
+});
+
+test("sang ngày hôm sau thì gửi bình thường, sổ không chặn oan", async () => {
+    seed({ times: [{ id: 1, time: "06:30", targetDayOffset: 0 }] });
+
+    await main.sendDailySchedulesAtTime("06:30", REFERENCE);
+    assert.equal(sent.length, 1);
+
+    const nextDay = new Date(REFERENCE.getTime() + 24 * 60 * 60 * 1000);
+    const result = await main.sendDailySchedulesAtTime("06:30", nextDay);
+    assert.equal(result.sent, 1, "hôm sau là lượt mới");
+    assert.equal(sent.length, 2);
+});
+
+/* -------------------------------------------------------------------------- */
+/* Cửa sổ gửi trước ở tầng job (sendScheduledDailySchedules)                   */
+/* -------------------------------------------------------------------------- */
+
+test("job chỉ gửi khi đã vào cửa sổ gửi trước, và gửi đúng một lần", async () => {
+    seed({ times: [{ id: 1, time: "06:30", targetDayOffset: 0 }] });
+
+    // 06:00 — còn quá sớm so với cửa sổ (mốc 06:30, sàn 5 phút ⇒ bắt đầu 06:25).
+    const tooEarly = await main.sendScheduledDailySchedules(new Date("2026-09-23T06:00:00+07:00"));
+    assert.equal(tooEarly.sent, 0);
+    assert.equal(sent.length, 0);
+
+    // 06:25 — vào cửa sổ: gửi ngay, tin cuối vẫn kịp 06:30.
+    const inWindow = await main.sendScheduledDailySchedules(new Date("2026-09-23T06:25:00+07:00"));
+    assert.equal(inWindow.sent, 1);
+    assert.equal(inWindow.slots[0].time, "06:30");
+    assert.ok(inWindow.slots[0].presendMinutes >= 5, "log phải nói rõ gửi trước bao nhiêu phút");
+
+    // 06:26 — job chạy lại trong cùng cửa sổ: không gửi trùng.
+    const again = await main.sendScheduledDailySchedules(new Date("2026-09-23T06:26:00+07:00"));
+    assert.equal(again.sent, 0);
+    assert.equal(sent.length, 1, "mỗi người chỉ nhận một tin cho mỗi mốc trong một ngày");
+});

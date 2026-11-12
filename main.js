@@ -150,6 +150,14 @@ const { recordSystemLog } = require("./operationalLog");
 const { recordDeliveryTrace } = require("./deliveryTrace");
 const { installVietnamLogTimestamps } = require("./logTime");
 const { createSendPacer } = require("./sendPacing");
+const { planSlot, resolvePresendOptions } = require("./schedulePresend");
+const {
+    claimDelivery: claimDailyDelivery,
+    isDelivered: isDailyDelivered,
+    markDelivered: markDailyDelivered,
+    releaseDelivery: releaseDailyDelivery,
+    resetDeliveries: resetDailyScheduleDeliveries
+} = require("./dailyScheduleLedger");
 const { getAdminSettings, getConfiguredAdminIds, isConfiguredAdmin } = require("./adminSettings");
 const { LEGACY_BOT_ID, extractBotName, isZcaId, normalizeBotId, parseAliases, parseScopedKey, providerTypeOf, resolveBotConfigs, resolveBotDisplayName, scopeKey } = require("./bots");
 const { createFriendRequestService } = require("./friendRequestService");
@@ -3415,6 +3423,58 @@ function groupEnabledSubscriptionsByTargetDay(notificationTime = null) {
     return grouped;
 }
 
+// Bỏ khỏi nhóm những đích ĐÃ nhận lịch của mốc này trong ngày này.
+//
+// Chạy TRƯỚC bước lấy lịch của trường: cửa sổ gửi trước có thể kéo dài 5–20 phút
+// và job chạy mỗi phút, nên nếu không lọc sớm thì mỗi MSSV bị gọi API lịch hàng
+// chục lần trong một buổi sáng.
+function dropAlreadyDelivered(grouped, notificationTime, slotDateKey) {
+    for (const [studentId, byOffset] of grouped.entries()) {
+        for (const [offset, targets] of byOffset.entries()) {
+            for (const [targetKey, subscription] of targets.entries()) {
+                const delivered = isDailyDelivered({
+                    botId: subscriptionBotId(subscription),
+                    chatId: subscription.chatId,
+                    studentId,
+                    time: notificationTime,
+                    targetDayOffset: offset,
+                    slotDateKey
+                });
+                if (delivered) targets.delete(targetKey);
+            }
+            if (targets.size === 0) byOffset.delete(offset);
+        }
+        if (byOffset.size === 0) grouped.delete(studentId);
+    }
+    return grouped;
+}
+
+// Mọi mốc giờ đang có người đăng ký (đã lọc quyền nhận tin). Sắp xếp để log và
+// thứ tự chạy ổn định giữa các lượt.
+function collectDailySlotTimes() {
+    const slots = new Set();
+    for (const subscription of Object.values(getEnabledSubscriptions())) {
+        if (!isSubscriptionEligible(subscription)) continue;
+        for (const item of normalizeNotificationTimes(subscription)) slots.add(item.time);
+    }
+    return [...slots].sort();
+}
+
+// Delay thực tế của từng người nhận ở một mốc giờ.
+//
+// Cần cho việc tính cửa sổ gửi trước: 50 người trên tài khoản cá nhân cần nhiều
+// thời gian hơn hẳn 50 người trên bot chính thức, nên cửa sổ phải tính theo đúng
+// hỗn hợp nhà cung cấp của mốc đó chứ không dùng một con số chung.
+function slotIntervals(slotTime) {
+    const intervals = [];
+    for (const subscription of Object.values(getEnabledSubscriptions())) {
+        if (!isSubscriptionEligible(subscription)) continue;
+        if (!normalizeNotificationTimes(subscription).some((item) => item.time === slotTime)) continue;
+        intervals.push(sendPacer.intervalFor(subscriptionBotId(subscription)));
+    }
+    return intervals;
+}
+
 let isCheckRunning = false;
 const runningDailyNotificationTimes = new Set();
 
@@ -3447,13 +3507,24 @@ async function checkAndNotifyScheduleChanges() {
 // Gửi lịch học cho các đăng ký có cùng giờ thông báo. Ngày đích được tính
 // riêng cho TỪNG người nhận: thời điểm gửi thực tế theo giờ Việt Nam cộng với
 // lựa chọn hôm nay / hôm sau của chính mốc giờ đó.
-async function sendDailySchedulesAtTime(notificationTime = DEFAULT_NOTIFICATION_TIME, deliveryAt = new Date()) {
+//
+// `deliveryAt` là MỐC GIỜ đã đăng ký (không phải lúc bấm chạy). Khi gửi trước,
+// mốc vẫn là 06:30 nên ngày đích và nội dung "hôm nay/hôm sau" tính đúng như cũ.
+async function sendDailySchedulesAtTime(notificationTime = DEFAULT_NOTIFICATION_TIME, deliveryAt = new Date(), runOptions = {}) {
+    const slotDateKey = getVietnamDateInfo(deliveryAt).dateKey;
+    // Lệnh kiểm tra thủ công (/test6h) phải gửi lại được trong cùng ngày, nên nó
+    // bỏ qua sổ chống trùng. Mọi đường tự động đều dùng sổ.
+    const ignoreLedger = runOptions.ignoreLedger === true;
     const subscriptionsGrouped = groupEnabledSubscriptionsByTargetDay(notificationTime);
+    // Lọc TRƯỚC khi lấy lịch của trường: người đã nhận xong trong cửa sổ này không
+    // được tạo thêm một lời gọi HTTP nào. Đây là thứ giữ cho cửa sổ 5–20 phút không
+    // biến thành 20 lần gọi API lịch cho mỗi MSSV.
+    if (!ignoreLedger) dropAlreadyDelivered(subscriptionsGrouped, notificationTime, slotDateKey);
     if (subscriptionsGrouped.size === 0) {
-        return { processed: false, matchedStudents: 0, sent: 0, failed: 0 };
+        return { processed: false, matchedStudents: 0, sent: 0, failed: 0, deferred: 0 };
     }
     if (runningDailyNotificationTimes.has(notificationTime)) {
-        return { processed: false, matchedStudents: subscriptionsGrouped.size, sent: 0, failed: 0 };
+        return { processed: false, matchedStudents: subscriptionsGrouped.size, sent: 0, failed: 0, deferred: 0 };
     }
 
     runningDailyNotificationTimes.add(notificationTime);
@@ -3468,8 +3539,11 @@ async function sendDailySchedulesAtTime(notificationTime = DEFAULT_NOTIFICATION_
         // không biết có người chưa nhận được lịch.
         deferred: 0
     };
-    console.log(`⏰ Bắt đầu tiến trình gửi lịch học ${notificationTime} hàng ngày...`);
-    logDiscord("INFO", `Bắt đầu tiến trình gửi lịch học ${notificationTime} hàng ngày...`);
+    const presendNote = Number(runOptions.presendMinutes) > 0
+        ? ` (gửi trước ${runOptions.presendMinutes} phút để tin cuối kịp ${notificationTime})`
+        : "";
+    console.log(`⏰ Bắt đầu tiến trình gửi lịch học ${notificationTime} hàng ngày${presendNote}...`);
+    logDiscord("INFO", `Bắt đầu tiến trình gửi lịch học ${notificationTime} hàng ngày${presendNote}...`);
     try {
         console.log(`[${notificationTime}] Tìm thấy ${subscriptionsGrouped.size} MSSV có đăng ký nhận thông báo.`);
 
@@ -3510,16 +3584,37 @@ async function sendDailySchedulesAtTime(notificationTime = DEFAULT_NOTIFICATION_
                     // 2. Gửi lịch của đúng ngày đích mà người nhận đã chọn
                     const dailyMessage = formatDailySchedule(data, targetDate, { referenceDate: deliveryAt });
                     for (const subscription of targets.values()) {
+                        // Giữ chỗ NGAY TRƯỚC khi gửi: hai lượt chạy chồng nhau (hoặc
+                        // một lần chạy lại sau restart) không thể gửi trùng.
+                        const deliveryFields = {
+                            botId: subscriptionBotId(subscription),
+                            chatId: subscription.chatId,
+                            studentId,
+                            time: notificationTime,
+                            targetDayOffset,
+                            slotDateKey
+                        };
+                        const claimId = ignoreLedger ? "ignore-ledger" : claimDailyDelivery(deliveryFields);
+                        if (!claimId) {
+                            // Đã gửi trong cửa sổ này (hoặc lượt khác đang gửi).
+                            continue;
+                        }
                         const delivery = await sendToSubscription(subscription, dailyMessage, { feature: "schedule", operation: "daily_schedule" });
                         if (delivery.sent) {
+                            if (!ignoreLedger) markDailyDelivered(claimId);
                             dispatchResult.sent += 1;
                             console.log(`[${notificationTime}] Đã gửi lịch ${targetDateKey} cho MSSV ${studentId} tới chat ${subscription.chatId}`);
-                        } else if (delivery.deferred || delivery.rateLimited) {
-                            dispatchResult.deferred += 1;
-                            logDiscord("WARN", `Hoãn gửi lịch ${notificationTime} cho chat ${subscription.chatId}: nhà cung cấp đang bị giới hạn tốc độ.`);
-                        } else if (delivery.failed) {
-                            dispatchResult.failed += 1;
-                            logDiscord("ERROR", `Không thể gửi lịch ${notificationTime} cho chat ${subscription.chatId}: ${delivery.error.message}`);
+                        } else {
+                            // Chưa gửi được ⇒ nhả chỗ để lần chạy sau (trong cửa sổ)
+                            // thử lại. Giữ chỗ lại là mất lịch của người này cả ngày.
+                            if (!ignoreLedger) releaseDailyDelivery(claimId);
+                            if (delivery.deferred || delivery.rateLimited) {
+                                dispatchResult.deferred += 1;
+                                logDiscord("WARN", `Hoãn gửi lịch ${notificationTime} cho chat ${subscription.chatId}: nhà cung cấp đang bị giới hạn tốc độ.`);
+                            } else if (delivery.failed) {
+                                dispatchResult.failed += 1;
+                                logDiscord("ERROR", `Không thể gửi lịch ${notificationTime} cho chat ${subscription.chatId}: ${delivery.error.message}`);
+                            }
                         }
                     }
                 } catch (error) {
@@ -3549,13 +3644,45 @@ async function sendDailySchedulesAtTime(notificationTime = DEFAULT_NOTIFICATION_
 }
 
 async function sendDailySchedulesAtSix() {
-    return sendDailySchedulesAtTime("06:00");
+    // Lệnh kiểm tra thủ công: bỏ qua sổ chống trùng để chạy lại được nhiều lần
+    // trong cùng một ngày.
+    return sendDailySchedulesAtTime("06:00", new Date(), { ignoreLedger: true });
 }
 
+// Chạy mỗi phút: mốc nào đang trong cửa sổ gửi trước thì gửi.
+//
+// Trước đây hàm này chỉ gửi khi giờ hiện tại TRÙNG KHÍT mốc đăng ký, nên mốc 06:30
+// phải bắt đầu đúng 06:30 và người cuối nhận muộn hơn giờ đã hẹn. Nay mỗi mốc có
+// một cửa sổ [mốc − thời gian cần, mốc + ân hạn]: bắt đầu sớm để TIN CUỐI vẫn kịp
+// mốc, trong khi mỗi tin vẫn giữ nguyên delay an toàn.
+//
+// Sổ chống trùng (dailyScheduleLedger) là thứ khiến việc nới cửa sổ không sinh ra
+// 5–20 tin trùng cho mỗi người.
 async function sendScheduledDailySchedules(date = new Date()) {
     const dateInfo = getVietnamDateInfo(date);
-    const notificationTime = `${dateInfo.hour}:${dateInfo.minute}`;
-    return sendDailySchedulesAtTime(notificationTime, date);
+    const presendOptions = resolvePresendOptions(process.env);
+    const aggregate = { processed: false, matchedStudents: 0, sent: 0, failed: 0, deferred: 0, slots: [] };
+
+    for (const slotTime of collectDailySlotTimes()) {
+        const plan = planSlot({
+            slotDateKey: dateInfo.dateKey,
+            time: slotTime,
+            intervals: slotIntervals(slotTime),
+            now: date,
+            options: presendOptions
+        });
+        if (!plan?.due) continue;
+
+        const result = await sendDailySchedulesAtTime(slotTime, plan.slotAt, { presendMinutes: plan.minutesBefore });
+        aggregate.slots.push({ time: slotTime, presendMinutes: plan.minutesBefore, ...result });
+        aggregate.processed = aggregate.processed || result.processed;
+        aggregate.matchedStudents += result.matchedStudents || 0;
+        aggregate.sent += result.sent || 0;
+        aggregate.failed += result.failed || 0;
+        aggregate.deferred += result.deferred || 0;
+    }
+
+    return aggregate;
 }
 
 function registerRuntimeJobs(scheduler = schedule) {
@@ -3688,6 +3815,7 @@ async function startRuntime() {
                 "adminSettings",
                 "aiAssistantState",
                 "chatDirectory",
+                "dailyScheduleDeliveries",
                 "friendRequestSettings",
                 "friendRequests",
                 "groupPolicy",
@@ -4824,6 +4952,9 @@ module.exports = {
     sendDailySchedulesAtSix,
     sendDailySchedulesAtTime,
     sendScheduledDailySchedules,
+    // Sổ chống trùng lịch học. Xuất để kiểm thử tạo trạng thái sạch và để người
+    // vận hành gửi lại một mốc đã lỡ (sổ nằm trong Firestore, không sửa tay được).
+    resetDailyScheduleDeliveries,
     sendWelcomeMessage,
     suggestCommandCorrection,
     startRuntime

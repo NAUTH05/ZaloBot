@@ -553,3 +553,72 @@ suspend them all, silently unsubscribing users because we sent too fast.
 - Tune pacing with `BROADCAST_INTERVAL_MS` (official) and
   `BROADCAST_ZCA_INTERVAL_MS` (personal). Raising them is always safe; lowering
   them brings the silent-drop problem back.
+
+# Presend: keeping the delivery time while keeping the delay
+
+## The conflict
+
+A 06:30 slot with 50 recipients cannot be sent at 06:30 any more. Each message
+needs a safe gap (5 s on a personal account), so starting at 06:30 means the last
+person receives at 06:34 — late, and later still if the delay is raised to be
+safer.
+
+## The rule
+
+The slot time stays the user's registration time. The **run starts earlier by
+exactly the time it needs**, so the last message still lands at 06:30:
+
+```
+window = recipients × (delay + ~1s) + 90s, clamped to [PRESEND_MIN, PRESEND_MAX]
+start  = slot − window        (never before 00:00 of the same day)
+end    = slot + SCHEDULE_LATE_GRACE_MINUTES
+```
+
+| Recipients (personal account, 5 s) | Window | Starts |
+| --- | --- | --- |
+| 5 | 5 min (floor) | 06:25 |
+| 50 | 6.5 min | 06:23 |
+| 100 | 11.5 min | 06:18 |
+| 200 | 20 min (ceiling) | 06:10 |
+
+The delay is computed per provider, so a slot mixing an official bot (1.2 s) and a
+personal account (5 s) gets the right total.
+
+## Two safety rules
+
+1. **Never before midnight.** A 00:05 slot with a 20-minute window would start at
+   23:45 the *previous* day, and "today's schedule" would resolve to the wrong
+   date. The window is clipped to 00:00 of the slot's own day.
+2. **Still send late.** The slot stays eligible for
+   `SCHEDULE_LATE_GRACE_MINUTES` (15) after its time, so a restart at 06:28 still
+   delivers instead of losing the whole day.
+
+## The ledger is mandatory
+
+The job runs every minute and a window lasts 5–20 minutes, so without a record of
+who already received the message each person would get it 5–20 times.
+`dailyScheduleLedger.js` stores one record per
+`botId | chatId | MSSV | HH:mm | today/tomorrow | date` in the
+`dailyScheduleDeliveries` Firestore document:
+
+- `claim` immediately before sending — two overlapping runs cannot both send;
+- `markDelivered` after success — never sent again that day;
+- `release` on failure — retried by the next minute inside the window;
+- a claim older than 3 minutes is considered dead (process crashed mid-send) and
+  can be taken again, so a restart cannot silently skip a recipient.
+
+Records older than 7 days are pruned on write.
+
+## Not affected
+
+- **Class-start reminders** ("còn 10 phút vào lớp") are not presend: moving them
+  earlier would make the "10 minutes" text wrong. They keep their own lead-time
+  logic.
+- **Schedule-change alerts** are event-driven, not tied to a slot.
+- `/test6h` bypasses the ledger so an operator can run it repeatedly.
+
+## Tuning
+
+`PRESEND_MIN_MINUTES` (5), `PRESEND_MAX_MINUTES` (20),
+`SCHEDULE_LATE_GRACE_MINUTES` (15), `BROADCAST_ZCA_INTERVAL_MS` (5000). Raising the
+interval widens the window automatically; no other change is needed.

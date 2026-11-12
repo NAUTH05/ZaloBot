@@ -30,10 +30,10 @@ const { createPacingController } = require("./announcementPacing");
 const { isZcaId } = require("./bots");
 const { DELIVERY_ERROR_KIND } = require("./deliveryErrors");
 
-// Mặc định thận trọng: bot chính thức 1,2 giây/tin; tài khoản cá nhân 3 giây/tin
-// (100 người ≈ 5 phút). Chỉnh được bằng biến môi trường mà không sửa mã.
+// Mặc định thận trọng: bot chính thức 1,2 giây/tin; tài khoản cá nhân 5 giây/tin
+// (50 người ≈ 4,2 phút). Chỉnh được bằng biến môi trường mà không sửa mã.
 const DEFAULT_OFFICIAL_INTERVAL_MS = 1200;
-const DEFAULT_ZCA_INTERVAL_MS = 3000;
+const DEFAULT_ZCA_INTERVAL_MS = 5000;
 
 function envInterval(env, name, fallback) {
     const value = Number(env?.[name]);
@@ -67,6 +67,13 @@ function createSendPacer(options = {}) {
 
     function controllerFor(botId) {
         return isZcaId(botId) ? controllers.zca : controllers.official;
+    }
+
+    // Nhịp ĐANG áp dụng cho một nhà cung cấp. Dùng để tính cửa sổ gửi trước: một
+    // đợt 50 người trên tài khoản cá nhân cần nhiều thời gian hơn hẳn 50 người
+    // trên bot chính thức.
+    function intervalFor(botId) {
+        return controllerFor(botId).settings.intervalMs;
     }
 
     function withLock(botId, task) {
@@ -121,7 +128,7 @@ function createSendPacer(options = {}) {
         controllerFor(botId).reset(botId);
     }
 
-    return { enabled, controllerFor, reset, run, stats };
+    return { enabled, controllerFor, intervalFor, reset, run, stats };
 }
 
 module.exports = {

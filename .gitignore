@@ -22,6 +22,9 @@ chatDirectory.json
 chatDirectory.json.tmp
 classStartNotifications.json
 classStartNotifications.json.tmp
+# Sổ chống trùng thông báo lịch học (chứa Chat ID / MSSV thật).
+dailyScheduleDeliveries.json
+dailyScheduleDeliveries.json.tmp
 thongtinfirebase.txt
 firebase-service-account.json
 *firebase-adminsdk*.json
