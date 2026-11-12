@@ -369,3 +369,69 @@ test("logs trả về nhật ký gửi tin và giới hạn đọc được", as
     assert.equal(response.body.deliveryStats.capacity > 0, true);
     assert.equal(response.body.limits.system, 250);
 });
+
+// ---------------------------------------------------------------------------
+// Chẩn đoán nhịp gửi theo tài khoản (ZCA).
+//
+// Endpoint này phải fail CLOSED: thiếu handler thì 503, không trả một bảng rỗng
+// khiến quản trị viên tưởng "không tài khoản nào bị tạm dừng".
+// ---------------------------------------------------------------------------
+test("outbound diagnostics: cần đăng nhập, fail closed khi thiếu handler, và chỉ nhận danh tính ZCA", async (t) => {
+    preserveRuntimeFiles();
+    const oldUsername = process.env.ADMIN_USERNAME;
+    const oldPassword = process.env.ADMIN_PASSWORD;
+    process.env.ADMIN_USERNAME = "outbound-admin";
+    process.env.ADMIN_PASSWORD = "outbound-password";
+
+    const actions = [];
+    const runtime = createAdminServer({
+        port: 0,
+        outboundStatus: () => ({
+            intervalMs: 10000,
+            minIntervalMs: 5000,
+            concurrency: 1,
+            accounts: { "zca:111": { state: "paused", paused: true, queueLength: 3, confirmed: 4 } }
+        }),
+        outboundAction: (action, accountId) => { actions.push({ action, accountId }); return { changed: true }; }
+    });
+    await new Promise((resolve) => runtime.server.listen(0, "127.0.0.1", resolve));
+    const port = runtime.server.address().port;
+    t.after(() => { runtime.server.close(); process.env.ADMIN_USERNAME = oldUsername; process.env.ADMIN_PASSWORD = oldPassword; });
+
+    const unauthenticated = await request(port, "GET", "/zalobot/api/admin/outbound");
+    assert.equal(unauthenticated.status, 401);
+
+    const login = await request(port, "POST", "/zalobot/api/admin/auth/login", { username: "outbound-admin", password: "outbound-password" });
+    assert.equal(login.status, 200);
+    const cookie = String(login.headers["set-cookie"][0]).split(";")[0];
+
+    const status = await request(port, "GET", "/zalobot/api/admin/outbound", null, cookie);
+    assert.equal(status.status, 200);
+    assert.equal(status.body.intervalMs, 10000);
+    assert.equal(status.body.accounts["zca:111"].paused, true);
+
+    // Thiếu accountId hoặc action lạ ⇒ 400, không đoán.
+    assert.equal((await request(port, "POST", "/zalobot/api/admin/outbound", { action: "resume" }, cookie)).status, 400);
+    assert.equal((await request(port, "POST", "/zalobot/api/admin/outbound", { accountId: "zca:111", action: "boom" }, cookie)).status, 400);
+
+    const resumed = await request(port, "POST", "/zalobot/api/admin/outbound", { accountId: "zca:111", action: "resume" }, cookie);
+    assert.equal(resumed.status, 200);
+    assert.deepEqual(actions, [{ action: "resume", accountId: "zca:111" }]);
+});
+
+test("outbound diagnostics trả 503 khi tiến trình không cấu hình handler", async (t) => {
+    preserveRuntimeFiles();
+    const oldUsername = process.env.ADMIN_USERNAME;
+    const oldPassword = process.env.ADMIN_PASSWORD;
+    process.env.ADMIN_USERNAME = "no-outbound";
+    process.env.ADMIN_PASSWORD = "no-outbound-password";
+
+    const runtime = createAdminServer({ port: 0 });
+    await new Promise((resolve) => runtime.server.listen(0, "127.0.0.1", resolve));
+    const port = runtime.server.address().port;
+    t.after(() => { runtime.server.close(); process.env.ADMIN_USERNAME = oldUsername; process.env.ADMIN_PASSWORD = oldPassword; });
+
+    const login = await request(port, "POST", "/zalobot/api/admin/auth/login", { username: "no-outbound", password: "no-outbound-password" });
+    const cookie = String(login.headers["set-cookie"][0]).split(";")[0];
+    assert.equal((await request(port, "GET", "/zalobot/api/admin/outbound", null, cookie)).status, 503);
+});

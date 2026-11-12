@@ -186,8 +186,28 @@ function normalizeRequestStatus(raw) {
 // người dùng thì không nhận được gì. Đó là nguồn gốc của báo cáo "bot nói đã gửi
 // nhưng rất nhiều người không nhận được".
 //
-// Không có msgId nghĩa là KHÔNG có tin nhắn. Không đoán thêm.
+// Không có msgId nghĩa là KHÔNG có tin nhắn. Không đoán thêm, và KHÔNG tự sinh mã.
 // ============================================================================
+
+// Mô tả HÌNH DẠNG phản hồi, không chép nội dung.
+//
+// Chỉ giữ tên khoá và kiểu dữ liệu: đủ để chẩn đoán "zca-js đổi cấu trúc trả về"
+// mà không ghi lại nội dung tin nhắn hay định danh người nhận vào log.
+function describeResponseShape(result) {
+    if (result == null) return { type: "null" };
+    if (typeof result !== "object") return { type: typeof result };
+    const shape = { type: "object", keys: Object.keys(result).slice(0, 12) };
+    if (result.message !== undefined) {
+        shape.message = result.message == null
+            ? "null"
+            : typeof result.message === "object"
+                ? { keys: Object.keys(result.message).slice(0, 12) }
+                : typeof result.message;
+    }
+    if (Array.isArray(result.attachment)) shape.attachmentCount = result.attachment.length;
+    return shape;
+}
+
 function assertMessageCreated(result) {
     const messageId = result?.message?.msgId;
     const attachmentIds = Array.isArray(result?.attachment)
@@ -198,10 +218,16 @@ function assertMessageCreated(result) {
     const error = new Error(
         "Zalo không tạo tin nhắn (phản hồi không có msgId) — thường do tài khoản bị giới hạn gửi vì gửi quá nhanh hoặc quá nhiều"
     );
-    // Nhãn do nhà cung cấp quyết định: đây KHÔNG phải đích hỏng (không được đánh dấu
-    // unreachable), mà là giới hạn tốc độ ⇒ tầng gửi phải CHẬM LẠI.
-    error.deliveryKind = "rate_limit";
+    // Nhãn do nhà cung cấp quyết định. `unconfirmed` (KHÔNG phải `rate_limit`):
+    //   - Không phải đích hỏng ⇒ tuyệt đối không đánh dấu unreachable.
+    //   - Cũng không phải bằng chứng chắc chắn về giới hạn tốc độ: chỉ là "chưa có
+    //     bằng chứng tin đã được tạo". Tầng điều phối (outboundLimiter.js) đếm số
+    //     lần thiếu msgId trên NHIỀU người nhận khác nhau rồi mới kết luận.
+    //   - Không gửi lại ngay: tin gốc có thể vẫn xuất hiện phía người nhận.
+    error.deliveryKind = "unconfirmed";
     error.providerResponse = result ?? null;
+    // Chỉ hình dạng phản hồi — không chép nội dung tin nhắn hay định danh.
+    error.providerResponseShape = describeResponseShape(result);
     throw error;
 }
 

@@ -272,3 +272,44 @@ test("không có text và không có media thì không gửi gì", async () => {
     assert.equal(calls.messages.length, 0);
     assert.equal(calls.photos.length, 0);
 });
+
+// ---------------------------------------------------------------------------
+// TIN DÀI GỬI ĐƯỢC MỘT PHẦN RỒI BỊ HOÃN
+//
+// Tin dài bị chia thành nhiều đoạn, mỗi đoạn là một request riêng. Nếu đoạn 2 bị
+// hoãn (tài khoản đang tạm dừng) mà ta trả "chưa gửi" thì lần chạy sau sẽ gửi lại
+// TOÀN BỘ — người nhận thấy các đoạn đầu bị lặp. Bài này chốt: đã gửi được phần
+// nào thì không gửi lại toàn bộ, nhưng cũng KHÔNG báo là thành công trọn vẹn.
+// ---------------------------------------------------------------------------
+test("tin dài hỏng giữa chừng thì không gửi lại toàn bộ và báo là CHƯA xác nhận", async () => {
+    const { runWithBot } = require("../botContext");
+    const { sendNotification } = require("../main");
+
+    let calls = 0;
+    const { bot } = makeFakeBot("zca:900900900", {
+        providerType: "zca",
+        async sendMessage(chatId, text) {
+            calls += 1;
+            if (calls === 1) return { message: { msgId: 111 } };
+            throw Object.assign(new Error("Hoãn gửi: rate_limited"), {
+                deliveryKind: "deferred",
+                deferred: true,
+                reason: "rate_limited"
+            });
+        }
+    });
+    registerBot(bot);
+
+    // > 750 ký tự ⇒ ít nhất 2 đoạn.
+    const longText = Array.from({ length: 40 }, (_, index) => `Dòng ${index} của thông báo dài.`).join("\n\n");
+    const result = await runWithBot(bot, () => sendNotification("chat-long", longText, {
+        feature: "schedule",
+        operation: "daily_schedule",
+        bypassEligibility: true
+    }));
+
+    assert.equal(result.sent, true, "đã gửi được một phần thì không phải 'chưa gửi gì'");
+    assert.equal(result.confirmed, false, "không được báo là thành công trọn vẹn");
+    assert.equal(result.partial, true);
+    assert.equal(calls, 2, "không được gửi lại toàn bộ tin — sẽ lặp các đoạn đã tới");
+});

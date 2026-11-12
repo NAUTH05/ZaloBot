@@ -9,6 +9,10 @@ const STATE_SCHEMA_VERSION = 1;
 const DEFAULT_GRACE_PERIOD_MS = 2 * 60 * 1000;
 const DEFAULT_CACHE_TTL_MS = 5 * 60 * 1000;
 const EVENT_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
+// Chỗ giữ có hạn. Không có hạn này thì một lần chết ĐÚNG lúc đang gửi sẽ để lại
+// một chỗ giữ vĩnh viễn: buổi học đó không bao giờ được nhắc lại cho tới khi hết
+// hạn lưu trữ (14 ngày). Mất một lời nhắc tệ hơn nhiều so với một tin trùng hiếm.
+const CLAIM_TTL_MS = 3 * 60 * 1000;
 
 function text(value) {
     return value == null ? "" : String(value).trim();
@@ -141,7 +145,16 @@ function claimDelivery({ subscriptionKey, subscription, lesson, leadMs = 0, now 
     if (!eventId) return null;
     const state = readState(filePath);
     pruneEvents(state, now);
-    if (state.events[eventId]) return null;
+    const existing = state.events[eventId];
+    if (existing) {
+        // Đã gửi xong ⇒ không bao giờ gửi lại trong ngày.
+        if (existing.deliveredAt) return null;
+        // Có chỗ giữ nhưng chưa xong: còn "tươi" nghĩa là lượt khác đang gửi.
+        // Đã quá hạn nghĩa là lượt giữ chỗ đã chết (tiến trình chết giữa lúc gửi)
+        // ⇒ nhận lại, thay vì để buổi học đó mất lời nhắc cả ngày.
+        const claimedAt = Date.parse(existing.claimedAt || "");
+        if (Number.isFinite(claimedAt) && now.getTime() - claimedAt < CLAIM_TTL_MS) return null;
+    }
     const start = getApiDateTimeInfo(lesson.ThoiGianBD);
     state.events[eventId] = {
         eventId,
@@ -160,10 +173,13 @@ function claimDelivery({ subscriptionKey, subscription, lesson, leadMs = 0, now 
     return eventId;
 }
 
-function markDelivered(eventId, now = new Date(), filePath = FILE_PATH) {
+// Đánh dấu đã gửi xong. `meta.confirmed` ghi lại việc nhà cung cấp có trả mã tin
+// nhắn hay không — "đã gửi" chưa chắc "Zalo đã tạo tin".
+function markDelivered(eventId, now = new Date(), filePath = FILE_PATH, meta = {}) {
     const state = readState(filePath);
     if (!state.events[eventId]) return false;
     state.events[eventId].deliveredAt = now.toISOString();
+    if (meta.confirmed !== undefined) state.events[eventId].confirmed = meta.confirmed === true;
     writeJsonStore(filePath, FILE_PATH, state);
     return true;
 }
@@ -218,11 +234,11 @@ function createClassStartReminderService(options) {
 
     async function run(evaluationAt = new Date()) {
         const grouped = groupSubscriptionsByStudent(getSubscriptions(), isEligible);
-        if (grouped.size === 0) return { processed: false, students: 0, sent: 0, lessons: 0, failed: 0, duplicates: 0 };
-        if (running) return { processed: false, students: grouped.size, sent: 0, lessons: 0, failed: 0, duplicates: 0 };
+        if (grouped.size === 0) return { processed: false, students: 0, sent: 0, lessons: 0, failed: 0, duplicates: 0, deferred: 0 };
+        if (running) return { processed: false, students: grouped.size, sent: 0, lessons: 0, failed: 0, duplicates: 0, deferred: 0 };
 
         running = true;
-        const result = { processed: true, students: grouped.size, sent: 0, lessons: 0, failed: 0, duplicates: 0 };
+        const result = { processed: true, students: grouped.size, sent: 0, lessons: 0, failed: 0, duplicates: 0, deferred: 0 };
         // Mỗi đăng ký có thể muốn nhắc trước một khoảng khác nhau, nên "đến giờ
         // nhắc" phải tính theo từng nhóm lead — không thể tính một lần cho cả MSSV.
         const leadMinutesOf = (subscription) => {
@@ -297,9 +313,20 @@ function createClassStartReminderService(options) {
                                 }
 
                                 if (delivery == null || delivery === true || delivery.sent === true) {
-                                    for (const item of claimed) markDelivered(item.eventId, new Date(), stateFilePath);
+                                    for (const item of claimed) {
+                                        markDelivered(item.eventId, new Date(), stateFilePath, {
+                                            confirmed: delivery == null || delivery === true ? undefined : delivery.confirmed === true
+                                        });
+                                    }
                                     result.sent += 1;
                                     result.lessons += claimed.length;
+                                } else if (delivery.deferred === true || delivery.rateLimited === true) {
+                                    // Nhà cung cấp đang bị giới hạn tốc độ: CHƯA gửi, nhưng đây
+                                    // KHÔNG phải lỗi của người nhận. Nhả chỗ để lần chạy sau thử
+                                    // lại, và đếm riêng — nếu gộp vào `failed` thì người vận hành
+                                    // sẽ đi tìm một người dùng "hỏng" không tồn tại.
+                                    for (const item of claimed) releaseDelivery(item.eventId, stateFilePath);
+                                    result.deferred += 1;
                                 } else {
                                     onError({ stage: "delivery", error: delivery.error || new Error("Reminder delivery failed") });
                                     for (const item of claimed) releaseDelivery(item.eventId, stateFilePath);
@@ -324,10 +351,12 @@ function createClassStartReminderService(options) {
 }
 
 module.exports = {
+    CLAIM_TTL_MS,
     DEFAULT_CACHE_TTL_MS,
     DEFAULT_GRACE_PERIOD_MS,
     FILE_PATH,
     STATE_SCHEMA_VERSION,
+    claimDelivery,
     createClassStartReminderService,
     createDeliveryEventId,
     createLessonEventKey,
@@ -335,5 +364,7 @@ module.exports = {
     formatClassStartNotification,
     groupDueLessonsByStart,
     isClassStartReminderLesson,
-    readState
+    markDelivered,
+    readState,
+    releaseDelivery
 };

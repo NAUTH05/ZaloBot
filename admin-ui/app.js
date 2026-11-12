@@ -1130,6 +1130,68 @@ function setupCommandConsole() {
 const TRACE_RESULT_LABEL = { sent: "Đã gửi", failed: "Lỗi gửi", skipped: "Bỏ qua", deferred: "Hoãn" };
 const TRACE_RESULT_TONE = { sent: "success", failed: "danger", skipped: "warning", deferred: "warning" };
 
+// Nhãn theo TRẠNG THÁI giao tin (deliveryErrors.DELIVERY_STATE). `result` chỉ nói
+// "yêu cầu đã xong"; `state` mới nói Zalo có thật sự tạo tin hay không. Nhờ vậy một
+// tin CHƯA XÁC NHẬN không bao giờ hiện như một lần gửi thành công bình thường.
+const TRACE_STATE_LABEL = {
+  sent_confirmed: "Đã xác nhận",
+  unconfirmed: "Chưa xác nhận",
+  rate_limited: "Bị giới hạn tốc độ",
+  deferred: "Hoãn",
+  recipient_error: "Người nhận không nhận được",
+  failed: "Lỗi gửi"
+};
+const TRACE_STATE_TONE = {
+  sent_confirmed: "success",
+  unconfirmed: "warning",
+  rate_limited: "warning",
+  deferred: "warning",
+  recipient_error: "danger",
+  failed: "danger"
+};
+
+function traceBadge(item) {
+  const state = item.state && TRACE_STATE_LABEL[item.state] ? item.state : null;
+  if (state) return badge(TRACE_STATE_LABEL[state], TRACE_STATE_TONE[state]);
+  return badge(TRACE_RESULT_LABEL[item.result] || item.result, TRACE_RESULT_TONE[item.result] || "neutral");
+}
+
+// Trạng thái nhịp gửi theo TỪNG tài khoản Zalo cá nhân.
+//
+// Chỉ đọc số liệu tổng hợp từ /api/admin/outbound — không Chat ID, không nội dung
+// tin nhắn. Đây là chỗ trả lời "vì sao người này chưa nhận được": tài khoản đang bị
+// tạm dừng, đang phục hồi, hay nhịp đang là bao nhiêu.
+const OUTBOUND_STATE_LABEL = {
+  normal: "Bình thường",
+  suspected: "Nghi bị siết",
+  paused: "Đang tạm dừng",
+  cooldown_completed: "Đang phục hồi"
+};
+const OUTBOUND_STATE_TONE = {
+  normal: "success",
+  suspected: "warning",
+  paused: "danger",
+  cooldown_completed: "warning"
+};
+
+async function renderOutboundAccounts() {
+  const list = $("#outboundAccountList");
+  if (!list) return;
+  let data;
+  try {
+    data = await api("/api/admin/outbound");
+  } catch (error) {
+    list.innerHTML = `<div class="empty-state">Không tải được trạng thái gửi tin: ${escapeHtml(error.message || "")}</div>`;
+    return;
+  }
+  const accounts = Object.entries(data?.accounts || {});
+  const header = `<div class="trace-meta"><span>Nhịp: ${Number(data?.intervalMs) || 0}ms/tin</span><span>Song song: ${Number(data?.concurrency) || 1}</span><span>Sàn: ${Number(data?.minIntervalMs) || 0}ms</span></div>`;
+  list.innerHTML = header + (accounts.map(([accountId, stat]) => `<article class="stack-item">
+      <div class="trace-head">${badge(OUTBOUND_STATE_LABEL[stat.state] || stat.state, OUTBOUND_STATE_TONE[stat.state] || "neutral")}<strong>${escapeHtml(accountId)}</strong>${stat.paused ? badge(`còn ${Math.round((Number(stat.resumeInMs) || 0) / 1000)}s`, "warning") : ""}</div>
+      <div class="trace-meta"><span>Hàng đợi: ${stat.queueLength ?? 0}</span><span>Đã xác nhận: ${stat.confirmed ?? 0}</span><span>Chưa xác nhận: ${stat.unconfirmed ?? 0}</span><span>Lỗi người nhận: ${stat.recipientErrors ?? 0}</span><span>Bị giới hạn: ${stat.rateLimited ?? 0}</span><span>Hoãn: ${stat.deferred ?? 0}</span>${stat.pauseReason ? `<span>Lý do: ${escapeHtml(stat.pauseReason)}</span>` : ""}</div>
+    </article>`).join("") || `<div class="empty-state">Chưa có tài khoản Zalo cá nhân nào đang chạy.</div>`);
+}
+
 function traceOperationLabel(item) {
   const feature = item.feature === "schedule" ? "Lịch học" : item.feature === "broadcast" ? "Thông báo" : (item.feature || "?");
   const operation = item.operation === "daily_schedule" ? "gửi lịch hằng ngày"
@@ -1160,8 +1222,8 @@ function renderLogs() {
     return logMatches(query, [item.botId, item.chatId, item.chatName, item.feature, item.operation, item.result, item.reason, item.error, item.providerMessageId]);
   });
   $("#deliveryTraceList").innerHTML = traces.map((item) => `<article class="stack-item">
-      <div class="trace-head">${badge(TRACE_RESULT_LABEL[item.result] || item.result, TRACE_RESULT_TONE[item.result] || "neutral")}${item.result === "sent" && item.confirmed === false ? badge("Chưa xác nhận", "warning") : ""}<strong>${escapeHtml(item.chatName || item.chatId || "?")}</strong><code>${escapeHtml(item.chatId || "")}</code>${item.botId ? badge(item.botId, "neutral") : ""}</div>
-      <div class="trace-meta"><span>${escapeHtml(traceOperationLabel(item))}</span><span>${escapeHtml(formatDateTimeVN(item.at))}</span>${item.chunks ? `<span>${item.chunks} phần</span>` : ""}${item.providerMessageId ? `<span>mã Zalo: <code>${escapeHtml(item.providerMessageId)}</code></span>` : `<span>Zalo không trả mã tin nhắn</span>`}${item.reason ? `<span>lý do: ${escapeHtml(item.reason)}</span>` : ""}</div>
+      <div class="trace-head">${traceBadge(item)}<strong>${escapeHtml(item.chatName || item.chatId || "?")}</strong><code>${escapeHtml(item.chatId || "")}</code>${item.botId ? badge(item.botId, "neutral") : ""}</div>
+      <div class="trace-meta"><span>${escapeHtml(traceOperationLabel(item))}</span><span>${escapeHtml(formatDateTimeVN(item.at))}</span>${item.chunks ? `<span>${item.chunks} phần</span>` : ""}${item.providerMessageId ? `<span>mã Zalo: <code>${escapeHtml(item.providerMessageId)}</code></span>` : `<span>Zalo không trả mã tin nhắn</span>`}${item.intervalMs ? `<span>nhịp ${item.intervalMs}ms</span>` : ""}${item.requestDurationMs != null ? `<span>request ${item.requestDurationMs}ms</span>` : ""}${item.reason ? `<span>lý do: ${escapeHtml(item.reason)}</span>` : ""}</div>
       ${item.error ? `<p class="trace-error">${escapeHtml(item.error)}</p>` : ""}
     </article>`).join("") || `<div class="empty-state">Chưa có lần gửi nào được ghi. Nhật ký này chỉ tồn tại trong bộ nhớ của tiến trình đang chạy.</div>`;
 
@@ -1352,6 +1414,8 @@ async function loadData() {
     targetUsers = mergeTargetUsers(remoteTargetUsers === null ? targetUsersFromWorkspace(workspace) : remoteTargetUsers);
     renderAll();
     await loadFeedback();
+    // Nhịp gửi theo tài khoản ZCA: không chặn phần còn lại của dashboard nếu lỗi.
+    void renderOutboundAccounts();
     applyTargetUserState();
     setDataState("success", "Updated just now");
     window.setTimeout(() => setDataState("success", ""), 1800);
@@ -1559,11 +1623,13 @@ async function reloadLogs() {
   if (!outcome.ok) return;
   logs = outcome.result;
   rerenderLogs();
+  void renderOutboundAccounts();
 }
 $("#logSearch")?.addEventListener("input", rerenderLogs);
 $("#logLevel")?.addEventListener("change", rerenderLogs);
 $("#logResult")?.addEventListener("change", rerenderLogs);
 $("#logRefresh")?.addEventListener("click", reloadLogs);
+$("#outboundRefresh")?.addEventListener("click", () => renderOutboundAccounts());
 $("#directorySearch").addEventListener("input", () => rerender(renderDirectory, "directory")); $("#directoryType").addEventListener("change", () => rerender(renderDirectory, "directory")); $("#addChatButton").addEventListener("click", openCreateChat);
 $("#addUserButton").addEventListener("click", openCreateUser);
 $("#adminForm").addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); try { await api("/api/admin/settings/admins", { method: "POST", body: JSON.stringify(Object.fromEntries(form.entries())) }); event.currentTarget.reset(); $("#adminFormMessage").textContent = "Đã lưu."; await loadData(); } catch (error) { $("#adminFormMessage").textContent = error.message; } });

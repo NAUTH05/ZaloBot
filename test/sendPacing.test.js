@@ -64,7 +64,10 @@ test("tài khoản Zalo cá nhân có nhịp chậm hơn bot chính thức", () 
 test("nhịp đọc từ biến môi trường và luôn bị kẹp về khoảng an toàn", () => {
     const pacer = createSendPacer({ env: { BROADCAST_INTERVAL_MS: "500", BROADCAST_ZCA_INTERVAL_MS: "4000" } });
     assert.equal(pacer.controllerFor("bot1").settings.intervalMs, 500);
-    assert.equal(pacer.controllerFor("zca:1").settings.intervalMs, 4000);
+    // ZCA có SÀN CỨNG 5 giây: cấu hình 4 giây bị kẹp lên 5 giây. Nhịp ZCA dùng
+    // CHUNG nguồn số với outboundLimiter.js (zcaOutboundConfig.js), nên hai nơi
+    // không thể lệch nhau.
+    assert.equal(pacer.controllerFor("zca:1").settings.intervalMs, 5000);
 
     // Giá trị rác ⇒ về mặc định, không thành 0 (bắn không giới hạn).
     assert.equal(envInterval({ BROADCAST_INTERVAL_MS: "abc" }, "BROADCAST_INTERVAL_MS", 1200), 1200);

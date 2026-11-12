@@ -366,13 +366,43 @@ function verifyCheckpointContent(checkpoint, contentHash) {
 
 // Ghi checkpoint NGUYÊN TỬ: ghi ra file tạm rồi đổi tên. Một lần ghi đứt giữa
 // chừng không được làm mất tiến độ đã có (dẫn tới gửi trùng ở lần chạy sau).
+//
+// `rename` trên Windows có thể trả EPERM/EBUSY khi tệp đích đang bị một tiến trình
+// khác (trình quét virus, indexer, hoặc một tiến trình kiểm thử song song) mở tay.
+// Đó là lỗi TẠM THỜI: thử lại vài lần rồi mới bỏ cuộc, và lần cuối dùng copy thay
+// cho rename. Không được để một lần EPERM thoáng qua làm mất toàn bộ tiến độ của
+// một chiến dịch đã gửi hàng trăm người.
+function replaceFileAtomically(tmp, file) {
+    let lastError = null;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+        try {
+            fs.renameSync(tmp, file);
+            return;
+        } catch (error) {
+            lastError = error;
+            if (error.code !== "EPERM" && error.code !== "EBUSY" && error.code !== "EACCES") throw error;
+            // Chờ rất ngắn (1, 2, 4, 8ms): đủ để tiến trình khác nhả tay.
+            const until = Date.now() + 2 ** attempt;
+            while (Date.now() < until) { /* chờ ngắn có chủ đích */ }
+        }
+    }
+    // Vẫn không đổi tên được: chép nội dung rồi xoá tệp tạm. Không nguyên tử tuyệt
+    // đối, nhưng giữ được tiến độ — điều quan trọng hơn ở đây.
+    try {
+        fs.copyFileSync(tmp, file);
+        fs.unlinkSync(tmp);
+    } catch (_) {
+        throw lastError;
+    }
+}
+
 function writeCheckpoint(campaignId, checkpoint) {
     fs.mkdirSync(CHECKPOINT_DIR, { recursive: true });
     const file = checkpointPath(campaignId);
     const tmp = `${file}.tmp`;
     const payload = { ...checkpoint, campaignId, updatedAt: new Date().toISOString() };
     fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), "utf8");
-    fs.renameSync(tmp, file);
+    replaceFileAtomically(tmp, file);
     return file;
 }
 
@@ -399,13 +429,24 @@ function readSourceFile(sourcePath) {
 //   deferred   — chưa gửi được vì lý do hạ tầng (nhà cung cấp tắt/chưa sẵn sàng).
 //   rate_limit — 429. KHÔNG phải thất bại của người nhận; sẽ thử lại ở lần resume.
 //   failed     — lỗi vĩnh viễn (410/422: bỏ qua mãi mãi) hoặc lỗi tạm thời khác.
-async function sendOne(getProvider, recipient, message) {
+async function sendOne(getProvider, recipient, message, sendViaLimiter = null) {
     const provider = getProvider(recipient.botId);
     if (!provider) {
         return { status: "deferred", reason: "provider_unavailable" };
     }
     try {
-        const result = await provider.sendMessage(recipient.chatId, message, { parse_mode: "markdown" });
+        // Đường gửi DUY NHẤT khi chạy bên trong tiến trình chính: đi qua bộ điều phối
+        // gửi dùng chung (outboundLimiter.js). Nhờ vậy đợt thông báo một-lần không thể
+        // vượt nhịp của tài khoản ZCA — trước đây nó gọi thẳng `provider.sendMessage`
+        // và là đường DUY NHẤT còn lọt qua mọi cơ chế giới hạn.
+        //
+        // Nhánh `else` chỉ dùng được khi nơi gọi tự truyền `getProvider` với một nhà
+        // cung cấp thật (kiểm thử, hoặc công cụ nội bộ). Tiến trình shell riêng KHÔNG
+        // đi được vào đây vì `main()` từ chối khi không có registry nhà cung cấp đang
+        // chạy — nên không có đường nào gửi thật mà bỏ qua bộ điều phối.
+        const result = typeof sendViaLimiter === "function"
+            ? await sendViaLimiter(recipient.botId, recipient.chatId, message)
+            : await provider.sendMessage(recipient.chatId, message, { parse_mode: "markdown" });
         // Provider có thể trả về {message_id} hoặc không trả gì; cả hai đều là thành công.
         void result;
         return { status: "sent" };
@@ -419,6 +460,10 @@ async function sendOne(getProvider, recipient, message) {
             // 429 là chuyện của NHÀ CUNG CẤP, không phải của người nhận. Nơi gọi phải
             // chậm lại (hoặc tạm dừng) rồi mới thử lại — không bao giờ bắn tiếp.
             return { status: "rate_limit", reason: classification.reason || "rate_limit", error };
+        }
+        if (classification.kind === DELIVERY_ERROR_KIND.DEFERRED) {
+            // Tài khoản đang tạm dừng hoặc đang phục hồi: CHƯA gửi, không phải đích hỏng.
+            return { status: "deferred", reason: error?.reason || "provider_paused" };
         }
         // Tạm thời / không chắc chắn: giữ lại để lần --resume thử lại. KHÔNG thử lại
         // ngay trong cùng một lượt.
@@ -622,8 +667,13 @@ async function main(argv = process.argv.slice(2), options = {}) {
     // `options.pacing` cho phép ghi đè ngưỡng tạm dừng/khoảng chờ (kiểm thử và vận
     // hành đặc biệt cần giá trị chặt hơn mặc định). Luôn đi qua `resolvePacingOptions`
     // để không có đường nào đặt được nhịp nhanh hơn sàn an toàn.
+    //
+    // Khi bộ điều phối dùng chung được tiêm vào (`sendViaLimiter`), nó là nơi DUY NHẤT
+    // quyết định khoảng cách giữa hai lần gửi. Nhịp ở đây chỉ giữ mức sàn 100ms để
+    // không giãn cách hai lần trên cùng một request.
+    const sendViaLimiter = typeof options.sendViaLimiter === "function" ? options.sendViaLimiter : null;
     const pacingOptions = resolvePacingOptions({
-        intervalMs: args.intervalMs ?? options.intervalMs
+        intervalMs: sendViaLimiter ? 1 : (args.intervalMs ?? options.intervalMs)
     }, options.env || process.env);
     const pacing = createPacingController({
         settings: { ...pacingOptions, ...(options.pacing || {}) },
@@ -712,7 +762,7 @@ async function main(argv = process.argv.slice(2), options = {}) {
                 break;
             }
 
-            const outcome = await sendOne(getProvider, recipient, message);
+            const outcome = await sendOne(getProvider, recipient, message, sendViaLimiter);
             const at = new Date().toISOString();
 
             if (outcome.status === "sent") {

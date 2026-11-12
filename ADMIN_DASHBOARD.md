@@ -41,6 +41,8 @@ All endpoints below require the HttpOnly `zalobot_admin` session cookie except l
 | `GET /zalobot/api/admin/notifications` | Active schedule registrations |
 | `GET /zalobot/api/admin/audit` | Recent administrative and authentication events |
 | `GET /zalobot/api/admin/logs` | Bot warnings/errors, delivery errors, per-delivery trace (`deliveries`), and audit events. `?limit=` up to 1000 |
+| `GET /zalobot/api/admin/outbound` | Per-ZCA-account outbound limiter: interval, concurrency, circuit-breaker state, queue length, confirmed/unconfirmed/recipient-error/rate-limited/deferred counters. Aggregate only — no chat IDs, no message content |
+| `POST /zalobot/api/admin/outbound` | `{ accountId: "zca:<uid>", action: "resume" \| "reset" }`. Clears a pause or the controlled-recovery phase. Never raises the sending speed |
 | `POST /zalobot/api/admin/chats` | Add or update a chat-directory record |
 | `DELETE /zalobot/api/admin/chats/:chatId` | Soft-remove by default; `?hard=1` permanently deletes the record |
 | `GET /zalobot/api/admin/settings` | List configured admin user/chat identities |

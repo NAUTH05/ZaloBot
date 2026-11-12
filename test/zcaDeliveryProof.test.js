@@ -42,7 +42,7 @@ test("Zalo không tạo tin (message null) ⇒ NÉM LỖI, không báo thành c�
     );
 });
 
-test("lỗi đó mang nhãn rate_limit để tầng gửi biết phải CHẬM LẠI", async (t) => {
+test("lỗi đó mang nhãn `unconfirmed` — KHÔNG phải đích hỏng, cũng không phải 429", async (t) => {
     const provider = buildProvider(t, async () => ({ message: null, attachment: [] }));
 
     let captured = null;
@@ -53,12 +53,33 @@ test("lỗi đó mang nhãn rate_limit để tầng gửi biết phải CHẬM L
     }
 
     assert.ok(captured, "phải ném lỗi");
-    assert.equal(captured.deliveryKind, "rate_limit");
+    // `unconfirmed`: Zalo nhận yêu cầu nhưng không có bằng chứng đã tạo tin. KHÔNG
+    // được gộp với `rate_limit` — hai chuyện khác nhau và hệ quả khác nhau.
+    assert.equal(captured.deliveryKind, "unconfirmed");
     const classification = classifyDeliveryError(captured);
-    assert.equal(classification.kind, "rate_limit", "không được coi là đích hỏng (permanent)");
-    assert.equal(classification.retryable, true);
-    // Không được đánh dấu đích là unreachable: người dùng vẫn nhận được tin sau.
+    assert.equal(classification.kind, "unconfirmed");
+    assert.equal(classification.state, "unconfirmed");
+    // Không phải đích hỏng: không được đánh dấu unreachable.
     assert.equal(classification.kind === "permanent", false);
+    // Không thử lại ngay: tin gốc có thể vẫn xuất hiện phía người nhận.
+    assert.equal(classification.retryable, false);
+});
+
+test("phản hồi thiếu msgId ghi lại HÌNH DẠNG để chẩn đoán, không chép nội dung", async (t) => {
+    const provider = buildProvider(t, async () => ({ message: null, attachment: [], extra: "nội dung riêng tư" }));
+
+    let captured = null;
+    try {
+        await provider.sendMessage("chat-1", "Nội dung tin nhắn của người dùng");
+    } catch (error) {
+        captured = error;
+    }
+
+    assert.ok(captured?.providerResponseShape, "phải có hình dạng phản hồi để chẩn đoán");
+    assert.equal(captured.providerResponseShape.message, "null");
+    assert.equal(captured.providerResponseShape.attachmentCount, 0);
+    // Không được chép nội dung tin nhắn vào đối tượng lỗi.
+    assert.equal(JSON.stringify(captured.providerResponseShape).includes("riêng tư"), false);
 });
 
 test("có msgId ⇒ trả về bình thường", async (t) => {

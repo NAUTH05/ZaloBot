@@ -986,6 +986,44 @@ async function handleApi(request, response, url, options = {}) {
 
     if (url.pathname === `${API_PREFIX}/workspace` && request.method === "GET") return json(response, 200, buildAdminData());
     if (url.pathname === `${API_PREFIX}/dashboard` && request.method === "GET") return json(response, 200, dashboardSummary());
+
+    // ---------------------------------------------------------------------
+    // CHẨN ĐOÁN GỬI TIN THEO TÀI KHOẢN (ZCA).
+    //
+    //   GET  .../outbound   — nhịp, cầu dao, số liệu theo từng tài khoản
+    //   POST .../outbound   — { action: "resume" | "reset", accountId }
+    //
+    // Đây là chỗ trả lời câu "vì sao người này không nhận được thông báo": tài
+    // khoản đang tạm dừng, đang phục hồi, hay nhịp đang là bao nhiêu.
+    //
+    // Chỉ trả số liệu tổng hợp — KHÔNG trả Chat ID, nội dung tin nhắn hay thông tin
+    // xác thực. Toàn bộ nằm sau `requireAdmin` ở trên.
+    // ---------------------------------------------------------------------
+    if (url.pathname === `${API_PREFIX}/outbound`) {
+        if (request.method === "GET") {
+            const status = typeof options.outboundStatus === "function" ? options.outboundStatus() : null;
+            // Thiếu handler ⇒ 503 (fail closed), không trả một bảng rỗng gây hiểu nhầm
+            // là "không có tài khoản nào đang tạm dừng".
+            if (!status) return json(response, 503, { error: "Outbound diagnostics not available" });
+            return json(response, 200, status);
+        }
+        if (request.method === "POST") {
+            let body;
+            try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
+            const accountId = String(body?.accountId || "").trim();
+            if (!accountId) return json(response, 400, { error: "accountId is required" });
+            if (typeof options.outboundAction !== "function") return json(response, 503, { error: "Outbound control not available" });
+            const action = String(body?.action || "").trim();
+            if (action !== "resume" && action !== "reset") return json(response, 400, { error: "action must be resume or reset" });
+            try {
+                const result = options.outboundAction(action, accountId);
+                audit(`outbound.${action}`, request, { result: "success", accountId });
+                return json(response, 200, { ok: true, action, accountId, changed: result?.changed !== false });
+            } catch (error) {
+                return json(response, 400, { error: error.message });
+            }
+        }
+    }
     // Danh sách bot đang chạy. describeRegisteredBots chỉ trả vân tay token,
     // không bao giờ trả chính token.
     if (url.pathname === `${API_PREFIX}/bots` && request.method === "GET") {

@@ -26,6 +26,11 @@ function text(value, max = 300) {
 }
 
 // `result`: "sent" | "failed" | "skipped" | "deferred"
+//
+// `state` là trạng thái giao tin tường minh (deliveryErrors.DELIVERY_STATE). Nó KHÁC
+// `result`: `result: "sent"` chỉ nói "yêu cầu đã xong", còn `state` nói rõ Zalo có
+// trả mã tin nhắn hay không. Nhờ vậy giao diện không bao giờ tô xanh một tin chưa
+// được xác nhận.
 function recordDeliveryTrace(input = {}) {
     const record = {
         at: new Date().toISOString(),
@@ -35,11 +40,20 @@ function recordDeliveryTrace(input = {}) {
         feature: text(input.feature, 40),
         operation: text(input.operation, 60),
         result: text(input.result, 20) || "unknown",
+        state: text(input.state, 24) || null,
         reason: text(input.reason, 80),
         chunks: Number(input.chunks) || 0,
         providerMessageId: text(input.providerMessageIds?.[0] ?? input.providerMessageId, 128),
         error: text(input.error, 400),
-        errorKind: text(input.errorKind, 30)
+        errorKind: text(input.errorKind, 30),
+        // Chẩn đoán nhịp: ưu tiên hàng đợi, thời gian chờ trong hàng đợi, thời gian
+        // request thật, nhịp đang áp dụng, số lần thử, lý do hoãn.
+        queuePriority: Number.isFinite(Number(input.queuePriority)) ? Number(input.queuePriority) : null,
+        queueWaitMs: Number.isFinite(Number(input.queueWaitMs)) ? Number(input.queueWaitMs) : null,
+        requestDurationMs: Number.isFinite(Number(input.requestDurationMs)) ? Number(input.requestDurationMs) : null,
+        intervalMs: Number.isFinite(Number(input.intervalMs)) ? Number(input.intervalMs) : null,
+        retryCount: Number.isFinite(Number(input.retryCount)) ? Number(input.retryCount) : 0,
+        deferReason: text(input.deferReason, 60)
     };
     // Chỉ ghi khi có ý nghĩa: Zalo có trả mã tin nhắn hay không. `false` là bằng
     // chứng NGƯỢC LẠI với "đã gửi" — Zalo nhận yêu cầu mà không tạo tin.
@@ -72,13 +86,21 @@ function clearDeliveryTraces() {
 
 function getDeliveryTraceStats() {
     const byResult = {};
-    for (const entry of entries) byResult[entry.result] = (byResult[entry.result] || 0) + 1;
+    // Đếm theo TRẠNG THÁI giao tin, không chỉ theo kết quả gọi: "sent" gộp cả tin
+    // chưa xác nhận, nên con số theo trạng thái mới là con số đáng tin.
+    const byState = {};
+    for (const entry of entries) {
+        byResult[entry.result] = (byResult[entry.result] || 0) + 1;
+        const state = entry.state || "unknown";
+        byState[state] = (byState[state] || 0) + 1;
+    }
     return {
         total: entries.length,
         capacity: MAX_ENTRIES,
         oldestAt: entries.length ? entries[0].at : null,
         newestAt: entries.length ? entries[entries.length - 1].at : null,
-        byResult
+        byResult,
+        byState
     };
 }
 

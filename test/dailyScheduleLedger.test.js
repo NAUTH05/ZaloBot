@@ -137,3 +137,17 @@ test("reset xoá sạch sổ để gửi lại một mốc đã lỡ", () => {
     assert.equal(resetDeliveries(), 1);
     assert.equal(isDelivered(FIELDS), false);
 });
+
+test("đã gửi nhưng CHƯA xác nhận vẫn được ghi để không gửi trùng, kèm cờ confirmed", () => {
+    const claimId = claimDelivery(FIELDS, { now: AT });
+    assert.ok(claimId);
+
+    // Nhà cung cấp không trả mã tin nhắn. Gửi lại có thể tạo tin TRÙNG (tin gốc có
+    // thể vẫn xuất hiện), nên vẫn ghi nhận đã gửi — nhưng phải nói rõ là chưa xác nhận.
+    markDelivered(claimId, new Date(AT.getTime() + 5000), undefined, { confirmed: false });
+    assert.equal(isDelivered(FIELDS), true, "phải chặn gửi trùng");
+
+    const event = readState().events[claimId];
+    assert.equal(event.confirmed, false);
+    assert.ok(event.deliveredAt);
+});

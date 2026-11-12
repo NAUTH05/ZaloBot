@@ -4,10 +4,13 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const {
+    CLAIM_TTL_MS,
+    claimDelivery,
     createLessonEventKey,
     createClassStartReminderService,
     findDueClassStartLessons,
     formatClassStartNotification,
+    markDelivered,
     readState
 } = require("../classStartNotifications");
 
@@ -323,4 +326,73 @@ test("notification formatter omits missing optional fields", () => {
     assert.match(message, /Phát triển ứng dụng/);
     assert.match(message, /Thời gian/);
     assert.doesNotMatch(message, /Phòng:|Cơ sở:|Giảng viên:|Nhóm:|Hình thức:|Trực tuyến:/);
+});
+
+// ---------------------------------------------------------------------------
+// HOÃN VÌ NHÀ CUNG CẤP — KHÔNG PHẢI LỖI CỦA NGƯỜI NHẬN
+// ---------------------------------------------------------------------------
+
+test("a deferred delivery releases its claim and is retried on the next run", async (t) => {
+    let attempts = 0;
+    const stateFilePath = tempState(t);
+    const reminderService = service({
+        stateFilePath,
+        getSubscriptions: () => ({ "chat-01::user-01": subscription() }),
+        fetchSchedule: async (studentId) => ({ studentId, lessons: [lesson()] }),
+        sendReminder: async () => {
+            attempts += 1;
+            // Lần đầu: tài khoản ZCA đang tạm dừng ⇒ chưa gửi.
+            return attempts === 1 ? { deferred: true, reason: "rate_limited" } : { sent: true, confirmed: true };
+        }
+    });
+    const now = new Date("2026-09-01T05:50:00.000Z");
+
+    const first = await reminderService.run(now);
+    assert.equal(first.sent, 0);
+    assert.equal(first.deferred, 1, "hoãn phải được đếm riêng, không gộp vào `failed`");
+    assert.equal(first.failed, 0, "giới hạn tốc độ KHÔNG phải lỗi của người nhận");
+    // Chỗ giữ phải được nhả: nếu giữ lại, người này mất lời nhắc cả ngày.
+    assert.equal(Object.keys(readState(stateFilePath).events).length, 0);
+
+    const second = await reminderService.run(now);
+    assert.equal(second.sent, 1);
+    assert.equal(attempts, 2);
+});
+
+test("a claim left behind by a crashed process is reclaimed after the TTL", (t) => {
+    const stateFilePath = tempState(t);
+    const target = subscription();
+    const claimedAt = new Date("2026-09-01T05:50:00.000Z");
+    const fields = { subscriptionKey: "chat-01::user-01", subscription: target, lesson: lesson(), now: claimedAt, filePath: stateFilePath };
+
+    const firstId = claimDelivery(fields);
+    assert.ok(firstId, "lần giữ chỗ đầu tiên phải thành công");
+
+    // Vẫn trong hạn giữ chỗ ⇒ lượt khác đang gửi, không gửi trùng.
+    assert.equal(claimDelivery({ ...fields, now: new Date(claimedAt.getTime() + 1000) }), null);
+
+    // Quá hạn ⇒ tiến trình giữ chỗ đã chết. Phải nhận lại được, nếu không buổi học
+    // đó mất lời nhắc cho tới hết hạn lưu trữ (14 ngày).
+    const reclaimed = claimDelivery({
+        ...fields,
+        now: new Date(claimedAt.getTime() + CLAIM_TTL_MS + 1000)
+    });
+    assert.equal(reclaimed, firstId);
+});
+
+test("markDelivered records whether the provider confirmed the message", (t) => {
+    const stateFilePath = tempState(t);
+    const target = subscription();
+    const eventId = claimDelivery({
+        subscriptionKey: "chat-01::user-01",
+        subscription: target,
+        lesson: lesson(),
+        now: new Date("2026-09-01T05:50:00.000Z"),
+        filePath: stateFilePath
+    });
+
+    markDelivered(eventId, new Date("2026-09-01T05:50:05.000Z"), stateFilePath, { confirmed: false });
+    const event = readState(stateFilePath).events[eventId];
+    assert.ok(event.deliveredAt, "vẫn ghi nhận đã gửi để KHÔNG gửi trùng");
+    assert.equal(event.confirmed, false, "nhưng phải nói rõ là chưa có xác nhận của nhà cung cấp");
 });

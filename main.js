@@ -174,8 +174,9 @@ const {
     normalizeTicketId,
     setReplyDelivery
 } = require("./feedback");
-const { DELIVERY_ERROR_KIND, classifyDeliveryError } = require("./deliveryErrors");
+const { DELIVERY_ERROR_KIND, DELIVERY_STATE, classifyDeliveryError } = require("./deliveryErrors");
 const { PRIORITY, createProviderQueues } = require("./sendQueue");
+const { createOutboundLimiter, createDeferredError } = require("./outboundLimiter");
 const { getPersistenceQueueStats } = require("./firestorePersistence");
 const {
     bindBot,
@@ -650,6 +651,37 @@ const metrics = createRuntimeMetrics();
 // song song riêng, và việc tương tác được ưu tiên hơn việc hàng loạt.
 const providerQueues = createProviderQueues();
 
+// Bộ điều phối gửi tin THỐNG NHẤT.
+//
+// Đây là cửa vào duy nhất cho mọi lần gửi đi:
+//   • Tài khoản Zalo CÁ NHÂN (ZCA): một làn riêng cho từng danh tính `zca:<uid>`,
+//     song song = 1, có nhịp tối thiểu và cầu dao riêng. Nhờ vậy KHÔNG đường nào
+//     (trả lời người dùng, thông báo theo lịch, hàng loạt, ảnh, tệp, tin thử) có
+//     thể vượt nhịp của chính tài khoản đó.
+//   • Bot chính thức: chuyển tiếp xuống `providerQueues` — hành vi và trần song
+//     song giữ NGUYÊN như trước, không thừa hưởng nhịp ZCA.
+// Đồng hồ giả CHỈ dùng trong kiểm thử.
+//
+// Nhịp 10 giây/tin là đúng cho sản xuất nhưng sẽ khiến `npm test` chờ hàng phút.
+// Thay vì TẮT bộ điều phối (như cách cũ với sendPacer — tắt luôn cả hành vi cần
+// kiểm chứng), ở đây thời gian được nén: `sleep` nhích đồng hồ ngay thay vì chờ
+// thật. Nhờ vậy mọi bài kiểm tra vẫn đi qua đúng logic nhịp và cầu dao.
+const outboundTestClock = { now: 0 };
+
+const outboundLimiter = createOutboundLimiter({
+    officialQueues: providerQueues,
+    log: (level, message) => console.log(`[Nhịp gửi] ${message}`),
+    ...(isTestEnv
+        ? {
+            now: () => outboundTestClock.now,
+            sleep: async (ms) => { outboundTestClock.now += ms; },
+            // Không ghi tệp trạng thái khi chạy kiểm thử: nhiều tiến trình test chạy
+            // song song sẽ tranh nhau cùng một tệp.
+            stateFilePath: null
+        }
+        : {})
+});
+
 // Đánh dấu một chat là không gửi được tới (410/422) để các đợt thông báo sau không
 // tiếp tục bắn vào đó.
 //
@@ -763,6 +795,8 @@ metrics.setDiagnosticsProvider(() => ({
     providers: listBots().map((bot) => `${bot.botId}:${bot.status || "?"}`).join(", "),
     persistenceQueue: getPersistenceQueueStats(),
     outboundQueues: providerQueues.getStats(),
+    // Trạng thái nhịp/cầu dao theo TỪNG tài khoản ZCA (nhịp, tạm dừng, số liệu).
+    outboundAccounts: outboundLimiter.getStats(),
     schedulerJobs: Array.isArray(runtimeSchedulerJobs) ? runtimeSchedulerJobs.length : 0,
     interactions: getInteractionTargets().length,
     subscriptions: Object.keys(getAllSubscriptions()).length,
@@ -993,10 +1027,11 @@ async function sendPhoto(chatId, photoUrlOrBuffer, options = {}) {
         ? { filename: rest.filename, mimeType: rest.mimeType, caption: rest.caption }
         : {};
 
-    return providerQueues.enqueueFor(
+    return outboundLimiter.enqueue(
         provider.botId,
         () => provider.sendPhoto(chatId, payload, providerOptions),
-        options.priority || PRIORITY.INTERACTIVE
+        options.priority || PRIORITY.INTERACTIVE,
+        { recipientKey: String(chatId) }
     );
 }
 
@@ -1034,10 +1069,11 @@ async function sendFile(chatId, fileUrl, options = {}) {
         ? { filename: rest.filename, caption: rest.caption }
         : {};
 
-    return providerQueues.enqueueFor(
+    return outboundLimiter.enqueue(
         provider.botId,
         () => provider.sendFile(chatId, payload, providerOptions),
-        options.priority || PRIORITY.INTERACTIVE
+        options.priority || PRIORITY.INTERACTIVE,
+        { recipientKey: String(chatId) }
     );
 }
 
@@ -1050,6 +1086,26 @@ function toPlainText(text) {
         .replace(/\{(?:green|red|orange|blue)\}(.*?)\{\/(?:green|red|orange|blue)\}/g, "$1")
         .replace(/^#+\s+/gm, "")
         .replace(/\\([\\*_~`>])/g, "$1");
+}
+
+// Mã tin nhắn do nhà cung cấp trả về, chuẩn hoá về một chỗ.
+//
+// Hai nhà cung cấp trả hai hình dạng KHÁC NHAU:
+//   • Bot chính thức (node-zalo-bot): `{ message_id }` (hoặc `messageId`).
+//   • ZCA (zca-js): `{ message: { msgId }, attachment: [{ msgId }] }`.
+//
+// Trước đây chỉ đọc ba khoá phẳng, nên tin gửi THÀNH CÔNG qua ZCA luôn bị coi là
+// "chưa xác nhận" — đúng loại sai lệch khiến bảng tổng kết không đáng tin.
+function extractProviderMessageId(result) {
+    if (result == null) return null;
+    const direct = result.message_id ?? result.messageId ?? result.msgId;
+    if (direct != null) return String(direct);
+    const nested = result.message?.msgId;
+    if (nested != null) return String(nested);
+    const attachment = Array.isArray(result.attachment)
+        ? result.attachment.find((item) => item && item.msgId != null)
+        : null;
+    return attachment ? String(attachment.msgId) : null;
 }
 
 async function sendMessage(chatId, text, options = {}) {
@@ -1125,14 +1181,15 @@ async function sendMessage(chatId, text, options = {}) {
             replyCapture.messages.push(payload);
         }
         try {
-            const sentResult = await providerQueues.enqueueFor(
+            const sentResult = await outboundLimiter.enqueue(
                 provider.botId,
                 () => Promise.resolve(provider.sendMessage(chatId, payload, sendOptions)),
-                priority
+                priority,
+                { recipientKey: String(chatId) }
             );
             deliveryResult.sentChunks += 1;
-            const providerMessageId = sentResult?.message_id ?? sentResult?.messageId ?? sentResult?.msgId ?? null;
-            if (providerMessageId != null) deliveryResult.providerMessageIds.push(String(providerMessageId));
+            const providerMessageId = extractProviderMessageId(sentResult);
+            if (providerMessageId != null) deliveryResult.providerMessageIds.push(providerMessageId);
         } catch (error) {
             // Phân loại lỗi trước khi quyết định có thử lại dạng plain text hay không.
             //
@@ -1141,20 +1198,46 @@ async function sendMessage(chatId, text, options = {}) {
             // gì tới định dạng, nên gửi lại chỉ nhân đôi số request vô ích và làm
             // tình trạng quá tải nặng thêm.
             const classification = classifyDeliveryError(error);
+
+            // Đã gửi được MỘT PHẦN rồi mới hỏng. Tin dài bị chia thành nhiều đoạn,
+            // mỗi đoạn là một request riêng. Nếu lần chạy sau gửi lại TOÀN BỘ, người
+            // nhận sẽ thấy các đoạn đầu bị lặp. Đánh dấu để tầng trên quyết định
+            // đúng: không gửi trùng, nhưng cũng không báo "thành công trọn vẹn".
+            if (deliveryResult.sentChunks > 0) {
+                error.partialDelivery = {
+                    sentChunks: deliveryResult.sentChunks,
+                    chunks: chunks.length
+                };
+            }
+
+            // HOÃN (tài khoản đang tạm dừng / đang phục hồi) KHÔNG phải lỗi của chat.
+            //
+            // Không ghi vào bộ đếm thất bại của chat, không ghi lịch sử "gửi hỏng":
+            // một đợt bị Zalo siết tốc độ mà ghi ở đây sẽ đẩy hàng trăm người nhận
+            // sang trạng thái tạm dừng vĩnh viễn. Cổng tiếp nhận vẫn nhận được tín
+            // hiệu "chưa xác nhận" (để chat ở trạng thái chờ, còn thử lại được).
+            if (classification.kind === DELIVERY_ERROR_KIND.DEFERRED) {
+                error.deliveryClassification = classification;
+                error.deliveryResult = deliveryResult;
+                notifyAdmissionFailure(chatId, error);
+                throw error;
+            }
+
             const canRetryAsPlainText = classification.retryAsPlainText && Boolean(sendOptions.parse_mode);
 
             if (canRetryAsPlainText) {
                 console.warn(`Lỗi định dạng markdown (${error.message}), gửi lại dạng plain text một lần...`);
                 const fallbackOptions = { ...otherOptions };
                 delete fallbackOptions.parse_mode;
-                const retryResult = await providerQueues.enqueueFor(
+                const retryResult = await outboundLimiter.enqueue(
                     provider.botId,
                     () => Promise.resolve(provider.sendMessage(chatId, toPlainText(payload), fallbackOptions)),
-                    priority
+                    priority,
+                    { recipientKey: String(chatId) }
                 );
                 deliveryResult.sentChunks += 1;
-                const retryMessageId = retryResult?.message_id ?? retryResult?.messageId ?? retryResult?.msgId ?? null;
-                if (retryMessageId != null) deliveryResult.providerMessageIds.push(String(retryMessageId));
+                const retryMessageId = extractProviderMessageId(retryResult);
+                if (retryMessageId != null) deliveryResult.providerMessageIds.push(retryMessageId);
                 continue;
             }
 
@@ -2107,7 +2190,22 @@ async function sendRecoveredAnnouncement(input = {}) {
     if (intervalMs != null) argv.push("--interval-ms", String(intervalMs));
     const result = await runRecoveredAnnouncement(argv, {
         messageOverride: resolved.text,
-        messageSource: resolved.source
+        messageSource: resolved.source,
+        // Đợt thông báo một-lần KHÔNG được là đường vòng qua nhịp của tài khoản.
+        // Trước đây script gọi thẳng provider.sendMessage, nên đây là đường DUY NHẤT
+        // còn gửi được mà không qua bất kỳ cơ chế giới hạn nào.
+        sendViaLimiter: (botId, chatId, text) => {
+            const runtime = getBot(botId);
+            if (!runtime || typeof runtime.sendMessage !== "function") {
+                return Promise.reject(createDeferredError("provider_unavailable", 0));
+            }
+            return outboundLimiter.enqueue(
+                botId,
+                () => Promise.resolve(runtime.sendMessage(chatId, text, { parse_mode: "markdown" })),
+                PRIORITY.BULK,
+                { recipientKey: String(chatId) }
+            );
+        }
     });
     return { campaignId: campaign, messageSource: resolved.source, ...result };
 }
@@ -3209,7 +3307,6 @@ async function sendNotification(chatId, text, options = {}) {
         // không phải đợi hàng đợi.
         paced
     } = options;
-    const shouldPace = (paced === undefined ? (feature === "broadcast" || feature === "schedule") : paced === true) && !isTestEnv;
     // Dấu vết gửi tin: bot nào, chat nào, việc gì, kết quả ra sao. Chỉ ghi vào bộ
     // đệm trong bộ nhớ (xem deliveryTrace.js) — không thêm lượt ghi Firestore nào.
     const traceBase = {
@@ -3219,6 +3316,16 @@ async function sendNotification(chatId, text, options = {}) {
         feature,
         operation
     };
+
+    // Nhịp gửi CHỈ còn áp dụng cho bot chính thức.
+    //
+    // Tài khoản ZCA đã có bộ điều phối riêng theo từng tài khoản (outboundLimiter.js)
+    // áp dụng cho MỌI đường gửi, nên cho nó đi qua đây nữa là giãn cách hai lần trên
+    // cùng một request. Bot chính thức giữ nguyên hành vi cũ.
+    const pacingBotId = traceBase.botId;
+    const shouldPace = !isZcaId(pacingBotId) &&
+        (paced === undefined ? (feature === "broadcast" || feature === "schedule") : paced === true) &&
+        !isTestEnv;
     // Kiểm tra quyền và GHI NHẬN KẾT QUẢ GỬI đều phải chạy trong ngữ cảnh của bot
     // sở hữu chat: sổ chat có phạm vi theo bot, nên ghi nhận bằng ngữ cảnh bot 1 sẽ
     // đánh dấu nhầm lên bản ghi của bot 1 khi chat thuộc bot 2.
@@ -3237,17 +3344,53 @@ async function sendNotification(chatId, text, options = {}) {
             recordDeliveryTrace({
                 ...traceBase,
                 result: "sent",
+                // Trạng thái tường minh: "đã gửi" KHÔNG đồng nghĩa "có xác nhận".
+                state: confirmed ? DELIVERY_STATE.SENT_CONFIRMED : DELIVERY_STATE.UNCONFIRMED,
                 confirmed,
                 chunks: sendResult?.chunks || 0,
-                providerMessageIds: sendResult?.providerMessageIds || []
+                providerMessageIds: sendResult?.providerMessageIds || [],
+                queuePriority: priority === undefined ? null : priority,
+                intervalMs: isZcaId(pacingBotId) ? outboundLimiter.settings.intervalMs : null
             });
             return { sent: true, confirmed };
         } catch (error) {
             // Lỗi vĩnh viễn (410/422) đã được ghi nhận ngay tại sendMessage, nơi biết
             // rõ phân loại. Ghi thêm ở đây sẽ đếm hai lần cùng một lần gửi.
             const errorKind = error?.deliveryClassification?.kind || null;
+
+            // HOÃN: chưa gửi vì tài khoản đang tạm dừng/phục hồi. Không phải lỗi của
+            // người nhận, nên không ghi vào bộ đếm thất bại của chat.
+            if (errorKind === DELIVERY_ERROR_KIND.DEFERRED || error?.deferred === true) {
+                // Tin dài đã gửi được một phần rồi mới bị hoãn: gửi lại toàn bộ ở lần
+                // sau sẽ LẶP các đoạn đã tới. Ghi nhận là đã gửi (chưa xác nhận) để
+                // không sinh tin trùng, và nói rõ là thiếu phần.
+                if (error?.partialDelivery) {
+                    recordDeliveryTrace({
+                        ...traceBase,
+                        result: "sent",
+                        state: DELIVERY_STATE.UNCONFIRMED,
+                        confirmed: false,
+                        reason: "partial_then_deferred",
+                        chunks: error.partialDelivery.chunks,
+                        intervalMs: isZcaId(pacingBotId) ? outboundLimiter.settings.intervalMs : null
+                    });
+                    console.warn(`[Delivery] ${chatId}: đã gửi ${error.partialDelivery.sentChunks}/${error.partialDelivery.chunks} đoạn rồi bị hoãn — không gửi lại toàn bộ để tránh tin trùng.`);
+                    return { sent: true, confirmed: false, partial: true };
+                }
+                recordDeliveryTrace({
+                    ...traceBase,
+                    result: "deferred",
+                    state: DELIVERY_STATE.DEFERRED,
+                    reason: error?.reason || "provider_paused",
+                    error: error?.message,
+                    errorKind,
+                    intervalMs: isZcaId(pacingBotId) ? outboundLimiter.settings.intervalMs : null
+                });
+                return { deferred: true, reason: error?.reason || "provider_paused", retryAfterMs: error?.retryAfterMs || 0 };
+            }
+
             if (error?.deliveryRecorded === true) {
-                recordDeliveryTrace({ ...traceBase, result: "failed", error: error.message, errorKind, providerMessageIds: error?.deliveryResult?.providerMessageIds || [] });
+                recordDeliveryTrace({ ...traceBase, result: "failed", state: DELIVERY_STATE.FAILED, error: error.message, errorKind, providerMessageIds: error?.deliveryResult?.providerMessageIds || [] });
                 return { failed: true, error, suspended: false };
             }
 
@@ -3258,12 +3401,41 @@ async function sendNotification(chatId, text, options = {}) {
             // chat bị tạm dừng — người dùng mất thông báo vĩnh viễn chỉ vì ta gửi
             // quá nhanh. Chỉ ghi nhận khi lỗi thuộc về đích.
             if (errorKind === DELIVERY_ERROR_KIND.RATE_LIMIT) {
-                recordDeliveryTrace({ ...traceBase, result: "failed", error: error.message, errorKind, providerMessageIds: error?.deliveryResult?.providerMessageIds || [] });
+                // Cùng lý do như nhánh hoãn: đã gửi được một phần thì không gửi lại
+                // toàn bộ (sẽ lặp các đoạn đầu).
+                if (error?.partialDelivery) {
+                    recordDeliveryTrace({
+                        ...traceBase,
+                        result: "sent",
+                        state: DELIVERY_STATE.UNCONFIRMED,
+                        confirmed: false,
+                        reason: "partial_then_rate_limited",
+                        chunks: error.partialDelivery.chunks,
+                        error: error.message,
+                        errorKind
+                    });
+                    console.warn(`[Delivery] ${chatId}: đã gửi ${error.partialDelivery.sentChunks}/${error.partialDelivery.chunks} đoạn rồi bị giới hạn tốc độ — không gửi lại toàn bộ.`);
+                    return { sent: true, confirmed: false, partial: true };
+                }
+                recordDeliveryTrace({ ...traceBase, result: "failed", state: DELIVERY_STATE.RATE_LIMITED, error: error.message, errorKind, providerMessageIds: error?.deliveryResult?.providerMessageIds || [] });
                 return { failed: true, error, suspended: false, rateLimited: true };
             }
 
+            // Mã 123 và thiếu msgId: KHÔNG đẩy chat sang "tạm dừng vĩnh viễn".
+            // Một lần không nhận được không chứng minh được đích hỏng; đếm ở cấp tài
+            // khoản (outboundLimiter) mới là chỗ quyết định tạm dừng.
+            const isRecipientScoped = errorKind === DELIVERY_ERROR_KIND.RECIPIENT ||
+                errorKind === DELIVERY_ERROR_KIND.UNCONFIRMED;
+            if (isRecipientScoped) {
+                const state = errorKind === DELIVERY_ERROR_KIND.UNCONFIRMED
+                    ? DELIVERY_STATE.UNCONFIRMED
+                    : DELIVERY_STATE.RECIPIENT_ERROR;
+                recordDeliveryTrace({ ...traceBase, result: "failed", state, error: error.message, errorKind, providerMessageIds: error?.deliveryResult?.providerMessageIds || [] });
+                return { failed: true, error, suspended: false, recipientScoped: true };
+            }
+
             const record = recordDeliveryFailure(chatId, error, { feature, operation, maxConsecutiveFailures });
-            recordDeliveryTrace({ ...traceBase, result: "failed", error: error.message, errorKind, providerMessageIds: error?.deliveryResult?.providerMessageIds || [] });
+            recordDeliveryTrace({ ...traceBase, result: "failed", state: DELIVERY_STATE.FAILED, error: error.message, errorKind, providerMessageIds: error?.deliveryResult?.providerMessageIds || [] });
             return { failed: true, error, suspended: record?.status === "inactive" };
         }
     };
@@ -3521,10 +3693,10 @@ async function sendDailySchedulesAtTime(notificationTime = DEFAULT_NOTIFICATION_
     // biến thành 20 lần gọi API lịch cho mỗi MSSV.
     if (!ignoreLedger) dropAlreadyDelivered(subscriptionsGrouped, notificationTime, slotDateKey);
     if (subscriptionsGrouped.size === 0) {
-        return { processed: false, matchedStudents: 0, sent: 0, failed: 0, deferred: 0 };
+        return { processed: false, matchedStudents: 0, sent: 0, failed: 0, deferred: 0, unconfirmed: 0 };
     }
     if (runningDailyNotificationTimes.has(notificationTime)) {
-        return { processed: false, matchedStudents: subscriptionsGrouped.size, sent: 0, failed: 0, deferred: 0 };
+        return { processed: false, matchedStudents: subscriptionsGrouped.size, sent: 0, failed: 0, deferred: 0, unconfirmed: 0 };
     }
 
     runningDailyNotificationTimes.add(notificationTime);
@@ -3534,6 +3706,9 @@ async function sendDailySchedulesAtTime(notificationTime = DEFAULT_NOTIFICATION_
         matchedStudents: subscriptionsGrouped.size,
         sent: 0,
         failed: 0,
+        // "Đã gửi" nhưng KHÔNG có mã tin nhắn từ nhà cung cấp. Đếm riêng để bảng
+        // tổng kết không gộp nó vào nhóm chắc chắn thành công.
+        unconfirmed: 0,
         // Bị hoãn vì giới hạn tốc độ: chưa gửi, nhưng cũng không phải lỗi của đích.
         // Phải đếm riêng, nếu không nó biến mất khỏi mọi con số và người vận hành
         // không biết có người chưa nhận được lịch.
@@ -3601,8 +3776,10 @@ async function sendDailySchedulesAtTime(notificationTime = DEFAULT_NOTIFICATION_
                         }
                         const delivery = await sendToSubscription(subscription, dailyMessage, { feature: "schedule", operation: "daily_schedule" });
                         if (delivery.sent) {
-                            if (!ignoreLedger) markDailyDelivered(claimId);
+                            // Ghi cả `confirmed`: "đã gửi" chưa chắc "Zalo đã tạo tin".
+                            if (!ignoreLedger) markDailyDelivered(claimId, new Date(), undefined, { confirmed: delivery.confirmed === true });
                             dispatchResult.sent += 1;
+                            if (delivery.confirmed === false) dispatchResult.unconfirmed += 1;
                             console.log(`[${notificationTime}] Đã gửi lịch ${targetDateKey} cho MSSV ${studentId} tới chat ${subscription.chatId}`);
                         } else {
                             // Chưa gửi được ⇒ nhả chỗ để lần chạy sau (trong cửa sổ)
@@ -3661,7 +3838,7 @@ async function sendDailySchedulesAtSix() {
 async function sendScheduledDailySchedules(date = new Date()) {
     const dateInfo = getVietnamDateInfo(date);
     const presendOptions = resolvePresendOptions(process.env);
-    const aggregate = { processed: false, matchedStudents: 0, sent: 0, failed: 0, deferred: 0, slots: [] };
+    const aggregate = { processed: false, matchedStudents: 0, sent: 0, failed: 0, deferred: 0, unconfirmed: 0, slots: [] };
 
     for (const slotTime of collectDailySlotTimes()) {
         const plan = planSlot({
@@ -3680,6 +3857,7 @@ async function sendScheduledDailySchedules(date = new Date()) {
         aggregate.sent += result.sent || 0;
         aggregate.failed += result.failed || 0;
         aggregate.deferred += result.deferred || 0;
+        aggregate.unconfirmed += result.unconfirmed || 0;
     }
 
     return aggregate;
@@ -3766,7 +3944,7 @@ function registerShutdownHandlers() {
         log: (message) => console.log(message),
         stopScheduler: () => { cancelSchedulerJobs(); },
         // Dừng nhận việc gửi mới rồi chờ các tin đang gửi dở kết thúc.
-        stopOutboundQueues: () => providerQueues.stopAll(),
+        stopOutboundQueues: () => outboundLimiter.stopAll(),
         stopPolling: () => stopZaloPolling(),
         closeDashboard: () => closeDashboardServer(),
         flushPersistence: () => flushPersistenceWrites(),
@@ -3949,7 +4127,19 @@ async function startRuntime() {
         getHelpMediaDiagnostics: () => getHelpMediaDiagnostics(),
         // Cho nút "Kiểm tra" trên dashboard: tải thử URL công khai của một ảnh.
         probeMediaUrl: (targetUrl) => probeMediaUrl(targetUrl),
-        buildMediaPublicUrl: (mediaId) => buildMediaPublicUrl(mediaId)
+        buildMediaPublicUrl: (mediaId) => buildMediaPublicUrl(mediaId),
+
+        // Chẩn đoán nhịp/cầu dao gửi tin theo TỪNG tài khoản ZCA. Chỉ số liệu tổng
+        // hợp — không Chat ID, không nội dung tin, không thông tin xác thực.
+        outboundStatus: () => outboundLimiter.getStats(),
+        // Thoát tạm dừng/giai đoạn phục hồi theo yêu cầu của quản trị viên. KHÔNG bao
+        // giờ tự tăng tốc: nhịp vẫn là cấu hình hiện hành.
+        outboundAction: (action, accountId) => {
+            if (!isZcaId(accountId)) throw new Error("accountId phải là danh tính ZCA (zca:<uid>)");
+            return action === "reset"
+                ? { changed: Boolean(outboundLimiter.reset(accountId)) }
+                : { changed: Boolean(outboundLimiter.resume(accountId)) };
+        }
     });
     await new Promise((resolve, reject) => {
         adminRuntime.server.once("error", reject);
@@ -4909,6 +5099,7 @@ module.exports = {
     // Dùng cho kiểm thử: nhận diện câu trả lời là cảnh báo cú pháp.
     looksLikeSyntaxError,
     sendMessage,
+    sendNotification,
     sendPhoto,
     sendFile,
     sendChatMessageToChat,

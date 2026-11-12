@@ -19,13 +19,67 @@ const DELIVERY_ERROR_KIND = Object.freeze({
     RATE_LIMIT: "rate_limit",   // bị giới hạn tốc độ, cần chờ
     FORMAT: "format",           // payload/định dạng bị từ chối, thử plain text được
     TRANSIENT: "transient",     // lỗi tạm thời (mạng, 5xx), thử lại có giới hạn
+    // Người nhận không thể nhận tin từ TÀI KHOẢN NÀY (mã 123 của Zalo). Khác
+    // `permanent`: một lần không chứng minh được đích hỏng vĩnh viễn — có thể do
+    // chính sách của người nhận, và có thể hết sau khi tài khoản hết bị siết.
+    RECIPIENT: "recipient",
+    // Nhà cung cấp nhận yêu cầu nhưng KHÔNG trả mã tin nhắn ⇒ chưa có bằng chứng
+    // tin đã được tạo. Tuyệt đối không tính là đã gửi, cũng không gửi lại ngay
+    // (tin gốc có thể vẫn xuất hiện).
+    UNCONFIRMED: "unconfirmed",
+    // Chưa gửi vì nhà cung cấp đang tạm dừng / mất kết nối. Chạy lại sau được.
+    DEFERRED: "deferred",
     UNKNOWN: "unknown"
 });
+
+// Trạng thái giao tin — dùng cho bảng tổng kết và nhật ký gửi tin. Đây là thứ
+// người vận hành đọc để trả lời câu "vì sao người này không nhận được".
+//
+//   sent_confirmed — Zalo trả mã tin nhắn: có bằng chứng tin đã được tạo.
+//   unconfirmed    — yêu cầu xong nhưng KHÔNG có mã tin nhắn. Không phải thành công.
+//   rate_limited   — bị giới hạn tốc độ (429 hoặc tương đương).
+//   deferred       — hoãn vì nhà cung cấp đang tạm dừng; chạy lại sau.
+//   recipient_error— riêng người nhận này không nhận được (mã 123).
+//   failed         — hỏng thật, không thử lại (hoặc đã hết lượt thử).
+const DELIVERY_STATE = Object.freeze({
+    SENT_CONFIRMED: "sent_confirmed",
+    UNCONFIRMED: "unconfirmed",
+    RATE_LIMITED: "rate_limited",
+    DEFERRED: "deferred",
+    RECIPIENT_ERROR: "recipient_error",
+    FAILED: "failed"
+});
+
+// Ánh xạ loại lỗi → trạng thái giao tin. Một chỗ duy nhất, để nhật ký, bảng tổng
+// kết và dashboard không bao giờ nói khác nhau về cùng một lần gửi.
+const KIND_TO_STATE = Object.freeze({
+    [DELIVERY_ERROR_KIND.PERMANENT]: DELIVERY_STATE.FAILED,
+    [DELIVERY_ERROR_KIND.RATE_LIMIT]: DELIVERY_STATE.RATE_LIMITED,
+    [DELIVERY_ERROR_KIND.FORMAT]: DELIVERY_STATE.FAILED,
+    [DELIVERY_ERROR_KIND.TRANSIENT]: DELIVERY_STATE.FAILED,
+    [DELIVERY_ERROR_KIND.RECIPIENT]: DELIVERY_STATE.RECIPIENT_ERROR,
+    [DELIVERY_ERROR_KIND.UNCONFIRMED]: DELIVERY_STATE.UNCONFIRMED,
+    [DELIVERY_ERROR_KIND.DEFERRED]: DELIVERY_STATE.DEFERRED,
+    [DELIVERY_ERROR_KIND.UNKNOWN]: DELIVERY_STATE.FAILED
+});
+
+function deliveryStateForKind(kind) {
+    return KIND_TO_STATE[kind] || DELIVERY_STATE.FAILED;
+}
 
 // Mã lỗi vĩnh viễn. 410 và 422 là hai mã đã gặp thật trong log sản xuất.
 const PERMANENT_CODES = new Set([403, 410, 422]);
 // Mã lỗi tạm thời.
 const TRANSIENT_CODES = new Set([408, 500, 502, 503, 504]);
+
+// Mã 123 của Zalo: "Không thể nhận tin nhắn từ bạn."
+//
+// KHÔNG phải giới hạn tốc độ toàn tài khoản. Nó nói về QUAN HỆ giữa tài khoản gửi
+// và một người nhận cụ thể (người kia chặn, giới hạn quyền nhận tin từ người lạ,
+// hoặc Zalo tạm siết đúng cặp này). Vì vậy mặc định là lỗi CẤP NGƯỜI NHẬN; chỉ khi
+// nó lặp lại trên NHIỀU người nhận khác nhau trong một cửa sổ thời gian thì mới
+// được coi là dấu hiệu tài khoản bị siết — việc đếm đó nằm ở outboundLimiter.js.
+const ZALO_RECIPIENT_RESTRICTED_CODE = 123;
 
 function readErrorCode(error) {
     const candidates = [
@@ -71,15 +125,21 @@ function classifyDeliveryError(error) {
     // Nhãn do CHÍNH nhà cung cấp gắn, đáng tin hơn mọi suy đoán theo mã HTTP.
     //
     // Trường hợp thật: zca-js trả về `message: null` khi Zalo nhận yêu cầu nhưng
-    // không tạo tin (tài khoản bị giới hạn gửi). Không có mã lỗi nào để đọc, nên
-    // nếu đoán theo chữ sẽ ra "unknown" và tầng gửi không biết phải chậm lại.
+    // không tạo tin. Không có mã lỗi nào để đọc, nên nếu đoán theo chữ sẽ ra
+    // "unknown" và tầng gửi không biết phải làm gì.
     const declared = String(error?.deliveryKind || "");
     if (declared && Object.values(DELIVERY_ERROR_KIND).includes(declared)) {
+        const retryAfter = readRetryAfterSeconds(error);
         return {
             kind: declared,
             code,
-            retryable: declared !== DELIVERY_ERROR_KIND.PERMANENT,
+            state: deliveryStateForKind(declared),
+            retryable: declared === DELIVERY_ERROR_KIND.TRANSIENT || declared === DELIVERY_ERROR_KIND.DEFERRED,
             retryAsPlainText: false,
+            scope: declared === DELIVERY_ERROR_KIND.RECIPIENT ? "recipient" : "account",
+            // Nhà cung cấp có thể tự gắn nhãn VÀ vẫn trả `Retry-After`; giá trị của
+            // máy chủ luôn thắng mọi khoảng chờ ta tự đoán.
+            retryAfterMs: retryAfter != null ? retryAfter * 1000 : null,
             reason: error?.message || declared
         };
     }
@@ -88,17 +148,39 @@ function classifyDeliveryError(error) {
         return {
             kind: DELIVERY_ERROR_KIND.RATE_LIMIT,
             code,
+            state: DELIVERY_STATE.RATE_LIMITED,
             retryable: true,
             retryAsPlainText: false,
+            // Giới hạn tốc độ là chuyện của TÀI KHOẢN, không phải của đích.
+            scope: "account",
+            // Tôn trọng `Retry-After` của máy chủ khi có; nơi gọi dùng đúng giá trị
+            // này thay vì tự đoán một khoảng chờ.
+            retryAfterMs: readRetryAfterSeconds(error) != null ? readRetryAfterSeconds(error) * 1000 : null,
             reason: "Bị giới hạn tốc độ (429)"
+        };
+    }
+    if (code === ZALO_RECIPIENT_RESTRICTED_CODE) {
+        // Giữ NGUYÊN mã và thông điệp gốc để chẩn đoán; chỉ thêm cách hiểu.
+        return {
+            kind: DELIVERY_ERROR_KIND.RECIPIENT,
+            code,
+            state: DELIVERY_STATE.RECIPIENT_ERROR,
+            // Không thử lại NGAY: gửi lại liên tiếp vào đúng người này chỉ làm tình
+            // trạng nặng thêm. Lần chạy sau (hoặc khi người dùng chủ động nhắn) sẽ thử.
+            retryable: false,
+            retryAsPlainText: false,
+            scope: "recipient",
+            reason: `người nhận không thể nhận tin từ tài khoản này (${code})`
         };
     }
     if (PERMANENT_CODES.has(code)) {
         return {
             kind: DELIVERY_ERROR_KIND.PERMANENT,
             code,
+            state: DELIVERY_STATE.FAILED,
             retryable: false,
             retryAsPlainText: false,
+            scope: "recipient",
             reason: code === 410
                 ? "chat_id không hợp lệ (410)"
                 : code === 422
@@ -110,8 +192,10 @@ function classifyDeliveryError(error) {
         return {
             kind: DELIVERY_ERROR_KIND.TRANSIENT,
             code,
+            state: DELIVERY_STATE.FAILED,
             retryable: true,
             retryAsPlainText: false,
+            scope: "account",
             reason: `lỗi tạm thời (${code})`
         };
     }
@@ -119,8 +203,10 @@ function classifyDeliveryError(error) {
         return {
             kind: DELIVERY_ERROR_KIND.FORMAT,
             code,
+            state: DELIVERY_STATE.FAILED,
             retryable: false,
             retryAsPlainText: true,
+            scope: "recipient",
             reason: "định dạng bị từ chối"
         };
     }
@@ -129,8 +215,10 @@ function classifyDeliveryError(error) {
     return {
         kind: DELIVERY_ERROR_KIND.UNKNOWN,
         code,
+        state: DELIVERY_STATE.FAILED,
         retryable: false,
         retryAsPlainText: false,
+        scope: "recipient",
         reason: error?.message || "lỗi không xác định"
     };
 }
@@ -160,8 +248,11 @@ function readRetryAfterSeconds(error) {
 
 module.exports = {
     DELIVERY_ERROR_KIND,
+    DELIVERY_STATE,
+    ZALO_RECIPIENT_RESTRICTED_CODE,
     classifyDeliveryError,
     computeRetryDelayMs,
+    deliveryStateForKind,
     looksLikeFormatError,
     readErrorCode,
     readRetryAfterSeconds

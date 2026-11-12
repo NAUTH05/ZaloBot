@@ -29,11 +29,16 @@
 const { createPacingController } = require("./announcementPacing");
 const { isZcaId } = require("./bots");
 const { DELIVERY_ERROR_KIND } = require("./deliveryErrors");
+const { resolveZcaOutboundConfig } = require("./zcaOutboundConfig");
 
-// Mặc định thận trọng: bot chính thức 1,2 giây/tin; tài khoản cá nhân 5 giây/tin
-// (50 người ≈ 4,2 phút). Chỉnh được bằng biến môi trường mà không sửa mã.
+// Mặc định thận trọng: bot chính thức 1,2 giây/tin. Nhịp của tài khoản Zalo CÁ
+// NHÂN lấy từ zcaOutboundConfig.js — CÙNG một nguồn số với outboundLimiter.js.
+//
+// Trước đây nơi này giữ một con số ZCA riêng (5000ms) trong khi bộ điều phối mới
+// dùng 10000ms. Hai con số khác nhau làm cửa sổ "gửi trước" tính sai: hệ thống
+// tưởng một đợt 50 người chỉ mất 4 phút trong khi thực tế mất hơn 8 phút.
 const DEFAULT_OFFICIAL_INTERVAL_MS = 1200;
-const DEFAULT_ZCA_INTERVAL_MS = 5000;
+const DEFAULT_ZCA_INTERVAL_MS = resolveZcaOutboundConfig({}).intervalMs;
 
 function envInterval(env, name, fallback) {
     const value = Number(env?.[name]);
@@ -55,7 +60,9 @@ function createSendPacer(options = {}) {
             log
         }),
         zca: createPacingController({
-            settings: { intervalMs: envInterval(env, "BROADCAST_ZCA_INTERVAL_MS", DEFAULT_ZCA_INTERVAL_MS) },
+            // Cùng nguồn cấu hình với outboundLimiter.js: ZCA_OUTBOUND_INTERVAL_MS →
+            // BROADCAST_ZCA_INTERVAL_MS → 10000ms, luôn kẹp về sàn 5000ms.
+            settings: { intervalMs: resolveZcaOutboundConfig(env).intervalMs },
             now,
             sleep,
             log

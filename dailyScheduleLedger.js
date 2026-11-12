@@ -124,10 +124,18 @@ function claimDelivery(fields = {}, { now = new Date(), filePath = FILE_PATH } =
     return eventId;
 }
 
-function markDelivered(eventId, now = new Date(), filePath = FILE_PATH) {
+// Đánh dấu đã gửi xong. `meta.confirmed` ghi lại việc nhà cung cấp có trả mã tin
+// nhắn hay không.
+//
+// Vì sao vẫn đánh dấu "đã gửi" khi CHƯA xác nhận: gửi lại một tin có thể đã tới
+// (yêu cầu xong nhưng phản hồi mơ hồ) sẽ tạo tin TRÙNG cho người dùng. Yêu cầu là
+// "không gửi lại ngay", nên sổ ghi nhận đã gửi và `confirmed: false` nói rõ rằng
+// ta KHÔNG có bằng chứng — người vận hành đọc được sự khác biệt này.
+function markDelivered(eventId, now = new Date(), filePath = FILE_PATH, meta = {}) {
     const state = readState(filePath);
     if (!state.events[eventId]) return false;
     state.events[eventId].deliveredAt = now.toISOString();
+    if (meta.confirmed !== undefined) state.events[eventId].confirmed = meta.confirmed === true;
     writeJsonStore(filePath, FILE_PATH, state);
     return true;
 }
