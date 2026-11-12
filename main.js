@@ -147,6 +147,8 @@ const { getCommandRegistry } = require("./commandRegistry");
 const { createAdminServer, BASE_PATH } = require("./adminServer");
 const { DEFAULT_SHUTDOWN_TIMEOUT_MS, createShutdownController } = require("./shutdown");
 const { recordSystemLog } = require("./operationalLog");
+const { recordDeliveryTrace } = require("./deliveryTrace");
+const { installVietnamLogTimestamps } = require("./logTime");
 const { getAdminSettings, getConfiguredAdminIds, isConfiguredAdmin } = require("./adminSettings");
 const { LEGACY_BOT_ID, extractBotName, isZcaId, normalizeBotId, parseAliases, parseScopedKey, providerTypeOf, resolveBotConfigs, resolveBotDisplayName, scopeKey } = require("./bots");
 const { createFriendRequestService } = require("./friendRequestService");
@@ -180,6 +182,19 @@ const {
 } = require("./botContext");
 
 const isTestEnv = process.env.NODE_ENV === "test" || require.main !== module;
+
+// Dấu thời gian Việt Nam trên MỌI dòng log của tiến trình.
+//
+// `pm2 logs` in giờ theo múi giờ của daemon PM2, không theo TZ của ứng dụng. Trên
+// VPS để UTC, một lượt gửi 06:30 hiện thành 23:30 hôm trước và người vận hành
+// tưởng lịch chạy sai. Gắn tiền tố ngay trong tiến trình thì log đúng giờ bất kể
+// cấu hình máy.
+//
+// Đặt ở đây (ngay sau khi biết mình có phải tiến trình thật hay không) để cả những
+// dòng log của bước nạp cấu hình — ví dụ cảnh báo bot nào đang tắt — cũng có giờ.
+if (!isTestEnv && String(process.env.LOG_VN_TIMESTAMPS || "").trim() !== "0") {
+    installVietnamLogTimestamps();
+}
 
 // Cấu hình nhiều bot trên cùng một codebase và một Firestore database.
 // BOT_TOKEN cũ vẫn là đường tương thích của bot 1; thiếu BOT_2_TOKEN/BOT_3_TOKEN
@@ -1077,6 +1092,10 @@ async function sendMessage(chatId, text, options = {}) {
         delivered: chunks.length === 0 ? true : false,
         chunks: chunks.length,
         sentChunks: 0,
+        // Mã tin nhắn do Zalo trả về. Trước đây lịch sử Chat Center dùng một mã tự
+        // sinh (`bot_<id>_<timestamp>`), nên khi người dùng nói "không nhận được"
+        // thì không có cách nào đối chiếu với phía Zalo. Giữ mã thật để tra được.
+        providerMessageIds: [],
         providerBotId: normalizeBotId(provider.botId) || LEGACY_BOT_ID
     };
     for (let index = 0; index < chunks.length; index += 1) {
@@ -1097,12 +1116,14 @@ async function sendMessage(chatId, text, options = {}) {
             replyCapture.messages.push(payload);
         }
         try {
-            await providerQueues.enqueueFor(
+            const sentResult = await providerQueues.enqueueFor(
                 provider.botId,
                 () => Promise.resolve(provider.sendMessage(chatId, payload, sendOptions)),
                 priority
             );
             deliveryResult.sentChunks += 1;
+            const providerMessageId = sentResult?.message_id ?? sentResult?.messageId ?? sentResult?.msgId ?? null;
+            if (providerMessageId != null) deliveryResult.providerMessageIds.push(String(providerMessageId));
         } catch (error) {
             // Phân loại lỗi trước khi quyết định có thử lại dạng plain text hay không.
             //
@@ -1117,12 +1138,14 @@ async function sendMessage(chatId, text, options = {}) {
                 console.warn(`Lỗi định dạng markdown (${error.message}), gửi lại dạng plain text một lần...`);
                 const fallbackOptions = { ...otherOptions };
                 delete fallbackOptions.parse_mode;
-                await providerQueues.enqueueFor(
+                const retryResult = await providerQueues.enqueueFor(
                     provider.botId,
                     () => Promise.resolve(provider.sendMessage(chatId, toPlainText(payload), fallbackOptions)),
                     priority
                 );
                 deliveryResult.sentChunks += 1;
+                const retryMessageId = retryResult?.message_id ?? retryResult?.messageId ?? retryResult?.msgId ?? null;
+                if (retryMessageId != null) deliveryResult.providerMessageIds.push(String(retryMessageId));
                 continue;
             }
 
@@ -1138,6 +1161,23 @@ async function sendMessage(chatId, text, options = {}) {
             error.deliveryResult = deliveryResult;
             // Cổng tiếp nhận: báo cho ngữ cảnh sự kiện vào biết lần gửi này thất bại.
             notifyAdmissionFailure(chatId, error);
+
+            // Ghi lần gửi THẤT BẠI vào lịch sử Chat Center.
+            //
+            // Trước đây chỉ lần gửi thành công mới được ghi. Hệ quả: một thông báo
+            // theo lịch bị Zalo từ chối không xuất hiện ở bất kỳ đâu — người vận
+            // hành chỉ thấy im lặng, còn người dùng thì không nhận được gì. Ghi cả
+            // thất bại để Chat Center nói đúng sự thật, kèm lý do.
+            recordMessageHistory({
+                botId: deliveryResult.providerBotId,
+                chatId: String(chatId),
+                direction: MSG_DIRECTION.OUTBOUND,
+                text: String(text || ""),
+                status: MSG_STATUS.FAILED,
+                source: historySource || (dashboardCommandContext.getStore() ? MSG_SOURCE.ADMIN_CHAT : MSG_SOURCE.BOT_COMMAND),
+                error: error?.message || "Gửi thất bại"
+            }).catch(() => { /* lỗi ghi lịch sử không được che lỗi gửi */ });
+
             throw error;
         }
     }
@@ -1157,7 +1197,10 @@ async function sendMessage(chatId, text, options = {}) {
                 text: String(text || ""),
                 status: MSG_STATUS.SENT,
                 source: historySource || (dashboardCommandContext.getStore() ? MSG_SOURCE.ADMIN_CHAT : MSG_SOURCE.BOT_COMMAND),
-                providerMsgId: deliveryResult.providerBotId ? `bot_${deliveryResult.providerBotId}_${Date.now()}` : null
+                // Mã tin nhắn THẬT của Zalo khi nhà cung cấp trả về. Không có thì để
+                // trống — bản ghi vẫn được tạo với mã ngẫu nhiên, và điều đó được
+                // thể hiện rõ là "không đối chiếu được với Zalo".
+                providerMsgId: deliveryResult.providerMessageIds[0] || null
             }).catch((err) => {
                 // Lỗi ghi lịch sử không được làm lỗi gửi.
                 console.warn(`[MessageRecorder] khong ghi duoc lich su outbound: ${err.message}`);
@@ -3081,21 +3124,42 @@ async function sendNotification(chatId, text, options = {}) {
     const configuredThreshold = Number(process.env.CHAT_MAX_CONSECUTIVE_FAILURES || 3);
     const defaultThreshold = Number.isInteger(configuredThreshold) && configuredThreshold > 0 ? configuredThreshold : 3;
     const { feature = "broadcast", operation = feature, maxConsecutiveFailures = defaultThreshold, bypassEligibility = false, priority } = options;
+    // Dấu vết gửi tin: bot nào, chat nào, việc gì, kết quả ra sao. Chỉ ghi vào bộ
+    // đệm trong bộ nhớ (xem deliveryTrace.js) — không thêm lượt ghi Firestore nào.
+    const traceBase = {
+        botId: normalizeBotId(getCurrentBotId()) || LEGACY_BOT_ID,
+        chatId: String(chatId),
+        chatName: getChat(chatId)?.displayName || null,
+        feature,
+        operation
+    };
     // Kiểm tra quyền và GHI NHẬN KẾT QUẢ GỬI đều phải chạy trong ngữ cảnh của bot
     // sở hữu chat: sổ chat có phạm vi theo bot, nên ghi nhận bằng ngữ cảnh bot 1 sẽ
     // đánh dấu nhầm lên bản ghi của bot 1 khi chat thuộc bot 2.
-    if (!bypassEligibility && !isChatEligible(chatId, feature)) return { skipped: true, reason: "inactive_or_disabled" };
+    if (!bypassEligibility && !isChatEligible(chatId, feature)) {
+        recordDeliveryTrace({ ...traceBase, result: "skipped", reason: "inactive_or_disabled" });
+        return { skipped: true, reason: "inactive_or_disabled" };
+    }
     try {
-        await sendMessage(chatId, text, { ...(options.sendOptions || {}), ...(priority === undefined ? {} : { priority }) });
+        const sendResult = await sendMessage(chatId, text, { ...(options.sendOptions || {}), ...(priority === undefined ? {} : { priority }) });
         recordDeliverySuccess(chatId);
+        recordDeliveryTrace({
+            ...traceBase,
+            result: "sent",
+            chunks: sendResult?.chunks || 0,
+            providerMessageIds: sendResult?.providerMessageIds || []
+        });
         return { sent: true };
     } catch (error) {
         // Lỗi vĩnh viễn (410/422) đã được ghi nhận ngay tại sendMessage, nơi biết
         // rõ phân loại. Ghi thêm ở đây sẽ đếm hai lần cùng một lần gửi.
+        const errorKind = error?.deliveryClassification?.kind || null;
         if (error?.deliveryRecorded === true) {
+            recordDeliveryTrace({ ...traceBase, result: "failed", error: error.message, errorKind, providerMessageIds: error?.deliveryResult?.providerMessageIds || [] });
             return { failed: true, error, suspended: false };
         }
         const record = recordDeliveryFailure(chatId, error, { feature, operation, maxConsecutiveFailures });
+        recordDeliveryTrace({ ...traceBase, result: "failed", error: error.message, errorKind, providerMessageIds: error?.deliveryResult?.providerMessageIds || [] });
         return { failed: true, error, suspended: record?.status === "inactive" };
     }
 }
@@ -3125,6 +3189,14 @@ async function sendClassStartNotifications(date = new Date()) {
     const result = await classStartReminderService.run(date);
     if (result.sent > 0) {
         console.log(`[NHẮC GIỜ] Đã gửi ${result.sent} thông báo bắt đầu buổi học.`);
+        try {
+            recordSystemLog("INFO", `Nhắc giờ học: đã gửi ${result.sent} thông báo (${result.lessons} buổi).`, {
+                kind: "scheduler",
+                operation: "class_start_reminder",
+                sent: result.sent,
+                lessons: result.lessons
+            });
+        } catch (_) { /* log không được làm hỏng lượt gửi */ }
     }
     if (result.failed > 0) {
         logDiscord("ERROR", `class_start_reminder_failed: ${result.failed} delivery or schedule check(s)`);
@@ -3325,6 +3397,18 @@ async function sendDailySchedulesAtTime(notificationTime = DEFAULT_NOTIFICATION_
     } finally {
         runningDailyNotificationTimes.delete(notificationTime);
         console.log(`⏰ Hoàn tất tiến trình gửi lịch học ${notificationTime}.`);
+        // Ghi lại KẾT QUẢ của lượt gửi vào log hệ thống: dashboard cần thấy được
+        // "06:30 gửi 12 người, 1 lỗi" mà không phải ssh vào VPS đọc `pm2 logs`.
+        try {
+            recordSystemLog("INFO", `Gửi lịch ${notificationTime}: ${dispatchResult.sent} thành công, ${dispatchResult.failed} lỗi (${dispatchResult.matchedStudents} MSSV).`, {
+                kind: "scheduler",
+                operation: "daily_schedule",
+                notificationTime,
+                sent: dispatchResult.sent,
+                failed: dispatchResult.failed,
+                students: dispatchResult.matchedStudents
+            });
+        } catch (_) { /* log không được làm hỏng lượt gửi */ }
     }
 }
 

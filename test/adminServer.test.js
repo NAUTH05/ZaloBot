@@ -299,3 +299,73 @@ test("announcement endpoints trả 503 khi tiến trình chưa nối hàm", asyn
     const send = await request(port, "POST", "/zalobot/api/admin/announcement/send", { confirm: true }, cookie);
     assert.equal(send.status, 503);
 });
+
+// ---------------------------------------------------------------------------
+// Tạm dừng trợ lý AI qua API.
+//
+// Đây là công tắc vận hành: nếu nó chỉ đổi trạng thái ở trình duyệt thì quản trị
+// viên tưởng đã tắt trợ lý trong khi trợ lý vẫn trả lời người dùng.
+// ---------------------------------------------------------------------------
+test("AI pause đổi được trạng thái toàn cục và theo từng cuộc trò chuyện", async (t) => {
+    preserveRuntimeFiles(t);
+    const oldUsername = process.env.ADMIN_USERNAME;
+    const oldPassword = process.env.ADMIN_PASSWORD;
+    process.env.ADMIN_USERNAME = "pause-admin";
+    process.env.ADMIN_PASSWORD = "test-password";
+    const runtime = createAdminServer({ port: 0 });
+    await new Promise((resolve) => runtime.server.listen(0, "127.0.0.1", resolve));
+    const port = runtime.server.address().port;
+    t.after(() => { runtime.server.close(); process.env.ADMIN_USERNAME = oldUsername; process.env.ADMIN_PASSWORD = oldPassword; });
+
+    const login = await request(port, "POST", "/zalobot/api/admin/auth/login", { username: "pause-admin", password: "test-password" });
+    const cookie = String(login.headers["set-cookie"][0]).split(";")[0];
+
+    const initial = await request(port, "GET", "/zalobot/api/admin/ai-pause", null, cookie);
+    assert.equal(initial.status, 200);
+    assert.equal(initial.body.pause.anyActive, false);
+
+    const paused = await request(port, "POST", "/zalobot/api/admin/ai-pause", { scope: "global", paused: true, minutes: 30, reason: "trực hỗ trợ" }, cookie);
+    assert.equal(paused.status, 200);
+    assert.equal(paused.body.pause.global.active, true);
+    assert.equal(paused.body.pause.global.reason, "trực hỗ trợ");
+    assert.equal(paused.body.pause.anyActive, true);
+
+    // Trạng thái phải nằm ở máy chủ: đọc lại bằng một yêu cầu mới vẫn thấy.
+    const reread = await request(port, "GET", "/zalobot/api/admin/ai-pause", null, cookie);
+    assert.equal(reread.body.pause.global.active, true);
+
+    const chatPause = await request(port, "POST", "/zalobot/api/admin/ai-pause", { scope: "chat", botId: "bot1", chatId: "chat-x", paused: true, minutes: 15 }, cookie);
+    assert.equal(chatPause.status, 200);
+    assert.equal(chatPause.body.pause.chats.length, 1);
+    assert.equal(chatPause.body.pause.chats[0].chatId, "chat-x");
+
+    // Thiếu botId/chatId phải bị từ chối, không được đoán bot.
+    const invalid = await request(port, "POST", "/zalobot/api/admin/ai-pause", { scope: "chat", paused: true }, cookie);
+    assert.equal(invalid.status, 400);
+
+    const resumed = await request(port, "POST", "/zalobot/api/admin/ai-pause", { scope: "global", paused: false }, cookie);
+    assert.equal(resumed.body.pause.global.active, false);
+});
+
+test("logs trả về nhật ký gửi tin và giới hạn đọc được", async (t) => {
+    preserveRuntimeFiles(t);
+    const oldUsername = process.env.ADMIN_USERNAME;
+    const oldPassword = process.env.ADMIN_PASSWORD;
+    process.env.ADMIN_USERNAME = "logs-admin";
+    process.env.ADMIN_PASSWORD = "test-password";
+    const runtime = createAdminServer({ port: 0 });
+    await new Promise((resolve) => runtime.server.listen(0, "127.0.0.1", resolve));
+    const port = runtime.server.address().port;
+    t.after(() => { runtime.server.close(); process.env.ADMIN_USERNAME = oldUsername; process.env.ADMIN_PASSWORD = oldPassword; });
+
+    const login = await request(port, "POST", "/zalobot/api/admin/auth/login", { username: "logs-admin", password: "test-password" });
+    const cookie = String(login.headers["set-cookie"][0]).split(";")[0];
+
+    const response = await request(port, "GET", "/zalobot/api/admin/logs?limit=250", null, cookie);
+    assert.equal(response.status, 200);
+    assert.ok(Array.isArray(response.body.system));
+    assert.ok(Array.isArray(response.body.audit));
+    assert.ok(Array.isArray(response.body.deliveries), "phải có nhật ký gửi tin để chẩn đoán sự cố gửi");
+    assert.equal(response.body.deliveryStats.capacity > 0, true);
+    assert.equal(response.body.limits.system, 250);
+});

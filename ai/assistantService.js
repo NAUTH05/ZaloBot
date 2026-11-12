@@ -24,6 +24,7 @@ const { createAiStateStore } = require("./aiStateStore");
 const { getMessageHistory } = require("../messageRecorder");
 const { canUseAi } = require("../accessControl");
 const { getAdminSettings } = require("../adminSettings");
+const { isAiPaused } = require("../aiPause");
 const { getSubscription, normalizeNotificationTimes } = require("../subscriptions");
 const { normalizeStudentId } = require("../lhuSchedule");
 const { sanitizeExternalRichText } = require("../richText");
@@ -139,6 +140,10 @@ function createAssistant(options = {}) {
     // Đọc đăng ký của CHÍNH người đang hỏi (đã scoped theo bot + chat + user bởi
     // subscriptions.js). Cho phép thay bằng hàm giả khi kiểm thử.
     const readSubscription = options.getSubscription || getSubscription;
+    // Công tắc "tạm dừng trợ lý" do quản trị viên đặt từ dashboard. Đọc MỖI LƯỢT:
+    // vừa bấm là có hiệu lực ngay, và hết hạn thì trợ lý tự chạy lại — không cần
+    // khởi động lại tiến trình.
+    const readPause = options.readPause || ((context) => isAiPaused(context, now()));
     const historyProvider = options.historyProvider || (async (botId, chatId, opts) => {
         const result = await getMessageHistory(botId, chatId, { limit: opts.limit });
         return result?.messages || [];
@@ -376,6 +381,11 @@ function createAssistant(options = {}) {
         const clarified = await resolveClarification({ context, text, send });
         if (clarified.handled) return clarified;
 
+        // Quản trị viên đang trả lời trực tiếp: im lặng hoàn toàn, KHÔNG gọi API.
+        // Đặt sau phần xác nhận/làm rõ để một lô lệnh đang chờ vẫn hoàn tất được.
+        const pause = readPause(context);
+        if (pause?.paused) return { handled: false, reason: "ai_paused", pause };
+
         if (!config.enabled) return { handled: false, reason: "disabled" };
 
         // ------------------------------------------------------------ quyền
@@ -556,6 +566,10 @@ function createAssistant(options = {}) {
         if (typeof send !== "function") return { handled: false, reason: "no_send" };
         if (!config.enabled || !config.configured || !provider) return { handled: false, reason: "disabled" };
 
+        // Đang tạm dừng: cảnh báo cú pháp của bot đã đủ, không gọi mô hình thêm.
+        const pause = readPause(context);
+        if (pause?.paused) return { handled: false, reason: "ai_paused", pause };
+
         const access = accessCheck(context);
         if (!access.allowed) return { handled: false, reason: access.reason || "ai_blocked" };
 
@@ -622,6 +636,7 @@ function createAssistant(options = {}) {
         // Hạn mức hiệu lực, không phải giá trị trong .env: dashboard cần thấy đúng
         // con số đang áp dụng.
         const limits = resolveLimits(readAiSettings(), false);
+        const pause = readPause({});
         return {
             enabled: config.enabled,
             configured: config.configured,
@@ -633,6 +648,8 @@ function createAssistant(options = {}) {
             perUserDailyLimit: limits.perUser,
             globalDailyLimit: limits.global,
             ownerBypassLimit: config.ownerBypassLimit,
+            paused: pause?.paused === true,
+            pauseScope: pause?.scope || null,
             usage: summary.monthUsage,
             requestsToday: summary.requestsToday,
             pendingConfirmations: pending.size

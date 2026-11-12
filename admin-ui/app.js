@@ -6,6 +6,10 @@ let workspace = null;
 let dashboard = null;
 let logs = null;
 let settings = null;
+// Trạng thái tạm dừng trợ lý AI (toàn cục + từng cuộc trò chuyện). Đọc từ
+// /api/admin/ai-pause; mọi thay đổi đều đi qua máy chủ, giao diện không tự đoán.
+let aiPause = { global: { paused: false, active: false }, chats: [], anyActive: false };
+let aiPauseBusy = false;
 let commandRegistry = [];
 let bots = [];
 let targetUsers = [];
@@ -63,7 +67,19 @@ async function runAction(action, failureLabel) {
   }
 }
 
-function formatDate(value) { if (!value) return "-"; const date = new Date(value); return Number.isNaN(date.getTime()) ? value : date.toLocaleString("vi-VN"); }function badge(value, tone = "neutral") { return `<span class="badge badge-${tone}">${escapeHtml(value)}</span>`; }
+function formatDate(value) { if (!value) return "-"; const date = new Date(value); return Number.isNaN(date.getTime()) ? value : date.toLocaleString("vi-VN"); }
+
+// Giờ Việt Nam, KHÔNG theo múi giờ của trình duyệt.
+//
+// Trang Logs phải khớp với giờ trong `pm2 logs` và với giờ người dùng nhắn tin.
+// Người vận hành mở dashboard từ máy để UTC mà đọc giờ địa phương sẽ lệch 7 tiếng
+// và kết luận sai rằng lịch gửi chạy nhầm giờ.
+function formatDateTimeVN(value) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh", hour12: false });
+}function badge(value, tone = "neutral") { return `<span class="badge badge-${tone}">${escapeHtml(value)}</span>`; }
 function statusTone(status) { return status === "active" ? "success" : status === "inactive" ? "danger" : status === "disabled" ? "warning" : "neutral"; }
 
 // ---------------------------------------------------------------------------
@@ -486,10 +502,31 @@ function renderDirectory() {
   $$('#directoryRows [data-chat-detail]').forEach((button) => button.addEventListener("click", () => openChat(button.dataset.chatDetail, button.dataset.chatBot)));
 }
 
+// Chuỗi tìm kiếm của một đăng ký nhận lịch.
+//
+// Gồm cả mã MSSV, tên sinh viên, chat ID, tên chat và các mốc giờ: người vận hành
+// thường tra bằng đúng thứ người dùng vừa đọc cho họ trên Zalo (tên + MSSV), chứ
+// không phải bằng khóa nội bộ của bản ghi.
+function subscriptionSearchText(item) {
+  const times = (item.notificationTimes || []).map((time) => `${time.time} ${targetDayText(time.targetDayOffset)}`);
+  return [item.userDisplayName, item.userId, item.studentId, item.studentName, item.chatName, item.chatId, item.chatType, item.botId, ...times]
+    .filter(Boolean).join(" ").toLowerCase();
+}
+
 function renderNotifications() {
-  const filter = $("#notificationFilter").value;
-  const list = filterByBot(workspace.subscriptions).filter((item) => filter === "all" || (filter === "enabled" && item.notificationsEnabled) || (filter === "disabled" && !item.notificationsEnabled) || (filter === "legacy" && item.schema === "legacy"));
-  $("#notificationRows").innerHTML = list.map((item) => `<tr><td><strong>${escapeHtml(item.userDisplayName || item.userId || "Bản ghi cũ")}</strong> ${botBadge(item)}<code>${escapeHtml(item.userId || "-")}</code><div>${badge(item.studentId || "Chưa có MSSV", item.studentId ? "info" : "neutral")} ${escapeHtml(item.studentName)}</div></td><td><strong>${escapeHtml(item.chatName)}</strong><code>${escapeHtml(item.chatId)}</code></td><td>${badge(item.chatType, item.chatType === "group" ? "info" : "neutral")}</td><td>${timeChips(item.notificationTimes)}</td><td>${badge(item.schema, item.schema === "current" ? "success" : "warning")} ${badge(item.notificationsEnabled ? "Đang bật" : "Đang tắt", item.notificationsEnabled ? "success" : "neutral")}</td><td>${actionButton("data-subscription", item.key, recordBotId(item), item, "Quản lý")}</td></tr>`).join("") || emptyRow(6, "Không có đăng ký phù hợp.");
+  // `|| "all"` để một ô lọc chưa có giá trị (lúc mới nạp) không bị hiểu là một bộ
+  // lọc khác "Tất cả" và làm danh sách trống không rõ lý do.
+  const filter = $("#notificationFilter")?.value || "all";
+  const query = ($("#notificationSearch")?.value || "").trim().toLowerCase();
+  const scoped = filterByBot(workspace.subscriptions).filter((item) => filter === "all" || (filter === "enabled" && item.notificationsEnabled) || (filter === "disabled" && !item.notificationsEnabled) || (filter === "legacy" && item.schema === "legacy"));
+  const list = query ? scoped.filter((item) => subscriptionSearchText(item).includes(query)) : scoped;
+  const count = $("#notificationCount");
+  if (count) {
+    count.textContent = query || filter !== "all"
+      ? `Hiện ${list.length} trên ${scoped.length} đăng ký phù hợp bộ lọc.`
+      : `${scoped.length} đăng ký nhận lịch.`;
+  }
+  $("#notificationRows").innerHTML = list.map((item) => `<tr><td><strong>${escapeHtml(item.userDisplayName || item.userId || "Bản ghi cũ")}</strong> ${botBadge(item)}<code>${escapeHtml(item.userId || "-")}</code><div>${badge(item.studentId || "Chưa có MSSV", item.studentId ? "info" : "neutral")} ${escapeHtml(item.studentName)}</div></td><td><strong>${escapeHtml(item.chatName)}</strong><code>${escapeHtml(item.chatId)}</code></td><td>${badge(item.chatType, item.chatType === "group" ? "info" : "neutral")}</td><td>${timeChips(item.notificationTimes)}</td><td>${badge(item.schema, item.schema === "current" ? "success" : "warning")} ${badge(item.notificationsEnabled ? "Đang bật" : "Đang tắt", item.notificationsEnabled ? "success" : "neutral")}</td><td>${actionButton("data-subscription", item.key, recordBotId(item), item, "Quản lý")}</td></tr>`).join("") || emptyRow(6, query ? `Không có đăng ký nào khớp "${query}".` : "Không có đăng ký phù hợp.");
   $$('[data-subscription]').forEach((button) => button.addEventListener("click", () => openSubscription(button.dataset.subscription)));
 }
 
@@ -1077,13 +1114,84 @@ function setupCommandConsole() {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Logs & audit
+//
+// Bốn nguồn, cùng một chỗ:
+//   deliveries     — từng lần gửi tin theo lịch (bộ đệm trong bộ nhớ ở máy chủ)
+//   system         — log hệ thống (lỗi, cảnh báo, kết quả các lượt gửi)
+//   deliveryErrors — lỗi gửi gần nhất theo từng chat
+//   audit          — đăng nhập và thao tác quản trị
+//
+// Tất cả đều có tìm kiếm và lọc, và mọi mốc thời gian đều hiển thị theo giờ Việt
+// Nam: log phải đối chiếu được với `pm2 logs` và với giờ người dùng nhắn tin.
+// ---------------------------------------------------------------------------
+
+const TRACE_RESULT_LABEL = { sent: "Đã gửi", failed: "Lỗi gửi", skipped: "Bỏ qua", deferred: "Hoãn" };
+const TRACE_RESULT_TONE = { sent: "success", failed: "danger", skipped: "warning", deferred: "neutral" };
+
+function traceOperationLabel(item) {
+  const feature = item.feature === "schedule" ? "Lịch học" : item.feature === "broadcast" ? "Thông báo" : (item.feature || "?");
+  const operation = item.operation === "daily_schedule" ? "gửi lịch hằng ngày"
+    : item.operation === "class_start_reminder" ? "nhắc giờ học"
+    : item.operation === "schedule_change" ? "cảnh báo đổi lịch"
+    : (item.operation || "?");
+  return `${feature} · ${operation}`;
+}
+
+function logMatches(query, values) {
+  if (!query) return true;
+  return values.filter((value) => value != null && value !== "").join(" ").toLowerCase().includes(query);
+}
+
+function auditDetailText(item) {
+  const parts = [item.result, item.botId, item.chatId, item.userId, item.scope, item.error].filter((value) => value != null && value !== "");
+  return parts.join(" · ");
+}
+
 function renderLogs() {
-  $("#systemLogList").innerHTML = (logs.system || []).map((item) => `<article class="stack-item"><strong>${escapeHtml(item.level)}</strong><p>${escapeHtml(item.message)}</p><small>${escapeHtml(formatDate(item.at))}</small></article>`).join("") || `<div class="empty-state">Không có log hệ thống.</div>`;
-  $("#deliveryLogList").innerHTML = filterByBot(logs.deliveryErrors || []).map((item) => `<article class="stack-item"><strong>${escapeHtml(item.displayName || item.chatId)}</strong><p>${escapeHtml(item.lastError?.message || "-")}</p><small>${escapeHtml(formatDate(item.lastError?.at))}</small></article>`).join("") || `<div class="empty-state">Không có lỗi gửi gần đây.</div>`;
+  const query = ($("#logSearch")?.value || "").trim().toLowerCase();
+  const level = $("#logLevel")?.value || "all";
+  const result = $("#logResult")?.value || "all";
+
+  // 1. Nhật ký gửi tin theo lịch.
+  const traces = filterByBot(logs.deliveries || []).filter((item) => {
+    if (result !== "all" && item.result !== result) return false;
+    return logMatches(query, [item.botId, item.chatId, item.chatName, item.feature, item.operation, item.result, item.reason, item.error, item.providerMessageId]);
+  });
+  $("#deliveryTraceList").innerHTML = traces.map((item) => `<article class="stack-item">
+      <div class="trace-head">${badge(TRACE_RESULT_LABEL[item.result] || item.result, TRACE_RESULT_TONE[item.result] || "neutral")}<strong>${escapeHtml(item.chatName || item.chatId || "?")}</strong><code>${escapeHtml(item.chatId || "")}</code>${item.botId ? badge(item.botId, "neutral") : ""}</div>
+      <div class="trace-meta"><span>${escapeHtml(traceOperationLabel(item))}</span><span>${escapeHtml(formatDateTimeVN(item.at))}</span>${item.chunks ? `<span>${item.chunks} phần</span>` : ""}${item.providerMessageId ? `<span>mã Zalo: <code>${escapeHtml(item.providerMessageId)}</code></span>` : `<span>Zalo không trả mã tin nhắn</span>`}${item.reason ? `<span>lý do: ${escapeHtml(item.reason)}</span>` : ""}</div>
+      ${item.error ? `<p class="trace-error">${escapeHtml(item.error)}</p>` : ""}
+    </article>`).join("") || `<div class="empty-state">Chưa có lần gửi nào được ghi. Nhật ký này chỉ tồn tại trong bộ nhớ của tiến trình đang chạy.</div>`;
+
+  // 2. Log hệ thống.
+  const system = (logs.system || []).filter((item) => {
+    if (level !== "all" && String(item.level || "").toLowerCase() !== level) return false;
+    return logMatches(query, [item.level, item.message, item.kind, item.operation, item.botId, item.chatId]);
+  });
+  $("#systemLogList").innerHTML = system.map((item) => `<article class="stack-item"><strong><span class="log-level">${escapeHtml(item.level)}</span> ${escapeHtml(item.kind || item.operation || "hệ thống")}</strong><p>${escapeHtml(item.message)}</p><small>${escapeHtml(formatDateTimeVN(item.at))}</small></article>`).join("") || `<div class="empty-state">Không có log hệ thống phù hợp.</div>`;
+
+  // 3. Lỗi gửi theo từng chat.
+  const deliveryErrors = filterByBot(logs.deliveryErrors || []).filter((item) => logMatches(query, [item.displayName, item.chatId, item.lastError?.message]));
+  $("#deliveryLogList").innerHTML = deliveryErrors.map((item) => `<article class="stack-item"><strong>${escapeHtml(item.displayName || item.chatId)}</strong><p>${escapeHtml(item.lastError?.message || "-")}</p><small>${escapeHtml(formatDateTimeVN(item.lastError?.at))}</small></article>`).join("") || `<div class="empty-state">Không có lỗi gửi gần đây.</div>`;
+
+  // 4. Admin audit.
+  const audit = (logs.audit || []).filter((item) => logMatches(query, [item.action, item.admin, item.ip, auditDetailText(item)]));
+  $("#auditLogList").innerHTML = audit.map((item) => `<article class="stack-item"><strong>${escapeHtml(item.action)}</strong><p>${escapeHtml(item.admin || "unknown")}${auditDetailText(item) ? ` · ${escapeHtml(auditDetailText(item))}` : ""}</p><small>${escapeHtml(formatDateTimeVN(item.at))}</small></article>`).join("") || `<div class="empty-state">Chưa có hoạt động quản trị phù hợp.</div>`;
+
+  const failedTraces = (logs.deliveries || []).filter((item) => item.result === "failed").length;
+  const errorLogs = (logs.system || []).filter((item) => String(item.level).toUpperCase() === "ERROR").length;
+  $("#logStats").innerHTML = [
+    ["Lần gửi ghi được", (logs.deliveries || []).length, `${failedTraces} lỗi`],
+    ["Log hệ thống", (logs.system || []).length, `${errorLogs} lỗi`],
+    ["Audit", (logs.audit || []).length, "thao tác quản trị"],
+    ["Bộ đệm gửi", logs.deliveryStats?.total ?? 0, `tối đa ${logs.deliveryStats?.capacity ?? 0}`]
+  ].map(([label, value, note]) => `<article class="metric-card"><span>${escapeHtml(label)}</span><strong>${Number(value) || 0}</strong><small>${escapeHtml(note)}</small></article>`).join("");
 }
 
 function ensurePaginationViews() {
-  [["#directoryRows", "directory"], ["#userRows", "users"], ["#groupCards", "groups"], ["#notificationRows", "notifications"], ["#healthRows", "health"], ["#systemLogList", "systemLogs"], ["#deliveryLogList", "deliveryLogs"]].forEach(([selector, key]) => {
+  [["#directoryRows", "directory"], ["#userRows", "users"], ["#groupCards", "groups"], ["#notificationRows", "notifications"], ["#healthRows", "health"], ["#systemLogList", "systemLogs"], ["#deliveryLogList", "deliveryLogs"], ["#deliveryTraceList", "deliveryTraces"], ["#auditLogList", "auditLogs"]].forEach(([selector, key]) => {
     const anchor = $(selector); if (!anchor) return; const id = `${key}Pagination`; if (!document.getElementById(id)) { const el = document.createElement("div"); el.id = id; anchor.closest(".panel")?.appendChild(el) || anchor.parentElement.appendChild(el); }
   });
 }
@@ -1094,13 +1202,137 @@ function paginateRendered(selector, key) {
   pageState[key] = { page, size }; items.forEach((item, index) => { item.hidden = index < (page - 1) * size || index >= page * size; });
   pager(`#${key}Pagination`, key, { page, size, totalPages, total: items.length }, applyPaginationViews);
 }
-function applyPaginationViews() { ensurePaginationViews(); paginateRendered("#directoryRows", "directory"); paginateRendered("#userRows", "users"); paginateRendered("#groupCards", "groups"); paginateRendered("#notificationRows", "notifications"); paginateRendered("#healthRows", "health"); paginateRendered("#systemLogList", "systemLogs"); paginateRendered("#deliveryLogList", "deliveryLogs"); }
+function applyPaginationViews() { ensurePaginationViews(); paginateRendered("#directoryRows", "directory"); paginateRendered("#userRows", "users"); paginateRendered("#groupCards", "groups"); paginateRendered("#notificationRows", "notifications"); paginateRendered("#healthRows", "health"); paginateRendered("#systemLogList", "systemLogs"); paginateRendered("#deliveryLogList", "deliveryLogs"); paginateRendered("#deliveryTraceList", "deliveryTraces"); paginateRendered("#auditLogList", "auditLogs"); }
 // Yêu cầu hỗ trợ: danh sách, bộ đếm và yêu cầu đang mở.
 let feedbackTickets = [];
 let feedbackCounts = { total: 0, unread: 0, open: 0, resolved: 0 };
 let selectedFeedback = null;
 
-function renderAll() { populateBotControls(); renderBotGrid(); renderOverview(); renderDirectory(); renderUsers(); renderGroups(); renderNotifications(); renderHealth(); renderSettings(); renderLogs(); setupCommandConsole(); renderCommands(); setupFeedback(); renderFeedback(); setupSourceVerification(); ensurePaginationViews(); applyPaginationViews(); $("#healthPill").textContent = `${dashboard.bot.status} · ${dashboard.bot.health}`; $("#generatedAt").textContent = formatDate(workspace.generatedAt); }
+/* --------------------------------------------------------------------------
+   Tạm dừng trợ lý AI
+
+   Khi quản trị viên đang trả lời trực tiếp, trợ lý phải im lặng — nếu không, mỗi
+   tin người dùng gửi sẽ nhận một câu trả lời máy móc xen vào giữa cuộc trò
+   chuyện thật.
+
+   Công tắc này chỉ chặn đường gọi mô hình. Lệnh "/...", lô lệnh tất định, lời xác
+   nhận đang chờ và mọi thông báo theo lịch vẫn chạy — đó là lý do giao diện phải
+   nói rõ phạm vi, để người vận hành không tưởng nhầm là "đã tắt bot".
+   -------------------------------------------------------------------------- */
+
+const AI_PAUSE_DURATIONS = [[0, "Đến khi bật lại"], [15, "15 phút"], [30, "30 phút"], [60, "1 giờ"], [120, "2 giờ"], [480, "8 giờ"]];
+
+function aiPauseDurationOptions() {
+  return AI_PAUSE_DURATIONS.map(([value, label]) => `<option value="${value}">${label}</option>`).join("");
+}
+
+function pauseUntilText(entry) {
+  if (!entry?.until) return "không đặt hạn";
+  return `đến ${formatDateTimeVN(entry.until)}`;
+}
+
+function activeChatPause(botId, chatId) {
+  const key = `${botId}::${chatId}`;
+  return (aiPause.chats || []).find((entry) => entry.key === key && entry.active) || null;
+}
+
+async function applyAiPause(patch, successMessage) {
+  if (aiPauseBusy) return { ok: false };
+  aiPauseBusy = true;
+  const outcome = await runAction(
+    () => api("/api/admin/ai-pause", { method: "POST", body: JSON.stringify(patch) }),
+    "Không đổi được trạng thái trợ lý AI"
+  );
+  aiPauseBusy = false;
+  if (!outcome.ok) return outcome;
+  aiPause = outcome.result.pause;
+  renderAiPause();
+  // Thanh điều khiển trong Chat Center đọc trạng thái cuộc trò chuyện đang mở.
+  // Bọc lại: nếu người dùng chưa từng mở Chat Center thì trạng thái đó chưa được
+  // khởi tạo và lỗi ở đây không được làm hỏng thao tác vừa thành công.
+  try { renderChatAiPause(); } catch (_) { /* chưa mở Chat Center */ }
+  setDataState("success", successMessage);
+  window.setTimeout(() => setDataState("success", ""), 2200);
+  return outcome;
+}
+
+// Bật lại tất cả: toàn cục + mọi cuộc trò chuyện đang bị tạm dừng riêng lẻ.
+async function resumeAllAiPause() {
+  const chats = (aiPause.chats || []).filter((entry) => entry.active);
+  if (aiPause.global?.active) await applyAiPause({ scope: "global", paused: false }, "Đã bật lại trợ lý AI.");
+  for (const entry of chats) {
+    await applyAiPause({ scope: "chat", botId: entry.botId, chatId: entry.chatId, paused: false }, "Đã bật lại trợ lý AI.");
+  }
+}
+
+function renderAiPauseBanner() {
+  const banner = $("#aiPauseBanner");
+  if (!banner) return;
+  if (!aiPause?.anyActive) {
+    banner.hidden = true;
+    banner.innerHTML = "";
+    return;
+  }
+  const notes = [];
+  if (aiPause.global?.active) {
+    notes.push(`toàn bộ cuộc trò chuyện (${pauseUntilText(aiPause.global)}${aiPause.global.reason ? ` · ${aiPause.global.reason}` : ""})`);
+  }
+  const chatCount = (aiPause.chats || []).filter((entry) => entry.active).length;
+  if (chatCount) notes.push(`${chatCount} cuộc trò chuyện riêng lẻ`);
+  banner.hidden = false;
+  banner.innerHTML = `<strong>Trợ lý AI đang tạm dừng</strong> — ${escapeHtml(notes.join(" · "))}. Lệnh "/" và thông báo theo lịch vẫn chạy bình thường. <button type="button" id="aiPauseBannerResume">Bật lại</button>`;
+  $("#aiPauseBannerResume")?.addEventListener("click", resumeAllAiPause);
+}
+
+function renderAiPausePanel() {
+  const status = $("#aiPauseStatus");
+  const body = $("#aiPauseBody");
+  if (!body) return;
+  const globalActive = aiPause?.global?.active === true;
+  if (status) {
+    status.innerHTML = globalActive
+      ? badge("Đang tạm dừng toàn bộ", "warning")
+      : badge("Đang hoạt động", "success");
+  }
+
+  const activeChats = (aiPause.chats || []).filter((entry) => entry.active);
+  body.innerHTML = `
+    <div class="ai-pause-controls">
+      <label>Thời gian<select id="aiPauseMinutes">${aiPauseDurationOptions()}</select></label>
+      <label>Lý do (tuỳ chọn)<input type="text" id="aiPauseReason" maxlength="200" placeholder="Ví dụ: đang trực hỗ trợ qua Zalo" /></label>
+      ${globalActive
+        ? `<button type="button" class="primary small" id="aiPauseGlobalResume">Bật lại trợ lý</button>`
+        : `<button type="button" class="primary small" id="aiPauseGlobalStart">Tạm dừng toàn bộ</button>`}
+    </div>
+    <p class="ai-pause-hint">${globalActive
+      ? `Đang tạm dừng ${escapeHtml(pauseUntilText(aiPause.global))}${aiPause.global.reason ? ` · ${escapeHtml(aiPause.global.reason)}` : ""}. Hết thời gian trên, trợ lý tự chạy lại — không cần thao tác gì thêm.`
+      : "Trợ lý trả lời tin nhắn tự nhiên như bình thường. Tạm dừng chỉ ảnh hưởng phần hội thoại AI."}</p>
+    <div class="ai-pause-list stack">
+      ${activeChats.length
+        ? activeChats.map((entry) => `<article class="stack-item horizontal"><div><strong>${escapeHtml(entry.chatId)}</strong><small>${escapeHtml(entry.botId)} · ${escapeHtml(pauseUntilText(entry))}${entry.reason ? ` · ${escapeHtml(entry.reason)}` : ""}</small></div><button type="button" data-ai-pause-resume-chat="${escapeHtml(entry.key)}">Bật lại</button></article>`).join("")
+        : `<div class="empty-state">Không có cuộc trò chuyện nào bị tạm dừng riêng lẻ. Tạm dừng một cuộc trò chuyện trong tab Chat Center.</div>`}
+    </div>`;
+
+  $("#aiPauseGlobalStart")?.addEventListener("click", () => applyAiPause({
+    scope: "global",
+    paused: true,
+    minutes: Number($("#aiPauseMinutes")?.value) || 0,
+    reason: $("#aiPauseReason")?.value || ""
+  }, "Đã tạm dừng trợ lý AI."));
+  $("#aiPauseGlobalResume")?.addEventListener("click", () => applyAiPause({ scope: "global", paused: false }, "Đã bật lại trợ lý AI."));
+  $$('[data-ai-pause-resume-chat]').forEach((button) => button.addEventListener("click", () => {
+    const key = button.dataset.aiPauseResumeChat || "";
+    const separator = key.indexOf("::");
+    applyAiPause({ scope: "chat", botId: separator > 0 ? key.slice(0, separator) : key, chatId: separator > 0 ? key.slice(separator + 2) : "", paused: false }, "Đã bật lại trợ lý ở cuộc trò chuyện này.");
+  }));
+}
+
+function renderAiPause() {
+  renderAiPauseBanner();
+  renderAiPausePanel();
+}
+
+function renderAll() { populateBotControls(); renderBotGrid(); renderOverview(); renderDirectory(); renderUsers(); renderGroups(); renderNotifications(); renderHealth(); renderSettings(); renderAiPause(); renderLogs(); setupCommandConsole(); renderCommands(); setupFeedback(); renderFeedback(); setupSourceVerification(); ensurePaginationViews(); applyPaginationViews(); $("#healthPill").textContent = `${dashboard.bot.status} · ${dashboard.bot.health}`; $("#generatedAt").textContent = formatDate(workspace.generatedAt); }
 
 async function loadData() {
   setDataState("loading", "Loading admin data...");
@@ -1109,8 +1341,13 @@ async function loadData() {
     // dự phòng bằng dữ liệu workspace đã tải.
     const targetUserRequest = api("/api/admin/target-users").then((data) => (Array.isArray(data.users) ? data.users : null)).catch(() => null);
     const botRequest = api("/api/admin/bots").then((data) => (Array.isArray(data.bots) ? data.bots : [])).catch(() => []);
+    // Trạng thái tạm dừng trợ lý AI: hỏng endpoint này KHÔNG được làm hỏng cả
+    // dashboard, nên có giá trị dự phòng "đang bật".
+    const aiPauseRequest = api("/api/admin/ai-pause").then((data) => data.pause).catch(() => null);
     [workspace, dashboard, logs, settings, commandRegistry] = await Promise.all([api("/api/admin/workspace"), api("/api/admin/dashboard"), api("/api/admin/logs"), api("/api/admin/settings"), api("/api/admin/commands").then((data) => data.commands || [])]);
     bots = await botRequest;
+    const remoteAiPause = await aiPauseRequest;
+    if (remoteAiPause) aiPause = remoteAiPause;
     const remoteTargetUsers = await targetUserRequest;
     targetUsers = mergeTargetUsers(remoteTargetUsers === null ? targetUsersFromWorkspace(workspace) : remoteTargetUsers);
     renderAll();
@@ -1226,13 +1463,30 @@ async function openChat(chatId, botId) {
 
 function openSubscription(key) {
   const item = workspace.subscriptions.find((entry) => entry.key === key); if (!item) return;
-  showDialog(`${item.studentId || "Đăng ký nhận lịch"} · ${item.chatName}`, `<div class="detail-grid"><div class="detail"><span>Người dùng</span><strong>${escapeHtml(item.userDisplayName || item.userId || "Bản ghi cũ")}</strong><code>${escapeHtml(item.userId || "-")}</code></div><div class="detail"><span>Chat</span><strong>${escapeHtml(item.chatName)}</strong><code>${escapeHtml(item.chatId)}</code></div><div class="detail"><span>Loại chat</span><strong>${escapeHtml(item.chatType)}</strong></div><div class="detail"><span>Cập nhật bản ghi</span><strong>${escapeHtml(formatDate(item.updatedAt))}</strong></div></div>${item.schema === "legacy" ? `<div class="warning-box">Bản ghi cũ không có userId rõ ràng; chỉ nên xem hoặc xóa.</div>` : `<form id="subscriptionMetaForm"><div class="form-grid"><label>MSSV<input name="studentId" value="${escapeHtml(item.studentId)}" /></label><label>Tên sinh viên<input name="studentName" value="${escapeHtml(item.studentName)}" /></label><label>Tên người dùng<input name="userDisplayName" value="${escapeHtml(item.userDisplayName)}" /></label></div><button class="primary" type="submit">Lưu thông tin</button></form><h3>Giờ nhận lịch</h3><div class="stack">${item.notificationTimes.map((time) => `<article class="stack-item horizontal"><div><strong>ID ${time.id} · ${escapeHtml(time.time)}</strong><small>${escapeHtml(targetDayText(time.targetDayOffset))} · đăng ký ${escapeHtml(formatDate(time.createdAt))} · cập nhật ${escapeHtml(formatDate(time.updatedAt))}</small></div><div class="row-actions"><button data-time-edit="${time.id}">Sửa</button><button class="danger-text" data-time-remove="${time.id}">Xóa</button></div></article>`).join("") || `<div class="empty-state">Chưa có giờ nhận lịch.</div>`}<button class="secondary" id="addTimeButton">Thêm giờ</button></div><div class="action-bar"><button data-sub-action="${item.notificationsEnabled ? "disable" : "enable"}">${item.notificationsEnabled ? "Tắt nhận lịch" : "Bật nhận lịch"}</button><button class="danger-text" data-sub-action="delete">Xóa đăng ký</button></div>`}`);
+  showDialog(`${item.studentId || "Đăng ký nhận lịch"} · ${item.chatName}`, `<div class="detail-grid"><div class="detail"><span>Người dùng</span><strong>${escapeHtml(item.userDisplayName || item.userId || "Bản ghi cũ")}</strong><code>${escapeHtml(item.userId || "-")}</code></div><div class="detail"><span>Chat</span><strong>${escapeHtml(item.chatName)}</strong><code>${escapeHtml(item.chatId)}</code></div><div class="detail"><span>Loại chat</span><strong>${escapeHtml(item.chatType)}</strong></div><div class="detail"><span>Cập nhật bản ghi</span><strong>${escapeHtml(formatDate(item.updatedAt))}</strong></div></div>${item.schema === "legacy" ? `<div class="warning-box">Bản ghi cũ không có userId rõ ràng; chỉ nên xem hoặc xóa.</div>` : `<form id="subscriptionMetaForm"><div class="form-grid"><label>MSSV<input name="studentId" value="${escapeHtml(item.studentId)}" /></label><label>Tên sinh viên<input name="studentName" value="${escapeHtml(item.studentName)}" /></label><label>Tên người dùng<input name="userDisplayName" value="${escapeHtml(item.userDisplayName)}" /></label></div><button class="primary" type="submit">Lưu thông tin</button></form><h3>Giờ nhận lịch</h3><div class="stack">${item.notificationTimes.map((time) => `<article class="stack-item horizontal"><div><strong>ID ${time.id} · ${escapeHtml(time.time)}</strong><small>${escapeHtml(targetDayText(time.targetDayOffset))} · đăng ký ${escapeHtml(formatDate(time.createdAt))} · cập nhật ${escapeHtml(formatDate(time.updatedAt))}</small></div><div class="row-actions"><button data-time-edit="${time.id}">Sửa</button><button class="danger-text" data-time-remove="${time.id}">Xóa</button></div></article>`).join("") || `<div class="empty-state">Chưa có giờ nhận lịch.</div>`}<button class="secondary" id="addTimeButton">Thêm giờ</button></div><div class="action-bar"><button data-sub-action="${item.notificationsEnabled ? "disable" : "enable"}">${item.notificationsEnabled ? "Tắt nhận lịch" : "Bật nhận lịch"}</button><button data-sub-test-send="1">Gửi thử tới chat này</button><button class="danger-text" data-sub-action="delete">Xóa đăng ký</button></div>`}`);
   if (item.schema === "legacy") return;
   $("#subscriptionMetaForm").addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); await updateSubscription(item, { action: "metadata", ...Object.fromEntries(form.entries()) }); });
   $("#addTimeButton").addEventListener("click", () => openTimeDialog({ item }));
   $$('[data-time-edit]').forEach((button) => button.addEventListener("click", () => openTimeDialog({ item, time: item.notificationTimes.find((entry) => Number(entry.id) === Number(button.dataset.timeEdit)) })));
   $$('[data-time-remove]').forEach((button) => button.addEventListener("click", () => updateSubscription(item, { action: "remove_time", timeId: Number(button.dataset.timeRemove) })));
   $$('[data-sub-action]').forEach((button) => button.addEventListener("click", () => updateSubscription(item, { action: button.dataset.subAction, studentId: item.studentId, studentName: item.studentName })));
+
+  // Gửi một tin THỬ tới đúng chat của đăng ký này.
+  //
+  // Đây là câu trả lời nhanh nhất cho "Chat Center ghi đã gửi mà Zalo không thấy":
+  // nếu tin thử tới được thì đường gửi còn sống và vấn đề nằm ở thời điểm/nội dung
+  // của lượt gửi cũ; nếu tin thử cũng không tới thì chat này đã mất liên kết với
+  // bot (người dùng chặn, đổi tài khoản, hoặc chat ID cũ) — không phải lỗi lịch.
+  $('[data-sub-test-send]')?.addEventListener("click", async () => {
+    const botId = recordBotId(item);
+    if (!requireVerifiedSource(botId, "đăng ký này", item)) return;
+    const outcome = await runAction(
+      () => api(`/api/admin/chats/${encodeURIComponent(item.chatId)}/retry?botId=${encodeURIComponent(botId)}`, { method: "POST" }),
+      "Không gửi thử được tới chat này"
+    );
+    if (!outcome.ok) return;
+    setDataState("success", `Đã gửi tin thử tới chat ${item.chatId}. Nếu Zalo không hiện tin này, chat đã mất liên kết với bot — kiểm tra tài khoản người nhận trước khi kết luận lịch gửi sai.`);
+  });
 }
 
 // Hộp thoại thêm/sửa một mốc nhận lịch. Bắt buộc chọn ngày đích, đúng như lệnh
@@ -1290,7 +1544,26 @@ $("#groupPolicySave")?.addEventListener("click", async () => {
 $("#botFilter").addEventListener("change", () => { if (workspace) renderAll(); }); $("#themeToggle").addEventListener("click", () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
 $("#closeDialog").addEventListener("click", () => $("#detailDialog").close());
 const rerender = (fn, key) => { pageState[key] = { ...(pageState[key] || {}), page: 1 }; fn(); applyPaginationViews(); };
-$("#userSearch").addEventListener("input", () => rerender(renderUsers, "users")); $("#groupSearch").addEventListener("input", () => rerender(renderGroups, "groups")); $("#notificationFilter").addEventListener("change", () => rerender(renderNotifications, "notifications")); $("#healthFilter").addEventListener("change", () => rerender(renderHealth, "health")); $("#healthType").addEventListener("change", () => rerender(renderHealth, "health"));
+$("#userSearch").addEventListener("input", () => rerender(renderUsers, "users")); $("#groupSearch").addEventListener("input", () => rerender(renderGroups, "groups")); $("#notificationFilter").addEventListener("change", () => rerender(renderNotifications, "notifications")); $("#notificationSearch").addEventListener("input", () => rerender(renderNotifications, "notifications")); $("#healthFilter").addEventListener("change", () => rerender(renderHealth, "health")); $("#healthType").addEventListener("change", () => rerender(renderHealth, "health"));
+
+// Logs & audit: tìm kiếm và lọc dùng chung cho cả bốn danh sách, nên mọi thay đổi
+// đều đưa tất cả về trang 1 — nếu không, người dùng lọc xong sẽ nhìn thấy trang 3
+// của một danh sách chỉ còn 2 dòng.
+function rerenderLogs() {
+  for (const key of ["systemLogs", "deliveryLogs", "deliveryTraces", "auditLogs"]) pageState[key] = { ...(pageState[key] || {}), page: 1 };
+  renderLogs();
+  applyPaginationViews();
+}
+async function reloadLogs() {
+  const outcome = await runAction(() => api("/api/admin/logs?limit=500"), "Không tải lại được log");
+  if (!outcome.ok) return;
+  logs = outcome.result;
+  rerenderLogs();
+}
+$("#logSearch")?.addEventListener("input", rerenderLogs);
+$("#logLevel")?.addEventListener("change", rerenderLogs);
+$("#logResult")?.addEventListener("change", rerenderLogs);
+$("#logRefresh")?.addEventListener("click", reloadLogs);
 $("#directorySearch").addEventListener("input", () => rerender(renderDirectory, "directory")); $("#directoryType").addEventListener("change", () => rerender(renderDirectory, "directory")); $("#addChatButton").addEventListener("click", openCreateChat);
 $("#addUserButton").addEventListener("click", openCreateUser);
 $("#adminForm").addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); try { await api("/api/admin/settings/admins", { method: "POST", body: JSON.stringify(Object.fromEntries(form.entries())) }); event.currentTarget.reset(); $("#adminFormMessage").textContent = "Đã lưu."; await loadData(); } catch (error) { $("#adminFormMessage").textContent = error.message; } });
@@ -1988,6 +2261,40 @@ let chatPreviewVisible = false;
 let chatSending = false;
 let chatNoticeTimer = null;
 
+// Thanh điều khiển tạm dừng trợ lý AI cho ĐÚNG cuộc trò chuyện đang mở.
+//
+// Khai báo ở đây (sau các biến trạng thái Chat Center) vì nó đọc `chatActiveConv`:
+// gọi trước khi khối `let` chạy sẽ ném ReferenceError và làm trắng dashboard.
+function renderChatAiPause() {
+  const bar = $("#chatAiPauseBar");
+  if (!bar) return;
+  if (!chatActiveConv) { bar.innerHTML = ""; return; }
+
+  const { botId, chatId } = chatActiveConv;
+  const entry = activeChatPause(botId, chatId);
+  const globalActive = aiPause?.global?.active === true;
+  const stateBadge = entry
+    ? badge(`AI tắt ở chat này · ${pauseUntilText(entry)}`, "warning")
+    : globalActive ? badge("AI đang tắt toàn bộ", "warning") : badge("AI đang bật", "success");
+  const disabledAttr = globalActive ? ' disabled title="Đang tạm dừng toàn bộ"' : "";
+
+  bar.innerHTML = `${stateBadge}${entry
+    ? `<button type="button" class="small" id="chatAiPauseResume">Bật lại AI</button>`
+    : `<select id="chatAiPauseMinutes" aria-label="Thời gian tạm dừng AI">${aiPauseDurationOptions()}</select><button type="button" class="small" id="chatAiPauseStart"${disabledAttr}>Tạm dừng AI</button>`}`;
+
+  $("#chatAiPauseStart")?.addEventListener("click", () => applyAiPause({
+    scope: "chat",
+    botId,
+    chatId,
+    paused: true,
+    minutes: Number($("#chatAiPauseMinutes")?.value) || 0,
+    reason: "Quản trị viên đang trả lời trực tiếp"
+  }, "Đã tạm dừng trợ lý AI ở cuộc trò chuyện này."));
+  $("#chatAiPauseResume")?.addEventListener("click", () => applyAiPause({
+    scope: "chat", botId, chatId, paused: false
+  }, "Đã bật lại trợ lý AI ở cuộc trò chuyện này."));
+}
+
 const CHAT_MAX_TEXT = 4000;
 const CHAT_POLL_MS = 5000;
 const CHAT_MAX_STREAM_FAILURES = 3;
@@ -2433,6 +2740,7 @@ async function openChatConversation(botId, chatId) {
   $("#chatThreadTitle").textContent = conv?.displayName || chatId;
   $("#chatThreadInfo").textContent = `${botId} · ${chatId}`;
   $("#chatSendForm").classList.remove("hidden");
+  renderChatAiPause();
   renderChatConversations();
   renderChatMessages();
 

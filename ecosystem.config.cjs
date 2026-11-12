@@ -50,7 +50,12 @@ module.exports = {
         watch: false,
         env: {
             NODE_ENV: "production",
-            TZ: "Asia/Ho_Chi_Minh"
+            TZ: "Asia/Ho_Chi_Minh",
+            // Mỗi dòng log do tiến trình tự gắn dấu thời gian Asia/Ho_Chi_Minh
+            // (logTime.js). Cần thiết vì `pm2 logs` in giờ theo múi giờ của DAEMON
+            // PM2, không theo TZ ở trên: VPS để UTC thì log vẫn hiện UTC và một
+            // lượt gửi 06:30 trông như 23:30 hôm trước. Đặt "0" để tắt tiền tố.
+            LOG_VN_TIMESTAMPS: "1"
         }
         // Firebase credentials are read from .env (FIREBASE_SERVICE_ACCOUNT_FILE).
         // If you prefer to inject them through PM2 instead, add:

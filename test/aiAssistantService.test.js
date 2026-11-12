@@ -120,6 +120,10 @@ function buildAssistant(options = {}) {
         getSubscription: options.getSubscription || (() => null),
         isOwner: options.isOwner || (() => false),
         readAiSettings: options.readAiSettings || (() => ({})),
+        // Công tắc tạm dừng đọc từ adminSettings của MÁY đang chạy. Bài kiểm tra
+        // phải độc lập với dữ liệu đó: nếu ai để trợ lý ở trạng thái tạm dừng thì
+        // cả bộ kiểm tra này sẽ đỏ dù mã không sai.
+        readPause: options.readPause || (() => ({ paused: false })),
         logger: options.logger || { warn() {}, error() {}, info() {} }
     });
     return { assistant, sent, send };

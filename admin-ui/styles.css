@@ -1787,3 +1787,93 @@ button[disabled] {
     font-size: var(--fs-xs);
     line-height: 1.5;
 }
+
+/* ---------------------------------------------------------------------------
+   Tạm dừng trợ lý AI
+   --------------------------------------------------------------------------- */
+
+.app-status.warning { color: var(--warning); border-color: var(--warning); background: var(--warning-soft); }
+
+.ai-pause-status {
+    display: flex;
+    align-items: center;
+    gap: var(--s-2);
+    font-size: var(--fs-sm);
+    color: var(--muted);
+}
+
+.ai-pause-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--s-2);
+}
+
+.ai-pause-controls label {
+    display: flex;
+    align-items: center;
+    gap: var(--s-1);
+    font-size: var(--fs-sm);
+    color: var(--text-soft);
+}
+
+.ai-pause-controls input[type="text"] { min-width: 220px; }
+
+.ai-pause-hint {
+    margin: 0;
+    font-size: var(--fs-xs);
+    color: var(--muted);
+    line-height: 1.5;
+}
+
+.ai-pause-list { margin-top: var(--s-3); }
+
+.chat-ai-pause {
+    display: flex;
+    align-items: center;
+    gap: var(--s-2);
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+
+.chat-ai-pause select { max-width: 190px; }
+
+/* Nhật ký gửi tin: mỗi dòng là một lần gửi, không phải một chat. */
+.trace-head {
+    display: flex;
+    align-items: center;
+    gap: var(--s-2);
+    flex-wrap: wrap;
+}
+
+.trace-head code { font-size: var(--fs-xs); }
+
+.trace-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--s-2);
+    margin-top: var(--s-1);
+    font-size: var(--fs-xs);
+    color: var(--muted);
+}
+
+.trace-error {
+    margin: var(--s-1) 0 0;
+    font-size: var(--fs-xs);
+    color: var(--danger);
+    word-break: break-word;
+}
+
+.log-level {
+    display: inline-block;
+    min-width: 46px;
+    text-align: center;
+    font-size: var(--fs-xs);
+    font-weight: 600;
+}
+
+/* Số dòng khớp bộ lọc trên trang Nhận lịch: nhỏ, không chiếm chỗ của bảng. */
+#notificationCount {
+    margin: 0 0 var(--s-3);
+    font-size: var(--fs-sm);
+}

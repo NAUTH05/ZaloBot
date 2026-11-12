@@ -31,6 +31,84 @@ function emptyAiSettings() {
     };
 }
 
+// ---------------------------------------------------------------------------
+// Tạm dừng trợ lý AI khi quản trị viên đang trả lời trực tiếp.
+//
+// Hai phạm vi, cùng một dạng bản ghi:
+//   global : tắt trợ lý ở MỌI cuộc trò chuyện (ví dụ đang trực hỗ trợ một buổi).
+//   chats  : tắt trợ lý ở MỘT cuộc trò chuyện, khóa `botId::chatId` — cùng một
+//            chatId ở hai bot là hai cuộc trò chuyện khác nhau.
+//
+// `until` = null nghĩa là "cho tới khi bật lại". Hết hạn được xét LÚC ĐỌC, nên
+// không cần bộ hẹn giờ nào: quá `until` thì trợ lý tự chạy lại, và mục đã hết hạn
+// bị bỏ khỏi `chats` ngay lần ghi kế tiếp.
+// ---------------------------------------------------------------------------
+const AI_PAUSE_MAX_MINUTES = 24 * 60;
+
+function emptyPauseEntry() {
+    return { paused: false, until: null, reason: null, updatedAt: null, updatedBy: null };
+}
+
+function emptyAiPause() {
+    return { global: emptyPauseEntry(), chats: {} };
+}
+
+function normalizePauseUntil(value) {
+    if (value == null || value === "") return null;
+    const parsed = Date.parse(String(value));
+    return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
+}
+
+function isPauseExpired(until, now) {
+    if (!until) return false;
+    const parsed = Date.parse(until);
+    if (!Number.isFinite(parsed)) return false;
+    return parsed <= new Date(now).getTime();
+}
+
+function normalizePauseEntry(raw, now) {
+    const source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+    const until = normalizePauseUntil(source.until);
+    const expired = isPauseExpired(until, now);
+    const reason = typeof source.reason === "string" && source.reason.trim()
+        ? source.reason.trim().slice(0, 200)
+        : null;
+    return {
+        paused: source.paused === true && !expired,
+        until,
+        reason,
+        updatedAt: normalizePauseUntil(source.updatedAt),
+        updatedBy: typeof source.updatedBy === "string" && source.updatedBy.trim()
+            ? source.updatedBy.trim().slice(0, 64)
+            : null,
+        expired
+    };
+}
+
+function normalizeAiPause(raw, now = new Date()) {
+    const source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+    const global = normalizePauseEntry(source.global, now);
+    const chats = {};
+    const chatSource = source.chats && typeof source.chats === "object" && !Array.isArray(source.chats)
+        ? source.chats
+        : {};
+    for (const [key, entry] of Object.entries(chatSource)) {
+        if (!String(key).includes("::")) continue;
+        const normalized = normalizePauseEntry(entry, now);
+        // Mục đã hết hạn hoặc đã bật lại bị bỏ hẳn: bản đồ này không được phình
+        // theo số cuộc trò chuyện từng tạm dừng.
+        if (!normalized.paused) continue;
+        delete normalized.expired;
+        chats[String(key)] = normalized;
+    }
+    delete global.expired;
+    return { global, chats };
+}
+
+function pauseKey(botId, chatId) {
+    return `${String(botId || "").trim()}::${String(chatId || "").trim()}`;
+}
+
 // Đọc lại từ dữ liệu đã lưu. Giá trị hỏng/rác ⇒ null (theo .env), không đoán.
 function normalizeAiSettings(raw) {
     const source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
@@ -74,7 +152,7 @@ function normalizeAdmin(input = {}, existing = {}) {
 }
 
 function readSettings(filePath = FILE_PATH) {
-    const fallback = { schemaVersion: SCHEMA_VERSION, admins: [], defaultPageSize: DEFAULT_PAGE_SIZE, maxBatchSize: DEFAULT_MAX_BATCH_SIZE, batchDelayMs: DEFAULT_BATCH_DELAY_MS, ai: emptyAiSettings() };
+    const fallback = { schemaVersion: SCHEMA_VERSION, admins: [], defaultPageSize: DEFAULT_PAGE_SIZE, maxBatchSize: DEFAULT_MAX_BATCH_SIZE, batchDelayMs: DEFAULT_BATCH_DELAY_MS, ai: emptyAiSettings(), aiPause: emptyAiPause() };
     const data = readJsonStore(filePath, FILE_PATH, fallback);
     const admins = Array.isArray(data?.admins) ? data.admins.map((item) => normalizeAdmin(item)).filter(Boolean) : [];
     const parsedPageSize = Number(data?.defaultPageSize);
@@ -87,7 +165,15 @@ function readSettings(filePath = FILE_PATH) {
     const batchDelayMs = Number.isInteger(parsedDelay) && parsedDelay >= 0 && parsedDelay <= MAX_BATCH_DELAY_MS
         ? parsedDelay
         : DEFAULT_BATCH_DELAY_MS;
-    return { schemaVersion: SCHEMA_VERSION, admins, defaultPageSize, maxBatchSize, batchDelayMs, ai: normalizeAiSettings(data?.ai) };
+    return {
+        schemaVersion: SCHEMA_VERSION,
+        admins,
+        defaultPageSize,
+        maxBatchSize,
+        batchDelayMs,
+        ai: normalizeAiSettings(data?.ai),
+        aiPause: normalizeAiPause(data?.aiPause)
+    };
 }
 
 function writeSettings(settings, filePath = FILE_PATH) {
@@ -97,7 +183,8 @@ function writeSettings(settings, filePath = FILE_PATH) {
         defaultPageSize: settings.defaultPageSize || DEFAULT_PAGE_SIZE,
         maxBatchSize: settings.maxBatchSize || DEFAULT_MAX_BATCH_SIZE,
         batchDelayMs: Number.isInteger(settings.batchDelayMs) ? settings.batchDelayMs : DEFAULT_BATCH_DELAY_MS,
-        ai: normalizeAiSettings(settings.ai)
+        ai: normalizeAiSettings(settings.ai),
+        aiPause: normalizeAiPause(settings.aiPause)
     });
 }
 
@@ -223,20 +310,74 @@ function setAiSettings(patch = {}, filePath = FILE_PATH) {
     return settings;
 }
 
+// Bật/tắt tạm dừng trợ lý AI.
+//
+// `minutes` = 0 hoặc null nghĩa là "cho tới khi bật lại". Giá trị sai bị TỪ CHỐI
+// (ném lỗi ⇒ 400) thay vì âm thầm đổi thành "không giới hạn" — người vận hành
+// vừa bấm nút và cần biết nó có hiệu lực đúng như ý.
+function setAiPause(patch = {}, filePath = FILE_PATH) {
+    if (!patch || typeof patch !== "object" || Array.isArray(patch)) {
+        throw new Error("aiPause must be an object");
+    }
+    const scope = patch.scope === "chat" ? "chat" : patch.scope === "global" ? "global" : null;
+    if (!scope) throw new Error('aiPause.scope phải là "global" hoặc "chat"');
+
+    const paused = patch.paused !== false;
+    const minutesRaw = patch.minutes;
+    const minutes = minutesRaw === undefined || minutesRaw === null || minutesRaw === ""
+        ? 0
+        : Number(minutesRaw);
+    if (!Number.isFinite(minutes) || minutes < 0 || minutes > AI_PAUSE_MAX_MINUTES) {
+        throw new Error(`minutes must be between 0 and ${AI_PAUSE_MAX_MINUTES}`);
+    }
+
+    const settings = readSettings(filePath);
+    const now = new Date();
+    const entry = {
+        paused,
+        until: paused && minutes > 0 ? new Date(now.getTime() + minutes * 60000).toISOString() : null,
+        reason: typeof patch.reason === "string" && patch.reason.trim() ? patch.reason.trim().slice(0, 200) : null,
+        updatedAt: now.toISOString(),
+        updatedBy: typeof patch.actor === "string" && patch.actor.trim() ? patch.actor.trim().slice(0, 64) : null
+    };
+
+    if (scope === "global") {
+        settings.aiPause = { ...settings.aiPause, global: entry };
+    } else {
+        const botId = String(patch.botId || "").trim();
+        const chatId = String(patch.chatId || "").trim();
+        if (!botId) throw new Error("aiPause.botId là bắt buộc khi tạm dừng theo cuộc trò chuyện");
+        if (!chatId) throw new Error("aiPause.chatId là bắt buộc khi tạm dừng theo cuộc trò chuyện");
+        const chats = { ...settings.aiPause.chats };
+        const key = pauseKey(botId, chatId);
+        if (paused) chats[key] = entry;
+        else delete chats[key];
+        settings.aiPause = { ...settings.aiPause, chats };
+    }
+
+    writeSettings(settings, filePath);
+    return settings;
+}
+
 module.exports = {
     AI_LIMIT_RULES,
+    AI_PAUSE_MAX_MINUTES,
     DEFAULT_BATCH_DELAY_MS,
     DEFAULT_MAX_BATCH_SIZE,
     DEFAULT_PAGE_SIZE,
     FILE_PATH,
     MAX_BATCH_DELAY_MS,
     MAX_BATCH_SIZE_LIMIT,
+    emptyAiPause,
     emptyAiSettings,
     getAdminSettings,
     getConfiguredAdminIds,
     isConfiguredAdmin,
+    normalizeAiPause,
     normalizeAiSettings,
+    pauseKey,
     removeAdmin,
+    setAiPause,
     setAiSettings,
     setBatchDelayMs,
     setDefaultPageSize,

@@ -40,7 +40,7 @@ All endpoints below require the HttpOnly `zalobot_admin` session cookie except l
 | `POST /zalobot/api/admin/chats/:chatId/retry` | Send a test through the existing `sendNotification()` path |
 | `GET /zalobot/api/admin/notifications` | Active schedule registrations |
 | `GET /zalobot/api/admin/audit` | Recent administrative and authentication events |
-| `GET /zalobot/api/admin/logs` | Bot warnings/errors, delivery errors, and audit events |
+| `GET /zalobot/api/admin/logs` | Bot warnings/errors, delivery errors, per-delivery trace (`deliveries`), and audit events. `?limit=` up to 1000 |
 | `POST /zalobot/api/admin/chats` | Add or update a chat-directory record |
 | `DELETE /zalobot/api/admin/chats/:chatId` | Soft-remove by default; `?hard=1` permanently deletes the record |
 | `GET /zalobot/api/admin/settings` | List configured admin user/chat identities |
@@ -58,6 +58,8 @@ All endpoints below require the HttpOnly `zalobot_admin` session cookie except l
 | `POST /zalobot/api/admin/friend-requests/test-notification` | Send a test notification on one channel |
 | `POST /zalobot/api/admin/friend-requests/retry-notification` | Retry only the failed channel of one request |
 | `POST /zalobot/api/admin/group-policy` | Per-group reply mode: `{ botId, chatId, mode }` where `mode` is `mention` or `ingest`; `null` clears the override |
+| `GET /zalobot/api/admin/ai-pause` | Current AI assistant pause state: global entry plus one entry per conversation |
+| `POST /zalobot/api/admin/ai-pause` | Pause or resume the assistant: `{ scope: "global"\|"chat", botId, chatId, paused, minutes, reason }` |
 
 State-changing requests require same-origin `Origin` headers when a browser supplies one. The server also applies security headers, request-size limits, and a basic IP rate limit.
 
@@ -454,3 +456,51 @@ only makes the bot a listener.
 
 That switch turns the gate off for **all** groups at once, which is why it also
 produces the greeting storm. Keep it at `1` and use the per-group selector.
+
+# Diagnosing "Chat Center says sent, Zalo shows nothing"
+
+The Chat Center writes an outbound record **only after the provider resolved
+successfully**, and since this version it also writes the record when the provider
+refuses (status `failed`, with the error). So a `✓` means Zalo accepted the send;
+it does not prove the message was rendered on the recipient's device.
+
+Order of checks:
+
+1. **Logs & audit → Nhật ký gửi tin.** Every scheduled delivery leaves one row with
+   the bot, the chat, the operation, the result and the `message_id` Zalo returned.
+   A `sent` row with a message id means the API call succeeded; a `failed` row shows
+   the exact reason (410 invalid chat, 403/422 no permission, 429 rate limit).
+2. **Nhận lịch → Quản lý → Gửi thử tới chat này.** This sends a test message through
+   the same `sendNotification()` path, right now. If the test arrives, the delivery
+   path is alive and the problem was specific to that run (content, timing, provider
+   hiccup). If the test does **not** arrive either, the chat has lost its link to the
+   bot — the user blocked it, switched accounts, or the stored Chat ID is stale — and
+   the schedule is not at fault.
+3. **Check the bot identity.** A subscription belongs to one bot. The same Chat ID
+   under two bots is two different conversations; looking at the wrong bot's account
+   shows nothing even though the send succeeded.
+
+The trace buffer lives in memory and is lost on restart, which is why every row
+carries a Vietnam timestamp to match `pm2 logs`.
+
+# Vietnam timestamps in `pm2 logs`
+
+`pm2 logs` prints timestamps in the **PM2 daemon's** timezone, not the app's `TZ`.
+On a UTC host a 06:30 delivery shows as 23:30 of the previous day. The process now
+prefixes every log line with `[dd/mm/yyyy HH:mm:ss]` in `Asia/Ho_Chi_Minh`
+(`logTime.js`, enabled by `LOG_VN_TIMESTAMPS=1`, set `0` to disable). Dashboard log
+views use the same timezone explicitly, so they never depend on the operator's
+browser settings.
+
+# AI assistant pause
+
+Settings → **Tạm dừng trợ lý AI** pauses the conversational assistant globally, and
+Chat Center can pause it for one conversation. While paused the assistant does not
+call the model and stays silent — the intended mode while an admin answers users by
+hand.
+
+Not affected: `/` commands, deterministic command batches, pending confirmations,
+and every scheduled notification. The pause is stored in `adminSettings.aiPause`
+(`global` plus a `botId::chatId` map), evaluated at read time, so it expires on its
+own without a timer and survives a restart. A banner stays visible on every tab
+while a pause is active.

@@ -32,12 +32,15 @@ const {
     getAdminSettings,
     getConfiguredAdminIds,
     removeAdmin,
+    setAiPause,
     setAiSettings,
     setBatchDelayMs,
     setDefaultPageSize,
     setMaxBatchSize,
     upsertAdmin
 } = require("./adminSettings");
+const { describeAiPause } = require("./aiPause");
+const { getDeliveryTraceStats, listDeliveryTraces } = require("./deliveryTrace");
 const { findCommand, getCommandRegistry } = require("./commandRegistry");
 // Chính sách phản hồi theo từng nhóm (nhóm hỗ trợ cần nhận mọi tin).
 const groupPolicy = require("./groupPolicy");
@@ -410,7 +413,7 @@ function audit(action, request, details = {}) {
             console.warn(`[Audit] tệp audit không đọc được (${error.message}); bắt đầu lại từ đầu`);
             data = { events: [] };
         }
-        const events = Array.isArray(data?.events) ? data.events.slice(-499) : [];
+        const events = Array.isArray(data?.events) ? data.events.slice(-999) : [];
         events.push(event);
         writeJsonStore(filePath, filePath, { events });
     } catch (error) {
@@ -1844,7 +1847,58 @@ async function handleApi(request, response, url, options = {}) {
     }
     if (url.pathname === `${API_PREFIX}/audit` && request.method === "GET") return json(response, 200, { events: recentAudit(100) });
     if (url.pathname === `${API_PREFIX}/logs` && request.method === "GET") {
-        return json(response, 200, { system: getSystemLogs(100), deliveryErrors: dashboardSummary().recentErrors, audit: recentAudit(100) });
+        // `limit` cho phép xem sâu hơn 100 dòng mặc định khi đang truy một sự cố.
+        const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 200, 1), 1000);
+        return json(response, 200, {
+            system: getSystemLogs(limit),
+            deliveryErrors: dashboardSummary().recentErrors,
+            audit: recentAudit(limit),
+            // Nhật ký gửi tin theo lịch (bộ đệm trong bộ nhớ — xem deliveryTrace.js).
+            deliveries: listDeliveryTraces({ limit, botId: url.searchParams.get("botId") || null }),
+            deliveryStats: getDeliveryTraceStats(),
+            limits: { system: limit, audit: limit }
+        });
+    }
+
+    // ---------------------------------------------------------------------
+    // TẠM DỪNG TRỢ LÝ AI khi quản trị viên trả lời trực tiếp.
+    //
+    //   GET  .../ai-pause   — trạng thái hiện tại (toàn cục + từng cuộc trò chuyện)
+    //   POST .../ai-pause   — { scope, botId, chatId, paused, minutes, reason }
+    //
+    // Tạm dừng chỉ chặn đường gọi mô hình. Lệnh có dấu "/", lô lệnh tất định và
+    // thông báo theo lịch vẫn chạy — đây là công tắc "trợ lý im lặng", không phải
+    // công tắc dừng bot.
+    // ---------------------------------------------------------------------
+    if (url.pathname === `${API_PREFIX}/ai-pause` && request.method === "GET") {
+        return json(response, 200, { pause: describeAiPause() });
+    }
+    if (url.pathname === `${API_PREFIX}/ai-pause` && request.method === "POST") {
+        let body;
+        try { body = await readBody(request); } catch (error) { return json(response, 400, { error: error.message }); }
+        try {
+            const updated = setAiPause({
+                scope: body?.scope,
+                botId: body?.botId,
+                chatId: body?.chatId,
+                paused: body?.paused !== false,
+                minutes: body?.minutes,
+                reason: body?.reason,
+                actor: request.admin?.username || "dashboard"
+            });
+            const pause = describeAiPause(updated.aiPause);
+            audit(body?.paused === false ? "ai_pause.resume" : "ai_pause.pause", request, {
+                scope: body?.scope || null,
+                botId: body?.botId || null,
+                chatId: body?.chatId || null,
+                minutes: body?.minutes ?? null,
+                result: "success"
+            });
+            return json(response, 200, { ok: true, pause });
+        } catch (error) {
+            audit("ai_pause.update", request, { result: "failed", error: error.message });
+            return json(response, 400, { error: error.message });
+        }
     }
 
     // ---------------------------------------------------------------------

@@ -201,4 +201,31 @@ if (!/không gộp hai danh tính/i.test(app)) fail("Verify source must state it
 // Bản ghi chưa xác minh KHÔNG được mở khoá Quản lý chỉ để giao diện gọn hơn.
 if (!/function actionButton[\s\S]{0,500}disabled/.test(app)) fail("Unverified records must keep their Manage action disabled");
 
+// Tìm kiếm trên trang Nhận lịch: danh sách này có thể dài hàng trăm dòng, nên tra
+// bằng tên/MSSV/chat ID phải làm được ngay trên giao diện.
+if (!html.includes('id="notificationSearch"')) fail("Notification subscriptions must offer a search box");
+if (!app.includes("subscriptionSearchText")) fail("Notification search must match user, MSSV, chat and times");
+if (!app.includes("notificationCount")) fail("Notification search must show how many rows matched");
+
+// Logs & audit: phải gom đủ bốn nguồn và hiển thị giờ Việt Nam, không theo múi
+// giờ trình duyệt — nếu không sẽ lệch với `pm2 logs` và với giờ người dùng nhắn.
+if (!html.includes('id="logSearch"')) fail("Logs panel must offer a search box");
+if (!html.includes('id="deliveryTraceList"')) fail("Logs panel must render the per-delivery trace list");
+if (!html.includes('id="auditLogList"')) fail("Logs panel must render the admin audit list");
+if (!app.includes("formatDateTimeVN")) fail("Log timestamps must be rendered in Asia/Ho_Chi_Minh");
+if (!app.includes("/api/admin/logs?limit=")) fail("Logs panel must be able to reload with a larger limit");
+
+// Tạm dừng trợ lý AI: phải điều khiển được cả toàn cục và từng cuộc trò chuyện,
+// và phải nói rõ phạm vi để người vận hành không tưởng nhầm là đã tắt bot.
+if (!html.includes('id="aiPausePanel"')) fail("Settings must render the AI pause panel");
+if (!html.includes('id="aiPauseBanner"')) fail("A paused assistant must stay visible outside the Settings tab");
+if (!html.includes('id="chatAiPauseBar"')) fail("Chat Center must allow pausing the assistant for one conversation");
+if (!app.includes("/api/admin/ai-pause")) fail("AI pause must go through the authenticated API, not local state");
+if (!app.includes("scope: \"chat\"")) fail("AI pause must support a per-conversation scope");
+if (!app.includes("function renderChatAiPause")) fail("Chat Center must render the per-conversation AI pause control");
+
+// Gửi thử tới đúng chat của một đăng ký: cách nhanh nhất để phân biệt "lịch gửi
+// sai" với "chat đã mất liên kết với bot".
+if (!app.includes("data-sub-test-send")) fail("A subscription must offer a test send to its own chat");
+
 console.log("Admin UI validation passed");
